@@ -96,14 +96,19 @@ async function fetchIsinToSymbol(headers: Record<string, string>): Promise<Map<s
   return map;
 }
 
-async function fetchOpenPositionTickers(headers: Record<string, string>): Promise<Set<string>> {
-  const res = await fetchWithRetry(`${BASE_URL}/equity/positions`, headers);
-  if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`Trading212 positions error ${res.status}: ${text}`);
+async function fetchOpenPositionTickers(headers: Record<string, string>): Promise<Set<string> | null> {
+  // Advisory only: used to filter AutoInvest buys to still-open positions.
+  // If the key lacks the "Positions" scope (403) or the call otherwise fails,
+  // return null — callers skip the filter rather than treating "no data" as
+  // "empty set" (which would drop every AutoInvest buy).
+  try {
+    const res = await fetchWithRetry(`${BASE_URL}/equity/positions`, headers);
+    if (!res.ok) return null;
+    const positions: Array<{ instrument: { ticker: string; isin: string; name: string; currency: string } }> = await res.json();
+    return new Set(positions.map((p) => p.instrument.ticker));
+  } catch {
+    return null;
   }
-  const positions: Array<{ instrument: { ticker: string; isin: string; name: string; currency: string } }> = await res.json();
-  return new Set(positions.map((p) => p.instrument.ticker));
 }
 
 export async function fetchTrading212Orders(apiKey: string): Promise<ImportResult> {
@@ -157,7 +162,7 @@ export async function fetchTrading212Orders(apiKey: string): Promise<ImportResul
 
     // AUTOINVEST filter only makes sense for buys (sells shouldn't come from autoinvest,
     // but be defensive — never filter sells on open-ticker check).
-    if (isBuy) {
+    if (isBuy && openTickers) {
       const isAutoInvest = order.initiatedFrom === "AUTOINVEST";
       if (isAutoInvest && !openTickers.has(order.ticker)) continue;
     }
