@@ -28,6 +28,7 @@ import {
   aggregateHoldings,
   buildComparisonSeries,
   fmtShares,
+  poolPositions,
   SeriesPoint,
 } from "@/lib/portfolio";
 import { ThemeToggle, useChartColors } from "@/lib/theme";
@@ -172,15 +173,24 @@ export default function PortfolioPage({
       setSeries([]);
       return;
     }
+    const pooled = poolPositions(holdings);
+    if (pooled.length === 0) {
+      // Everything was sold — nothing to chart. Realized history is out of scope.
+      setSeries([]);
+      return;
+    }
     let cancelled = false;
     setChartLoading(true);
 
-    const firstDate = holdings
-      .map((h) => h.purchaseDate)
+    const firstDate = pooled
+      .map((p) => p.firstPurchaseDate)
       .reduce((a, b) => (a < b ? a : b));
     const fromMs = new Date(firstDate).getTime();
     const toMs = Date.now();
-    const symbols = Array.from(new Set(holdings.map((h) => h.symbol)));
+    const symbols = Array.from(new Set(pooled.map((p) => p.symbol)));
+    const chartHoldings = holdings.filter(
+      (h) => h.purchaseDate >= firstDate && symbols.includes(h.symbol)
+    );
 
     Promise.all([
       ...symbols.map((s) =>
@@ -204,7 +214,7 @@ export default function PortfolioPage({
           priceMap[key] = pts;
         }
       }
-      setSeries(buildComparisonSeries(holdings, priceMap, benchMap));
+      setSeries(buildComparisonSeries(chartHoldings, priceMap, benchMap));
       setChartLoading(false);
     });
 
