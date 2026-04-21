@@ -13,7 +13,8 @@ import {
 import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
 import { getQuote, StockQuote } from "@/lib/finnhub";
-import { getHistoricalCloses, HistoricalPoint } from "@/lib/yahoo";
+import { HistoricalPoint } from "@/lib/yahoo";
+import { getCachedHistoricalCloses } from "@/lib/historical-cache";
 import { closeOnOrBefore, fmtShares, poolPositions } from "@/lib/portfolio";
 import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { ArrowLeft, Trash2 } from "lucide-react";
@@ -101,7 +102,18 @@ export default function TickerPage({
   }, [user, id, symbol]);
 
   useEffect(() => {
-    getQuote(symbol).then(setQuote);
+    let cancelled = false;
+    const fetchQuote = () => {
+      getQuote(symbol).then((q) => {
+        if (!cancelled) setQuote(q);
+      });
+    };
+    fetchQuote();
+    const interval = setInterval(fetchQuote, 120_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [symbol]);
 
   useEffect(() => {
@@ -112,7 +124,7 @@ export default function TickerPage({
     const first = lots
       .map((l) => l.purchaseDate)
       .reduce((a, b) => (a < b ? a : b));
-    getHistoricalCloses(symbol, new Date(first).getTime(), Date.now()).then(
+    getCachedHistoricalCloses(symbol, new Date(first).getTime(), Date.now()).then(
       setHistory
     );
   }, [lots, symbol]);

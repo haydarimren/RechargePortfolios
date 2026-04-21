@@ -15,7 +15,7 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
-import { getQuote, StockQuote } from "@/lib/finnhub";
+import { getQuotes, StockQuote } from "@/lib/finnhub";
 import { aggregateHoldings } from "@/lib/portfolio";
 import { ThemeToggle } from "@/lib/theme";
 import { ensureUserProfile, useDisplayName } from "@/lib/users";
@@ -113,12 +113,10 @@ export default function HomePage() {
     const missing = symbols.filter((s) => !(s in quotes));
     if (missing.length === 0) return;
     let cancelled = false;
-    Promise.all(missing.map((s) => getQuote(s).then((q) => [s, q] as const))).then(
-      (pairs) => {
-        if (cancelled) return;
-        setQuotes((prev) => ({ ...prev, ...Object.fromEntries(pairs) }));
-      }
-    );
+    getQuotes(missing).then((map) => {
+      if (cancelled) return;
+      setQuotes((prev) => ({ ...prev, ...map }));
+    });
     return () => {
       cancelled = true;
     };
@@ -133,13 +131,13 @@ export default function HomePage() {
       .map(([s]) => s);
     if (nulls.length === 0) return;
     const t = setTimeout(() => {
-      Promise.all(nulls.map((s) => getQuote(s).then((q) => [s, q] as const))).then(
-        (pairs) => {
-          const fresh = pairs.filter(([, q]) => q !== null);
-          if (fresh.length === 0) return;
-          setQuotes((prev) => ({ ...prev, ...Object.fromEntries(fresh) }));
-        }
-      );
+      getQuotes(nulls).then((map) => {
+        const fresh = Object.fromEntries(
+          Object.entries(map).filter(([, q]) => q !== null)
+        );
+        if (Object.keys(fresh).length === 0) return;
+        setQuotes((prev) => ({ ...prev, ...fresh }));
+      });
     }, 30_000);
     return () => clearTimeout(t);
   }, [quotes]);
@@ -149,13 +147,13 @@ export default function HomePage() {
     const id = setInterval(() => {
       const keys = Object.keys(quotesRef.current);
       if (keys.length === 0) return;
-      Promise.all(keys.map((s) => getQuote(s).then((q) => [s, q] as const))).then(
-        (pairs) => {
-          const fresh = pairs.filter(([, q]) => q !== null);
-          if (fresh.length === 0) return;
-          setQuotes((prev) => ({ ...prev, ...Object.fromEntries(fresh) }));
-        }
-      );
+      getQuotes(keys).then((map) => {
+        const fresh = Object.fromEntries(
+          Object.entries(map).filter(([, q]) => q !== null)
+        );
+        if (Object.keys(fresh).length === 0) return;
+        setQuotes((prev) => ({ ...prev, ...fresh }));
+      });
     }, 120_000);
     return () => clearInterval(id);
   }, []);

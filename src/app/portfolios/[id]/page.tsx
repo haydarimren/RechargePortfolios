@@ -21,8 +21,9 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
-import { getQuote, StockQuote } from "@/lib/finnhub";
-import { getHistoricalCloses, HistoricalPoint } from "@/lib/yahoo";
+import { getQuotes, StockQuote } from "@/lib/finnhub";
+import { HistoricalPoint } from "@/lib/yahoo";
+import { getCachedHistoricalCloses } from "@/lib/historical-cache";
 import {
   aggregateHoldings,
   buildComparisonSeries,
@@ -153,11 +154,9 @@ export default function PortfolioPage({
     if (symbols.length === 0) return;
     let cancelled = false;
     const fetchAll = () => {
-      Promise.all(
-        symbols.map((s) => getQuote(s).then((q) => [s, q] as const))
-      ).then((pairs) => {
+      getQuotes(symbols).then((map) => {
         if (cancelled) return;
-        setQuotes((prev) => ({ ...prev, ...Object.fromEntries(pairs) }));
+        setQuotes((prev) => ({ ...prev, ...map }));
       });
     };
     fetchAll();
@@ -185,12 +184,12 @@ export default function PortfolioPage({
 
     Promise.all([
       ...symbols.map((s) =>
-        getHistoricalCloses(s, fromMs, toMs).then(
+        getCachedHistoricalCloses(s, fromMs, toMs).then(
           (pts) => [s, pts] as [string, HistoricalPoint[]]
         )
       ),
       ...BENCHMARKS.map((b) =>
-        getHistoricalCloses(b, fromMs, toMs).then(
+        getCachedHistoricalCloses(b, fromMs, toMs).then(
           (pts) => [`__bench__${b}`, pts] as [string, HistoricalPoint[]]
         )
       ),
