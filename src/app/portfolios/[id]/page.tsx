@@ -302,10 +302,10 @@ export default function PortfolioPage({
       const qqq = typeof p.QQQ === "number" ? p.QQQ : null;
       const point: SeriesPoint = {
         date: p.date,
-        portfolio: (p.portfolio / baseP) * 100,
+        portfolio: (p.portfolio / baseP - 1) * 100,
       };
-      if (baseSPY && spy !== null) point.SPY = (spy / baseSPY) * 100;
-      if (baseQQQ && qqq !== null) point.QQQ = (qqq / baseQQQ) * 100;
+      if (baseSPY && spy !== null) point.SPY = (spy / baseSPY - 1) * 100;
+      if (baseQQQ && qqq !== null) point.QQQ = (qqq / baseQQQ - 1) * 100;
       return point;
     });
   }, [series]);
@@ -623,7 +623,7 @@ export default function PortfolioPage({
                 <p className="text-sm text-fg-dim mt-1">
                   {isOwner
                     ? "If the same amounts had been invested in SPY or QQQ on the same dates."
-                    : "% return indexed to 100 at first investment, vs hypothetical SPY / QQQ."}
+                    : "% return since first investment, vs hypothetical SPY / QQQ."}
                 </p>
               </div>
             </div>
@@ -705,7 +705,7 @@ export default function PortfolioPage({
                             ? v >= 1000
                               ? `$${(v / 1000).toFixed(0)}k`
                               : `$${v.toFixed(0)}`
-                            : `${v.toFixed(0)}`
+                            : `${v >= 0 ? "+" : ""}${v.toFixed(0)}%`
                         }
                       />
                       <Tooltip
@@ -724,7 +724,7 @@ export default function PortfolioPage({
                           typeof v === "number"
                             ? isOwner
                               ? fmtMoney(v)
-                              : `${v.toFixed(1)}`
+                              : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`
                             : String(v)
                         }
                       />
