@@ -1,0 +1,181 @@
+@import "tailwindcss";
+
+/* ---------- Theme variables ---------- */
+:root,
+[data-theme="dark"] {
+  --bg: #111418;
+  --bg-2: #161a1f;
+  --bg-3: #1d2128;
+  --fg: #e6e8eb;
+  --fg-dim: #a4abb5;
+  --fg-fade: #6c7380;
+  --line: #242932;
+  --line-strong: #2f3642;
+  --accent: #5b8def;
+  --accent-soft: #7ea4f2;
+  --pos: #56c69c;
+  --neg: #e87e83;
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: #f7f5f1;
+  --bg-2: #efece6;
+  --bg-3: #e4e0d7;
+  --fg: #1a1a1a;
+  --fg-dim: #4a4a48;
+  --fg-fade: #8a867e;
+  --line: #d8d3c8;
+  --line-strong: #c4bfb3;
+  --accent: #2f4f7d;
+  --accent-soft: #4a6fa0;
+  --pos: #3d7a4f;
+  --neg: #a84a3e;
+  --font-sans: var(--font-plex), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SF Mono", monospace;
+  color-scheme: light;
+}
+
+/* ---------- Tailwind tokens backed by CSS vars ---------- */
+@theme {
+  --color-bg: var(--bg);
+  --color-bg-2: var(--bg-2);
+  --color-bg-3: var(--bg-3);
+  --color-fg: var(--fg);
+  --color-fg-dim: var(--fg-dim);
+  --color-fg-fade: var(--fg-fade);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-pos: var(--pos);
+  --color-neg: var(--neg);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+/* ---------- Base ---------- */
+@layer base {
+  html {
+    background-color: var(--bg);
+    color: var(--fg);
+  }
+  body {
+    background-color: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: var(--bg);
+  }
+
+  input[type="date"]::-webkit-calendar-picker-indicator {
+    opacity: 0.6;
+    cursor: pointer;
+  }
+  [data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+  }
+}
+
+/* ---------- Components ---------- */
+@layer components {
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum", "zero";
+  }
+
+  .label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-fade);
+  }
+
+  .card {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .btn-primary {
+    background: var(--fg);
+    color: var(--bg);
+    font-family: var(--font-sans);
+    font-weight: 500;
+    font-size: 0.875rem;
+    padding: 0.55rem 1rem;
+    border-radius: 8px;
+    border: 1px solid var(--fg);
+    transition: background-color 0.18s ease, border-color 0.18s ease,
+      transform 0.12s ease;
+  }
+  .btn-primary:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:active {
+    transform: scale(0.98);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    padding: 0.5rem 0.9rem;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  .btn-ghost:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .field {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.65rem 0.85rem;
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+  }
+  .field:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--bg-2);
+  }
+  .field::placeholder {
+    color: var(--fg-fade);
+  }
+}
+
+/* ---------- Animations ---------- */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-up {
+  animation: fade-up 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
