@@ -174,12 +174,19 @@ export async function fetchTrading212Orders(apiKey: string): Promise<ImportResul
       ? rawPrice / 100
       : rawPrice;
 
-    const symbol = isinToSymbol.get(order.instrument.isin ?? "") ?? stripT212Suffix(order.ticker);
-    // Derive a Yahoo-compatible symbol from the raw T212 ticker + currency.
+    const isinSymbol = isinToSymbol.get(order.instrument.isin ?? "");
+    const symbol = isinSymbol ?? stripT212Suffix(order.ticker);
+    // For USD instruments we trust the shortName from T212's metadata call
+    // for Yahoo too — it's up-to-date and survives corporate renames
+    // (e.g. ASTS pre-merger lots where T212's ticker is a stale NPAa, but
+    // shortName is ASTS). For non-USD we still need an exchange suffix,
+    // so parse the ticker via toYahooSymbol.
     // `null` means we couldn't confidently pick an exchange — fall back to
     // the bare symbol at read time (works for unambiguous US listings).
     const yahooSymbol =
-      toYahooSymbol(order.ticker, order.instrument?.currency) ?? undefined;
+      order.instrument?.currency === "USD" && isinSymbol
+        ? isinSymbol
+        : toYahooSymbol(order.ticker, order.instrument?.currency) ?? undefined;
 
     // T212 sell fills may report quantity as a negative number; normalize.
     const shares = Math.abs(fill.quantity);

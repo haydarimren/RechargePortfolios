@@ -102,10 +102,17 @@ export default function TickerPage({
     };
   }, [user, id, symbol]);
 
-  // Use the Yahoo-resolved symbol when any lot has one. Falls back to the
-  // route symbol (works for unambiguous US listings).
+  // Use the Yahoo-resolved symbol when any lot has one — but only if it
+  // plausibly matches the route symbol. A stale pre-merger mapping
+  // (e.g. ASTS lot with yahooSymbol "NPA") must not leak into the price
+  // fetch, or we 404 and the page looks broken. "Plausibly matches" =
+  // starts with the route symbol (allows variants like "ASTS.L").
   const yahooSymbol = useMemo(() => {
-    for (const l of lots) if (l.yahooSymbol) return l.yahooSymbol;
+    const route = symbol.toUpperCase();
+    for (const l of lots) {
+      const ys = l.yahooSymbol?.toUpperCase();
+      if (ys && ys.startsWith(route)) return l.yahooSymbol!;
+    }
     return symbol;
   }, [lots, symbol]);
 

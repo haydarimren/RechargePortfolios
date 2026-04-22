@@ -549,8 +549,19 @@ export default function PortfolioPage({
           // imported before these fields existed. Without this, re-syncing
           // doesn't help tickers like VUAA that need `.L` to quote.
           const patch: Record<string, unknown> = {};
-          if (!target.yahooSymbol && order.yahooSymbol) patch.yahooSymbol = order.yahooSymbol;
+          // Refresh yahooSymbol when the import gives us something different
+          // from what's stored — handles corporate renames (e.g. ASTS
+          // pre-merger lots that were imported as NPA before the T212
+          // shortName fix landed).
+          if (order.yahooSymbol && target.yahooSymbol !== order.yahooSymbol) {
+            patch.yahooSymbol = order.yahooSymbol;
+          }
           if (!target.isin && order.isin) patch.isin = order.isin;
+          // Same logic for `symbol` — if T212 metadata now reports a
+          // different shortName, align the stored symbol with it.
+          if (order.symbol && target.symbol !== order.symbol) {
+            patch.symbol = order.symbol;
+          }
           if (Object.keys(patch).length > 0) {
             batch.update(doc(db, "portfolios", id, "holdings", target.id), patch);
           }
