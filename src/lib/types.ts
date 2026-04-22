@@ -34,3 +34,28 @@ export interface Holding {
    */
   yahooSymbol?: string;
 }
+
+/**
+ * A single trade row for the portfolio-wide logbook. One entry per buy/sell
+ * event, ordered newest first. Computed by `buildTradeLog` by replaying all
+ * holding docs chronologically through a Section 104 pool per symbol.
+ */
+export interface TradeLogEntry {
+  id: string;
+  date: string;               // YYYY-MM-DD
+  symbol: string;
+  yahooSymbol?: string;
+  side: "BUY" | "SELL";
+  shares: number;
+  price: number;
+  value: number;              // shares * price — cost for BUY, proceeds for SELL
+  /** Realized P&L in account currency. SELL only. */
+  realizedGain?: number;
+  /** Realized return vs. pool avg cost at moment of sale. SELL only. */
+  realizedPct?: number;
+  /**
+   * The symbol's cost-basis share of the whole portfolio *after* this event.
+   * `pool[symbol].cost / totalPoolCost`. 0 when fully sold or portfolio empty.
+   */
+  symbolWeightAfter: number;
+}

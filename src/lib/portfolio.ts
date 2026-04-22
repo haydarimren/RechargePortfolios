@@ -1,4 +1,4 @@
-import { Holding } from "./types";
+import { Holding, TradeLogEntry } from "./types";
 import { HistoricalPoint } from "./yahoo";
 
 export interface TickerPosition {
@@ -282,6 +282,85 @@ export function buildComparisonSeries(
     out.push({ date: bp.date, portfolio: port, ...benchValues });
   }
   return out;
+}
+
+/**
+ * Build a chronological trade log from raw holding docs. Each holding doc
+ * (BUY or SELL) becomes one entry. Sell rows are annotated with realized
+ * P&L computed from the Section 104 pool at the moment of the sale — same
+ * pool math as `poolPositions`, just recorded per-event instead of collapsed
+ * to a final snapshot.
+ *
+ * `symbolWeightAfter` on each entry gives the symbol's cost-basis share of
+ * the whole portfolio *after* the event, so the shared-viewer UI can show
+ * "how big is this position now" without leaking absolute dollar amounts.
+ *
+ * Returned newest-first.
+ */
+export function buildTradeLog(holdings: Holding[]): TradeLogEntry[] {
+  if (holdings.length === 0) return [];
+
+  const sorted = holdings.slice().sort((a, b) => {
+    if (a.purchaseDate !== b.purchaseDate) {
+      return a.purchaseDate.localeCompare(b.purchaseDate);
+    }
+    return (a.createdAt ?? 0) - (b.createdAt ?? 0);
+  });
+
+  const pool = new Map<string, { shares: number; cost: number }>();
+  let totalCost = 0;
+  const out: TradeLogEntry[] = [];
+
+  for (const h of sorted) {
+    const side = h.side ?? "BUY";
+    const shares = h.shares;
+    const price = h.purchasePrice;
+    const value = shares * price;
+
+    const entry: TradeLogEntry = {
+      id: h.id,
+      date: h.purchaseDate,
+      symbol: h.symbol,
+      yahooSymbol: h.yahooSymbol,
+      side,
+      shares,
+      price,
+      value,
+      symbolWeightAfter: 0,
+    };
+
+    const p = pool.get(h.symbol) ?? { shares: 0, cost: 0 };
+
+    if (side === "BUY") {
+      p.shares += shares;
+      p.cost += value;
+      totalCost += value;
+      pool.set(h.symbol, p);
+    } else {
+      // SELL — draw from the pool at weighted-average cost
+      if (p.shares > EPS) {
+        const avgCost = p.cost / p.shares;
+        const sellShares = Math.min(shares, p.shares);
+        entry.realizedGain = (price - avgCost) * sellShares;
+        entry.realizedPct = avgCost > 0 ? (price - avgCost) / avgCost : 0;
+        const costReduction = avgCost * sellShares;
+        p.shares -= sellShares;
+        p.cost -= costReduction;
+        totalCost -= costReduction;
+        if (p.shares < EPS) {
+          p.shares = 0;
+          p.cost = 0;
+        }
+        pool.set(h.symbol, p);
+      }
+      // else: sell against empty pool — realized fields stay undefined
+    }
+
+    entry.symbolWeightAfter = totalCost > EPS ? p.cost / totalCost : 0;
+    out.push(entry);
+  }
+
+  return out.reverse();
 }
 
 /**
