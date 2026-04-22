@@ -1,15 +1,44 @@
 "use server";
 
 /**
- * Live quote fetcher backed by Yahoo Finance's batch quote endpoint.
+ * Live quote fetcher backed by Yahoo Finance's v8 chart endpoint.
  *
- * Why Yahoo (not Finnhub anymore): one HTTP call returns N symbols, so a
- * portfolio with 20 tickers no longer burns 20 requests. Server-side cached
- * for 30s, so repeat navigations during a burst don't re-hit upstream.
+ * History: we used Yahoo's v7 batch quote endpoint for a while (one call,
+ * N symbols). In April 2026 Yahoo locked v7 behind a cookie/crumb handshake
+ * and now returns 401 "Unauthorized" to anonymous clients. v8 (chart) still
+ * serves quote data unauthenticated, so we fetch per-symbol.
  *
- * The endpoint is unofficial — same caveat as src/lib/yahoo.ts. If this
- * breaks, swap to Twelve Data.
+ * To avoid tripping Yahoo's rate limiter on large portfolios we cap in-flight
+ * requests via a small semaphore; 30s Next server cache absorbs repeat hits.
+ *
+ * Unofficial endpoint — if it breaks too, Twelve Data is the documented
+ * fallback.
  */
+
+/** Max concurrent Yahoo requests. Empirically 6+ starts hitting 429s. */
+const CONCURRENCY = 5;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (x: T) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  };
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    worker,
+  );
+  await Promise.all(workers);
+  return out;
+}
 
 export interface StockQuote {
   c: number; // Current price
@@ -21,52 +50,6 @@ export interface StockQuote {
   pc: number; // Previous close
 }
 
-interface YahooQuoteRow {
-  symbol: string;
-  regularMarketPrice?: number;
-  regularMarketChange?: number;
-  regularMarketChangePercent?: number;
-  regularMarketDayHigh?: number;
-  regularMarketDayLow?: number;
-  regularMarketOpen?: number;
-  regularMarketPreviousClose?: number;
-}
-
-function toQuote(row: YahooQuoteRow): StockQuote {
-  const c = row.regularMarketPrice ?? 0;
-  const pc = row.regularMarketPreviousClose ?? c;
-  return {
-    c,
-    d: row.regularMarketChange ?? c - pc,
-    dp:
-      row.regularMarketChangePercent ??
-      (pc > 0 ? ((c - pc) / pc) * 100 : 0),
-    h: row.regularMarketDayHigh ?? c,
-    l: row.regularMarketDayLow ?? c,
-    o: row.regularMarketOpen ?? c,
-    pc,
-  };
-}
-
-async function fetchV7Batch(
-  symbols: string[]
-): Promise<Map<string, StockQuote>> {
-  if (symbols.length === 0) return new Map();
-  const url =
-    `https://query1.finance.yahoo.com/v7/finance/quote` +
-    `?symbols=${encodeURIComponent(symbols.join(","))}`;
-  const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-    next: { revalidate: 30 },
-  });
-  if (!res.ok) throw new Error(`Yahoo quote ${res.status}`);
-  const data = await res.json();
-  const rows: YahooQuoteRow[] = data?.quoteResponse?.result ?? [];
-  const out = new Map<string, StockQuote>();
-  for (const row of rows) out.set(row.symbol, toQuote(row));
-  return out;
-}
-
 async function fetchV8Single(symbol: string): Promise<StockQuote | null> {
   const url =
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
@@ -76,10 +59,16 @@ async function fetchV8Single(symbol: string): Promise<StockQuote | null> {
       headers: { "User-Agent": "Mozilla/5.0" },
       next: { revalidate: 30 },
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`Yahoo quote ${symbol}: HTTP ${res.status}`);
+      return null;
+    }
     const data = await res.json();
     const result = data?.chart?.result?.[0];
-    if (!result) return null;
+    if (!result) {
+      console.warn(`Yahoo quote ${symbol}: no result in response`);
+      return null;
+    }
     const meta = result.meta ?? {};
     const c: number = meta.regularMarketPrice ?? 0;
     const pc: number = meta.chartPreviousClose ?? meta.previousClose ?? c;
@@ -92,7 +81,8 @@ async function fetchV8Single(symbol: string): Promise<StockQuote | null> {
       o: c,
       pc,
     };
-  } catch {
+  } catch (err) {
+    console.warn(`Yahoo quote ${symbol}: ${(err as Error).message}`);
     return null;
   }
 }
@@ -102,20 +92,11 @@ export async function getQuotes(
 ): Promise<Record<string, StockQuote | null>> {
   if (symbols.length === 0) return {};
   const uniq = Array.from(new Set(symbols));
+  const results = await mapWithConcurrency(uniq, CONCURRENCY, fetchV8Single);
   const out: Record<string, StockQuote | null> = {};
-  try {
-    const batch = await fetchV7Batch(uniq);
-    for (const s of uniq) out[s] = batch.get(s) ?? null;
-  } catch {
-    // Fall through to per-symbol fallback
-  }
-  const missing = uniq.filter((s) => !out[s]);
-  if (missing.length > 0) {
-    const fallback = await Promise.all(missing.map((s) => fetchV8Single(s)));
-    missing.forEach((s, i) => {
-      out[s] = fallback[i];
-    });
-  }
+  uniq.forEach((s, i) => {
+    out[s] = results[i];
+  });
   return out;
 }
 
