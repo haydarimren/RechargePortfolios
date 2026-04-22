@@ -37,9 +37,11 @@ something that:
 - **Shared portfolios.** Invite a friend by UID; they get read-only access.
   Unread-trade indicators on the home card and Logbook tab clear on view.
 - **Trading 212 sync.** Paste an API key, pull your actual positions and
-  order history in one click. (Note: Trading 212 **Pies** — including Social
-  Pies — aren't supported; the public API doesn't expose pie holdings. Only
-  regular Invest / ISA positions sync.)
+  order history in one click. Keys are AES-256-GCM-encrypted at rest with a
+  server-held master key, so a Firestore dump alone can't recover them.
+  (Note: Trading 212 **Pies** — including Social Pies — aren't supported;
+  the public API doesn't expose pie holdings. Only regular Invest / ISA
+  positions sync.)
 - **Dual theme.** A dark "terminal" mode (Geist + blue accent) and a light
   "paper" mode (IBM Plex + ink-blue accent). Persisted to localStorage,
   zero-flash via a blocking inline script.
@@ -90,8 +92,16 @@ npm run build       # typecheck + lint
 npm run test        # vitest
 ```
 
-No environment variables are required — market data comes from Yahoo
-Finance's public endpoints. Firebase client config is embedded in
+Environment variables (see [`.env.example`](.env.example)):
+
+- `T212_ENCRYPTION_KEY` — **required.** Base64-encoded 32-byte master key
+  used to encrypt Trading 212 credentials at rest. Generate with
+  `openssl rand -base64 32`. Must be set locally and in every Vercel
+  environment. Losing or rotating this key makes stored credentials
+  unrecoverable — users then reconnect.
+
+Market data needs no env vars — it comes from Yahoo Finance's public
+endpoints. Firebase client config is embedded in
 [`src/lib/firebase.ts`](src/lib/firebase.ts); it's a public web config,
 which is why App Check + Firestore rules exist.
 

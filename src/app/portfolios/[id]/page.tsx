@@ -36,6 +36,7 @@ import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { useDisplayName } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
 import { fetchTrading212Orders } from "@/lib/trading212";
+import { encryptSecret, decryptSecret } from "@/lib/crypto";
 import {
   PortfolioView,
   subscribeToPortfolioViews,
@@ -465,15 +466,38 @@ export default function PortfolioPage({
     if (!portfolio) return;
     const portfolioRef = doc(db, "portfolios", id);
     const secretRef = doc(db, "portfolios", id, "secrets", provider);
-    let key = keyOverride;
-    if (!key) {
+
+    // Resolve a plaintext API key for this sync, and decide whether we need
+    // to persist a fresh ciphertext afterward.
+    //   - Fresh paste (`keyOverride`): plaintext in hand, write ciphertext.
+    //   - Stored blob with a `:` — legacy plaintext from before encryption
+    //     landed. Use as-is and opportunistically migrate to ciphertext.
+    //   - Stored blob without a `:` — ciphertext, decrypt server-side.
+    let plaintextKey: string;
+    let needsWriteBack = false;
+    if (keyOverride) {
+      plaintextKey = keyOverride;
+      needsWriteBack = true;
+    } else {
       const secretSnap = await getDoc(secretRef);
-      key = secretSnap.exists() ? (secretSnap.data().value as string) : undefined;
+      const blob = secretSnap.exists() ? (secretSnap.data().value as string | undefined) : undefined;
+      if (!blob) {
+        setSyncError("No credentials — reconnect.");
+        return;
+      }
+      if (blob.includes(":")) {
+        plaintextKey = blob;
+        needsWriteBack = true; // migrate legacy plaintext to ciphertext
+      } else {
+        try {
+          plaintextKey = await decryptSecret(blob);
+        } catch {
+          setSyncError("Stored credentials are corrupt — reconnect.");
+          return;
+        }
+      }
     }
-    if (!key) {
-      setSyncError("No credentials — reconnect.");
-      return;
-    }
+
     setSyncLoading(provider);
     setSyncError("");
     const errors: string[] = [];
@@ -481,8 +505,9 @@ export default function PortfolioPage({
     let sells = 0;
     let skipped = 0;
     try {
-      if (keyOverride) {
-        await setDoc(secretRef, { value: keyOverride, updatedAt: Date.now() });
+      if (needsWriteBack) {
+        const ciphertext = await encryptSecret(plaintextKey);
+        await setDoc(secretRef, { value: ciphertext, updatedAt: Date.now() });
         await updateDoc(portfolioRef, {
           connectedBrokers: arrayUnion(provider),
           [`brokerKeys.${provider}`]: deleteField(),
@@ -490,7 +515,7 @@ export default function PortfolioPage({
       }
       let result: Awaited<ReturnType<typeof fetchTrading212Orders>>;
       if (provider === "trading212") {
-        result = await fetchTrading212Orders(key);
+        result = await fetchTrading212Orders(plaintextKey);
       } else {
         throw new Error(`Unsupported provider: ${provider}`);
       }
