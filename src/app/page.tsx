@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { onAuthStateChanged, signOut, User } from "firebase/auth";
@@ -106,6 +106,31 @@ export default function HomePage() {
     return () => unsubs.forEach((u) => u());
   }, [portfolioIds]);
 
+  // Display symbol → Yahoo query symbol, derived from any holding that
+  // carries `yahooSymbol`. Used by every quote fetch path below so that
+  // `quotes` stays keyed by the user-visible symbol.
+  const yahooBySymbol = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const h of Object.values(holdingsByPortfolio).flat()) {
+      if (h.yahooSymbol && !m.has(h.symbol)) m.set(h.symbol, h.yahooSymbol);
+    }
+    return m;
+  }, [holdingsByPortfolio]);
+
+  const fetchQuotesFor = useCallback(
+    async (symbols: string[]): Promise<Record<string, StockQuote | null>> => {
+      if (symbols.length === 0) return {};
+      const apiSymbols = symbols.map((s) => yahooBySymbol.get(s) ?? s);
+      const map = await getQuotes(apiSymbols);
+      const out: Record<string, StockQuote | null> = {};
+      symbols.forEach((s, i) => {
+        out[s] = map[apiSymbols[i]] ?? null;
+      });
+      return out;
+    },
+    [yahooBySymbol]
+  );
+
   useEffect(() => {
     const symbols = Array.from(
       new Set(Object.values(holdingsByPortfolio).flat().map((h) => h.symbol))
@@ -113,14 +138,14 @@ export default function HomePage() {
     const missing = symbols.filter((s) => !(s in quotes));
     if (missing.length === 0) return;
     let cancelled = false;
-    getQuotes(missing).then((map) => {
+    fetchQuotesFor(missing).then((map) => {
       if (cancelled) return;
       setQuotes((prev) => ({ ...prev, ...map }));
     });
     return () => {
       cancelled = true;
     };
-  }, [holdingsByPortfolio, quotes]);
+  }, [holdingsByPortfolio, quotes, fetchQuotesFor]);
 
   // Retry failed (null) quotes once after 30s to avoid a tight retry loop.
   const quotesRef = useRef(quotes);
@@ -131,7 +156,7 @@ export default function HomePage() {
       .map(([s]) => s);
     if (nulls.length === 0) return;
     const t = setTimeout(() => {
-      getQuotes(nulls).then((map) => {
+      fetchQuotesFor(nulls).then((map) => {
         const fresh = Object.fromEntries(
           Object.entries(map).filter(([, q]) => q !== null)
         );
@@ -147,7 +172,7 @@ export default function HomePage() {
     const id = setInterval(() => {
       const keys = Object.keys(quotesRef.current);
       if (keys.length === 0) return;
-      getQuotes(keys).then((map) => {
+      fetchQuotesFor(keys).then((map) => {
         const fresh = Object.fromEntries(
           Object.entries(map).filter(([, q]) => q !== null)
         );
@@ -156,24 +181,35 @@ export default function HomePage() {
       });
     }, 120_000);
     return () => clearInterval(id);
-  }, []);
+  }, [fetchQuotesFor]);
 
   const gainByPortfolio = useMemo(() => {
-    const out: Record<string, { cost: number; gain: number; gainPct: number; ready: boolean }> = {};
+    // A single unresolvable ticker (e.g. a London ETF that Yahoo doesn't
+    // answer for) shouldn't hide the card's % for every other position.
+    // Compute gain from positions that DO have quotes; flag `partial` so the
+    // UI can hint that some tickers are missing without the whole card
+    // collapsing to "…".
+    const out: Record<string, { cost: number; gain: number; gainPct: number; ready: boolean; partial: boolean }> = {};
     for (const [pid, holdings] of Object.entries(holdingsByPortfolio)) {
       const positions = aggregateHoldings(holdings);
       let cost = 0;
       let market = 0;
-      let ready = positions.length > 0;
+      let covered = 0;
       for (const p of positions) {
-        cost += p.cost;
         const q = quotes[p.symbol];
-        if (q) market += p.shares * q.c;
-        else ready = false;
+        if (q) {
+          cost += p.cost;
+          market += p.shares * q.c;
+          covered++;
+        }
       }
       const gain = market - cost;
       const gainPct = cost > 0 ? (gain / cost) * 100 : 0;
-      out[pid] = { cost, gain, gainPct, ready };
+      // `ready` once we have at least one priced position; `partial` if some
+      // tickers are still/never resolving.
+      const ready = positions.length > 0 && covered > 0;
+      const partial = ready && covered < positions.length;
+      out[pid] = { cost, gain, gainPct, ready, partial };
     }
     return out;
   }, [holdingsByPortfolio, quotes]);
@@ -284,6 +320,9 @@ export default function HomePage() {
                     {g?.ready ? (
                       <span className={g.gain >= 0 ? "text-pos" : "text-neg"}>
                         {g.gain >= 0 ? "+" : ""}{fmtMoney(g.gain)} · {g.gain >= 0 ? "+" : ""}{g.gainPct.toFixed(2)}%
+                        {g.partial && (
+                          <span className="text-fg-fade text-xs ml-2">partial</span>
+                        )}
                       </span>
                     ) : (
                       <span className="text-fg-fade text-xs">
@@ -354,6 +393,9 @@ export default function HomePage() {
                       {g?.ready ? (
                         <span className={g.gain >= 0 ? "text-pos" : "text-neg"}>
                           {g.gain >= 0 ? "+" : ""}{g.gainPct.toFixed(2)}%
+                          {g.partial && (
+                            <span className="text-fg-fade text-xs ml-2">partial</span>
+                          )}
                         </span>
                       ) : (
                         <span className="text-fg-fade text-xs">

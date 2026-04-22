@@ -27,6 +27,7 @@ import {
   XAxis,
   YAxis,
   ReferenceDot,
+  ReferenceLine,
 } from "recharts";
 
 export default function TickerPage({
@@ -101,10 +102,17 @@ export default function TickerPage({
     };
   }, [user, id, symbol]);
 
+  // Use the Yahoo-resolved symbol when any lot has one. Falls back to the
+  // route symbol (works for unambiguous US listings).
+  const yahooSymbol = useMemo(() => {
+    for (const l of lots) if (l.yahooSymbol) return l.yahooSymbol;
+    return symbol;
+  }, [lots, symbol]);
+
   useEffect(() => {
     let cancelled = false;
     const fetchQuote = () => {
-      getQuote(symbol).then((q) => {
+      getQuote(yahooSymbol).then((q) => {
         if (!cancelled) setQuote(q);
       });
     };
@@ -114,7 +122,7 @@ export default function TickerPage({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [symbol]);
+  }, [yahooSymbol]);
 
   useEffect(() => {
     if (lots.length === 0) {
@@ -124,10 +132,10 @@ export default function TickerPage({
     const first = lots
       .map((l) => l.purchaseDate)
       .reduce((a, b) => (a < b ? a : b));
-    getCachedHistoricalCloses(symbol, new Date(first).getTime(), Date.now()).then(
+    getCachedHistoricalCloses(yahooSymbol, new Date(first).getTime(), Date.now()).then(
       setHistory
     );
-  }, [lots, symbol]);
+  }, [lots, yahooSymbol]);
 
   const isOwner = !!(user && portfolio && portfolio.ownerId === user.uid);
 
@@ -178,18 +186,53 @@ export default function TickerPage({
     );
   }
 
+  // Place the dot at the user's actual transaction price — not the market
+  // close on that date. Otherwise a trade executed intraday at a different
+  // price than the close (e.g. bought the open high, closed lower) looks
+  // misleading: the dot snaps to close while the gain % is computed from
+  // the real cost basis, so the two tell different stories.
   const lotMarkers = lots.map((l) => {
     const isSell = l.side === "SELL";
-    const price = closeOnOrBefore(history, l.purchaseDate);
-    if (price !== null) {
+    const hasClose = closeOnOrBefore(history, l.purchaseDate);
+    if (hasClose !== null) {
       const matched = history.findLast((p) => p.date <= l.purchaseDate)!;
-      return { date: matched.date, price: matched.close, isSell };
+      return { date: matched.date, price: l.purchasePrice, isSell };
     }
     if (history.length > 0) {
-      return { date: history[0].date, price: history[0].close, isSell };
+      return { date: history[0].date, price: l.purchasePrice, isSell };
     }
     return { date: null, price: null, isSell };
   });
+
+  // Dynamic Y-axis precision so narrow price ranges don't collapse every tick
+  // to the same integer dollar label.
+  const priceValues = history.map((p) => p.close);
+  for (const m of lotMarkers) {
+    if (m.price !== null) priceValues.push(m.price);
+  }
+  // Include the cost-basis line so it never renders off-chart.
+  const avgCost = pooled?.avgPrice ?? null;
+  if (avgCost !== null) priceValues.push(avgCost);
+  const priceSpan =
+    priceValues.length > 0
+      ? Math.max(...priceValues) - Math.min(...priceValues)
+      : 0;
+  const priceDecimals = priceSpan < 1 ? 3 : priceSpan < 10 ? 2 : priceSpan < 100 ? 1 : 0;
+  const yTickFormatter = (v: number) => `$${v.toFixed(priceDecimals)}`;
+
+  // Make sure lot dots are always in view. Recharts' auto domain only sees the
+  // Area's data, so a buy executed above the highest close (or a sell below
+  // the lowest) renders off the chart. Pad by 2% so dots don't sit flush on
+  // the edge.
+  const yDomain: [number | string, number | string] =
+    priceValues.length > 0
+      ? (() => {
+          const lo = Math.min(...priceValues);
+          const hi = Math.max(...priceValues);
+          const pad = Math.max((hi - lo) * 0.05, hi * 0.002);
+          return [lo - pad, hi + pad];
+        })()
+      : ["auto", "auto"];
 
   const spanMs =
     history.length > 1
@@ -377,8 +420,8 @@ export default function TickerPage({
                       fontSize={11}
                       tickLine={false}
                       axisLine={false}
-                      domain={["auto", "auto"]}
-                      tickFormatter={(v) => `$${v.toFixed(0)}`}
+                      domain={yDomain}
+                      tickFormatter={yTickFormatter}
                     />
                     <Tooltip
                       contentStyle={{
@@ -404,6 +447,20 @@ export default function TickerPage({
                       strokeWidth={2}
                       fill="url(#tick)"
                     />
+                    {avgCost !== null && (
+                      <ReferenceLine
+                        y={avgCost}
+                        stroke={chartColors.axis}
+                        strokeDasharray="4 4"
+                        strokeWidth={1}
+                        label={{
+                          value: `Avg cost ${`$${avgCost.toFixed(priceDecimals)}`}`,
+                          position: "insideTopLeft",
+                          fill: chartColors.axis,
+                          fontSize: 10,
+                        }}
+                      />
+                    )}
                     {lotMarkers.map((m, i) =>
                       m.price !== null && m.date !== null ? (
                         <ReferenceDot

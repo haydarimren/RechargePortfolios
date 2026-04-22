@@ -1,6 +1,6 @@
 "use server";
 
-import { stripT212Suffix } from "./trading212-utils";
+import { stripT212Suffix, toYahooSymbol } from "./trading212-utils";
 
 const BASE_URL = "https://live.trading212.com/api/v0";
 
@@ -43,6 +43,8 @@ export interface ImportResult {
     purchasePrice: number;
     purchaseDate: string;
     currency?: string;
+    isin?: string;
+    yahooSymbol?: string;
     side: "BUY" | "SELL";
   }>;
   /** Retained for compatibility (always 0 now that sells are imported). */
@@ -173,6 +175,11 @@ export async function fetchTrading212Orders(apiKey: string): Promise<ImportResul
       : rawPrice;
 
     const symbol = isinToSymbol.get(order.instrument.isin ?? "") ?? stripT212Suffix(order.ticker);
+    // Derive a Yahoo-compatible symbol from the raw T212 ticker + currency.
+    // `null` means we couldn't confidently pick an exchange — fall back to
+    // the bare symbol at read time (works for unambiguous US listings).
+    const yahooSymbol =
+      toYahooSymbol(order.ticker, order.instrument?.currency) ?? undefined;
 
     // T212 sell fills may report quantity as a negative number; normalize.
     const shares = Math.abs(fill.quantity);
@@ -184,6 +191,8 @@ export async function fetchTrading212Orders(apiKey: string): Promise<ImportResul
       purchasePrice,
       purchaseDate: fill.filledAt.split("T")[0],
       currency: order.instrument?.currency,
+      isin: order.instrument?.isin,
+      yahooSymbol,
       side: isSell ? "SELL" : "BUY",
     });
     if (isSell) sellsImported++;

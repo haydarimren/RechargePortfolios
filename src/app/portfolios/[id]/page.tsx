@@ -76,12 +76,14 @@ export default function PortfolioPage({
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState<{
     symbol: string;
+    exchange: string;
     shares: string;
     purchasePrice: string;
     purchaseDate: string;
     side: "BUY" | "SELL";
   }>({
     symbol: "",
+    exchange: "",
     shares: "",
     purchasePrice: "",
     purchaseDate: new Date().toISOString().split("T")[0],
@@ -153,11 +155,25 @@ export default function PortfolioPage({
   useEffect(() => {
     const symbols = Array.from(new Set(holdings.map((h) => h.symbol)));
     if (symbols.length === 0) return;
+    // Resolve each display symbol to its Yahoo query symbol. Quotes state
+    // stays keyed by display symbol so render code doesn't need to know
+    // about .L/.DE suffixes.
+    const yahooBySymbol = new Map<string, string>();
+    for (const h of holdings) {
+      if (h.yahooSymbol && !yahooBySymbol.has(h.symbol)) {
+        yahooBySymbol.set(h.symbol, h.yahooSymbol);
+      }
+    }
     let cancelled = false;
     const fetchAll = () => {
-      getQuotes(symbols).then((map) => {
+      const apiSymbols = symbols.map((s) => yahooBySymbol.get(s) ?? s);
+      getQuotes(apiSymbols).then((map) => {
         if (cancelled) return;
-        setQuotes((prev) => ({ ...prev, ...map }));
+        const rekeyed: Record<string, StockQuote | null> = {};
+        symbols.forEach((s, i) => {
+          rekeyed[s] = map[apiSymbols[i]] ?? null;
+        });
+        setQuotes((prev) => ({ ...prev, ...rekeyed }));
       });
     };
     fetchAll();
@@ -185,16 +201,30 @@ export default function PortfolioPage({
     const firstDate = pooled
       .map((p) => p.firstPurchaseDate)
       .reduce((a, b) => (a < b ? a : b));
-    const fromMs = new Date(firstDate).getTime();
+    // Pad the fetch window back by 14 days so `closeOnOrBefore` never returns
+    // null for a lot whose purchase date lands on a weekend/holiday or right
+    // at the edge of Yahoo's returned range. Critical for benchmark basis
+    // lookups — if SPY has no data at-or-before the lot's date, that lot
+    // drops out of the SPY sum, and if it's the only lot on firstDate the
+    // SPY line never gets a positive base and stays hidden.
+    const fromMs = new Date(firstDate).getTime() - 14 * 24 * 60 * 60 * 1000;
     const toMs = Date.now();
     const symbols = Array.from(new Set(pooled.map((p) => p.symbol)));
     const chartHoldings = holdings.filter(
       (h) => h.purchaseDate >= firstDate && symbols.includes(h.symbol)
     );
+    // Resolve display symbol → Yahoo query symbol for history fetches.
+    // buildComparisonSeries still expects priceMap keyed by display symbol.
+    const yahooBySymbol = new Map<string, string>();
+    for (const h of holdings) {
+      if (h.yahooSymbol && !yahooBySymbol.has(h.symbol)) {
+        yahooBySymbol.set(h.symbol, h.yahooSymbol);
+      }
+    }
 
     Promise.all([
       ...symbols.map((s) =>
-        getCachedHistoricalCloses(s, fromMs, toMs).then(
+        getCachedHistoricalCloses(yahooBySymbol.get(s) ?? s, fromMs, toMs).then(
           (pts) => [s, pts] as [string, HistoricalPoint[]]
         )
       ),
@@ -287,19 +317,27 @@ export default function PortfolioPage({
     return { portfolio: last.portfolio, values };
   }, [series]);
 
-  // Normalized series (indexed to 100 at the first non-zero portfolio value).
-  // Used for the non-owner view so absolute $ are not revealed.
+  // Normalized series for the non-owner view — % return from each series'
+  // own first-valid day. Each line (portfolio, SPY, QQQ) finds its own base
+  // independently, so a temporary zero on day 0 for one benchmark doesn't
+  // hide its line for the entire chart.
   const normalizedSeries = useMemo(() => {
     if (series.length === 0) return [];
     const baseIdx = series.findIndex((p) => p.portfolio > 0);
     if (baseIdx === -1) return [];
-    const base = series[baseIdx];
-    const baseP = base.portfolio;
-    const baseSPY = typeof base.SPY === "number" && base.SPY > 0 ? base.SPY : null;
-    const baseQQQ = typeof base.QQQ === "number" && base.QQQ > 0 ? base.QQQ : null;
+    const baseP = series[baseIdx].portfolio;
+    const findBase = (key: "SPY" | "QQQ"): number | null => {
+      for (let i = baseIdx; i < series.length; i++) {
+        const v = series[i][key];
+        if (typeof v === "number" && v > 0) return v;
+      }
+      return null;
+    };
+    const baseSPY = findBase("SPY");
+    const baseQQQ = findBase("QQQ");
     return series.slice(baseIdx).map((p) => {
-      const spy = typeof p.SPY === "number" ? p.SPY : null;
-      const qqq = typeof p.QQQ === "number" ? p.QQQ : null;
+      const spy = typeof p.SPY === "number" && p.SPY > 0 ? p.SPY : null;
+      const qqq = typeof p.QQQ === "number" && p.QQQ > 0 ? p.QQQ : null;
       const point: SeriesPoint = {
         date: p.date,
         portfolio: (p.portfolio / baseP - 1) * 100,
@@ -340,16 +378,25 @@ export default function PortfolioPage({
     const price = parseFloat(form.purchasePrice);
     if (!form.symbol.trim() || !(shares > 0) || !(price > 0)) return;
 
-    await addDoc(collection(db, "portfolios", id, "holdings"), {
-      symbol: form.symbol.trim().toUpperCase(),
+    const bareSymbol = form.symbol.trim().toUpperCase();
+    // Exchange dropdown value is the Yahoo suffix (e.g. ".L", ".DE"). Empty
+    // string = US listing → yahooSymbol equals the bare symbol.
+    const yahooSymbol = form.exchange
+      ? `${bareSymbol}${form.exchange}`
+      : bareSymbol;
+    const holdingData: Record<string, unknown> = {
+      symbol: bareSymbol,
       shares,
       purchasePrice: price,
       purchaseDate: form.purchaseDate,
       createdAt: Date.now(),
       side: form.side,
-    });
+      yahooSymbol,
+    };
+    await addDoc(collection(db, "portfolios", id, "holdings"), holdingData);
     setForm({
       symbol: "",
+      exchange: "",
       shares: "",
       purchasePrice: "",
       purchaseDate: new Date().toISOString().split("T")[0],
@@ -401,21 +448,34 @@ export default function PortfolioPage({
       const batch = writeBatch(db);
       const holdingsCol = collection(db, "portfolios", id, "holdings");
       for (const order of result.orders) {
-        const byId = currentHoldings.some(
+        const existing = currentHoldings.find(
           (h) =>
             h.importSource === "trading212" &&
             h.t212OrderId === order.id
         );
-        const byShape =
-          !byId &&
-          currentHoldings.some(
-            (h) =>
-              !h.t212OrderId &&
-              h.symbol === order.symbol &&
-              h.purchaseDate === order.purchaseDate &&
-              Math.abs(h.shares - order.shares) < 0.0001
-          );
-        if (byId || byShape) { skipped++; continue; }
+        const byShape = existing
+          ? undefined
+          : currentHoldings.find(
+              (h) =>
+                !h.t212OrderId &&
+                h.symbol === order.symbol &&
+                h.purchaseDate === order.purchaseDate &&
+                Math.abs(h.shares - order.shares) < 0.0001
+            );
+        const target = existing ?? byShape;
+        if (target) {
+          // Backfill yahooSymbol/isin on pre-existing holdings that were
+          // imported before these fields existed. Without this, re-syncing
+          // doesn't help tickers like VUAA that need `.L` to quote.
+          const patch: Record<string, unknown> = {};
+          if (!target.yahooSymbol && order.yahooSymbol) patch.yahooSymbol = order.yahooSymbol;
+          if (!target.isin && order.isin) patch.isin = order.isin;
+          if (Object.keys(patch).length > 0) {
+            batch.update(doc(db, "portfolios", id, "holdings", target.id), patch);
+          }
+          skipped++;
+          continue;
+        }
         const holdingData: Record<string, unknown> = {
           symbol: order.symbol,
           shares: order.shares,
@@ -427,6 +487,8 @@ export default function PortfolioPage({
           side: order.side,
         };
         if (order.currency) holdingData.currency = order.currency;
+        if (order.isin) holdingData.isin = order.isin;
+        if (order.yahooSymbol) holdingData.yahooSymbol = order.yahooSymbol;
         batch.set(doc(holdingsCol), holdingData);
         if (order.side === "SELL") sells++;
         else buys++;
@@ -1084,18 +1146,45 @@ export default function PortfolioPage({
                   Sell
                 </button>
               </div>
-              <Field label="Ticker">
-                <input
-                  autoFocus
-                  value={form.symbol}
-                  onChange={(e) =>
-                    setForm({ ...form, symbol: e.target.value.toUpperCase() })
-                  }
-                  placeholder="AAPL"
-                  className="field uppercase"
-                  required
-                />
-              </Field>
+              <div className="grid grid-cols-[1fr_auto] gap-3">
+                <Field label="Ticker">
+                  <input
+                    autoFocus
+                    value={form.symbol}
+                    onChange={(e) =>
+                      setForm({ ...form, symbol: e.target.value.toUpperCase() })
+                    }
+                    placeholder="AAPL"
+                    className="field uppercase"
+                    required
+                  />
+                </Field>
+                <Field label="Exchange">
+                  <select
+                    value={form.exchange}
+                    onChange={(e) => setForm({ ...form, exchange: e.target.value })}
+                    className="field"
+                  >
+                    <option value="">US</option>
+                    <option value=".L">London (.L)</option>
+                    <option value=".DE">Xetra (.DE)</option>
+                    <option value=".PA">Paris (.PA)</option>
+                    <option value=".AS">Amsterdam (.AS)</option>
+                    <option value=".SW">Swiss (.SW)</option>
+                    <option value=".MI">Milan (.MI)</option>
+                    <option value=".MC">Madrid (.MC)</option>
+                    <option value=".ST">Stockholm (.ST)</option>
+                    <option value=".CO">Copenhagen (.CO)</option>
+                    <option value=".OL">Oslo (.OL)</option>
+                    <option value=".HE">Helsinki (.HE)</option>
+                    <option value=".WA">Warsaw (.WA)</option>
+                    <option value=".IR">Dublin (.IR)</option>
+                    <option value=".TO">Toronto (.TO)</option>
+                    <option value=".HK">Hong Kong (.HK)</option>
+                    <option value=".T">Tokyo (.T)</option>
+                  </select>
+                </Field>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Shares">
                   <input

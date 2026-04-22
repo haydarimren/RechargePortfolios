@@ -23,4 +23,14 @@ export interface Holding {
    * Firestore docs (which predate sell support) keep working without migration.
    */
   side?: "BUY" | "SELL";
+  /**
+   * ISIN as provided by the broker (e.g. Trading212's instrument metadata).
+   * Used to resolve a `yahooSymbol` via OpenFIGI for non-US tickers.
+   */
+  isin?: string;
+  /**
+   * Yahoo Finance-compatible symbol (e.g. `VUAA.L` for the London-listed
+   * Vanguard S&P 500 UCITS ETF). Falls back to `symbol` when absent.
+   */
+  yahooSymbol?: string;
 }
