@@ -43,6 +43,22 @@ const SUFFIX_LETTER_TO_YAHOO: Record<string, string> = {
 };
 
 /**
+ * Strip T212's lowercase exchange marker letter from a bare ticker when
+ * the raw source ticker actually had one. `ARCIl_EQ` → bare `ARCIl`, but
+ * the real listed symbol is `ARCI`. We only trim when (a) the raw ticker
+ * ends with `<letter>_EQ` and (b) that letter is one of our known
+ * exchange markers — otherwise we risk eating a legitimate uppercase
+ * trailing character.
+ */
+function stripExchangeLetter(bare: string, rawTicker: string): string {
+  const letterMatch = rawTicker.match(/([a-z])_EQ$/);
+  if (!letterMatch) return bare;
+  if (!SUFFIX_LETTER_TO_YAHOO[letterMatch[1]]) return bare;
+  if (bare.endsWith(letterMatch[1])) return bare.slice(0, -1);
+  return bare;
+}
+
+/**
  * Derive a Yahoo Finance-compatible symbol from a Trading212 ticker + the
  * instrument's currency. Strategy:
  *
@@ -66,17 +82,22 @@ export function toYahooSymbol(rawTicker: string, currency?: string): string | nu
   const letterMatch = rawTicker.match(/([a-z])_EQ$/);
   if (letterMatch) {
     const suffix = SUFFIX_LETTER_TO_YAHOO[letterMatch[1]];
-    if (suffix) return `${bare}${suffix}`;
+    if (suffix) return `${stripExchangeLetter(bare, rawTicker)}${suffix}`;
   }
 
   // Currency-based fallback for non-USD.
   if (currency && currency !== "USD") {
     const suffix = CURRENCY_TO_YAHOO_SUFFIX[currency];
-    if (suffix) return `${bare}${suffix}`;
+    if (suffix) return `${stripExchangeLetter(bare, rawTicker)}${suffix}`;
   }
 
   // USD with no exchange hint → assume US listing.
   if (currency === "USD" || !currency) return bare;
 
   return null;
+}
+
+/** Public version of stripExchangeLetter for callers deriving `symbol`. */
+export function cleanT212Symbol(rawTicker: string): string {
+  return stripExchangeLetter(stripT212Suffix(rawTicker), rawTicker);
 }

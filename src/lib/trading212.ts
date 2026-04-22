@@ -1,6 +1,6 @@
 "use server";
 
-import { stripT212Suffix, toYahooSymbol } from "./trading212-utils";
+import { cleanT212Symbol, toYahooSymbol } from "./trading212-utils";
 
 const BASE_URL = "https://live.trading212.com/api/v0";
 
@@ -89,7 +89,7 @@ async function fetchIsinToSymbol(headers: Record<string, string>): Promise<Map<s
   const map = new Map<string, string>();
   for (const inst of instruments) {
     if (!inst.isin) continue;
-    const symbol = inst.currencyCode === "USD" ? inst.shortName : stripT212Suffix(inst.ticker);
+    const symbol = inst.currencyCode === "USD" ? inst.shortName : cleanT212Symbol(inst.ticker);
     // USD entry wins over any non-USD duplicate for the same ISIN
     if (!map.has(inst.isin) || inst.currencyCode === "USD") {
       map.set(inst.isin, symbol);
@@ -175,7 +175,7 @@ export async function fetchTrading212Orders(apiKey: string): Promise<ImportResul
       : rawPrice;
 
     const isinSymbol = isinToSymbol.get(order.instrument.isin ?? "");
-    const symbol = isinSymbol ?? stripT212Suffix(order.ticker);
+    const symbol = isinSymbol ?? cleanT212Symbol(order.ticker);
     // For USD instruments we trust the shortName from T212's metadata call
     // for Yahoo too — it's up-to-date and survives corporate renames
     // (e.g. ASTS pre-merger lots where T212's ticker is a stale NPAa, but
