@@ -36,6 +36,12 @@ import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { useDisplayName } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
 import { fetchTrading212Orders } from "@/lib/trading212";
+import {
+  PortfolioView,
+  subscribeToPortfolioViews,
+  touchLogbookView,
+  touchPortfolioView,
+} from "@/lib/views";
 import { ArrowLeft, Download, Plus, ChevronRight, X, Trash2, UserPlus } from "lucide-react";
 import {
   AreaChart,
@@ -268,7 +274,40 @@ export default function PortfolioPage({
   }, [holdings, quotes]);
 
   const tradeLog = useMemo(() => buildTradeLog(holdings), [holdings]);
-  const [tab, setTab] = useState<"positions" | "logbook">("positions");
+  const [myView, setMyView] = useState<PortfolioView | null>(null);
+
+  // Subscribe to this viewer's own `portfolioViews` record for this
+  // portfolio. Only used for the Logbook unread dot — shared viewers only.
+  useEffect(() => {
+    if (!user || isOwner) return;
+    const unsub = subscribeToPortfolioViews(user.uid, (map) => {
+      setMyView(map.get(id) ?? null);
+    });
+    return unsub;
+  }, [user, isOwner, id]);
+
+  // Bump `lastPortfolioViewAt` once per page load for shared viewers. This
+  // is what clears the home-page "N new" badge. Gated so owners never write.
+  useEffect(() => {
+    if (!user || isOwner || !portfolio) return;
+    touchPortfolioView(user.uid, id);
+  }, [user, isOwner, portfolio, id]);
+
+  const hasUnreadTrades = useMemo(() => {
+    if (isOwner || !myView) return false;
+    for (const h of holdings) {
+      if ((h.createdAt ?? 0) > myView.lastLogbookViewAt) return true;
+    }
+    return false;
+  }, [isOwner, myView, holdings]);
+
+  const [tab, setTabState] = useState<"positions" | "logbook">("positions");
+  const setTab = (next: "positions" | "logbook") => {
+    setTabState(next);
+    if (next === "logbook" && user && !isOwner) {
+      touchLogbookView(user.uid, id);
+    }
+  };
 
   // Total current market value across positions with resolved quotes. Used to
   // compute per-row allocation % in the owner positions table. Positions
@@ -874,7 +913,7 @@ export default function PortfolioPage({
               </button>
               <button
                 onClick={() => setTab("logbook")}
-                className={`px-3 py-1.5 rounded-full text-xs font-medium transition ${
+                className={`relative px-3 py-1.5 rounded-full text-xs font-medium transition ${
                   tab === "logbook"
                     ? "bg-bg text-fg shadow-sm"
                     : "text-fg-dim hover:text-fg"
@@ -882,6 +921,12 @@ export default function PortfolioPage({
                 aria-pressed={tab === "logbook"}
               >
                 Logbook
+                {hasUnreadTrades && (
+                  <span
+                    className="absolute top-1 right-1.5 w-1.5 h-1.5 rounded-full bg-accent"
+                    aria-label="unread trades"
+                  />
+                )}
               </button>
             </div>
           </div>

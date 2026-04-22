@@ -19,6 +19,11 @@ import { getQuotes, StockQuote } from "@/lib/finnhub";
 import { aggregateHoldings } from "@/lib/portfolio";
 import { ThemeToggle } from "@/lib/theme";
 import { ensureUserProfile, useDisplayName } from "@/lib/users";
+import {
+  PortfolioView,
+  seedPortfolioView,
+  subscribeToPortfolioViews,
+} from "@/lib/views";
 import { SharePanel } from "@/components/SharePanel";
 import { ArrowUpRight, Plus, Trash2, UserPlus, X } from "lucide-react";
 
@@ -32,6 +37,7 @@ export default function HomePage() {
   const [shareTarget, setShareTarget] = useState<Portfolio | null>(null);
   const [holdingsByPortfolio, setHoldingsByPortfolio] = useState<Record<string, Holding[]>>({});
   const [quotes, setQuotes] = useState<Record<string, StockQuote | null>>({});
+  const [portfolioViews, setPortfolioViews] = useState<Map<string, PortfolioView>>(new Map());
   const router = useRouter();
 
   useEffect(() => {
@@ -75,6 +81,25 @@ export default function HomePage() {
       unsubShared();
     };
   }, [user]);
+
+  // Subscribe to this user's portfolio-view read state. Drives the "N new"
+  // badge on shared cards and the unread dot on the Logbook tab.
+  useEffect(() => {
+    if (!user) return;
+    return subscribeToPortfolioViews(user.uid, setPortfolioViews);
+  }, [user]);
+
+  // First-view baseline: when a portfolio is newly shared with the user and
+  // has no `portfolioViews` record yet, seed it with "now" so the user isn't
+  // surprised by a dump of pre-existing trades marked unread.
+  useEffect(() => {
+    if (!user || shared.length === 0) return;
+    for (const p of shared) {
+      if (!portfolioViews.has(p.id)) {
+        seedPortfolioView(user.uid, p.id);
+      }
+    }
+  }, [user, shared, portfolioViews]);
 
   const portfolioIds = useMemo(
     () => [...mine, ...shared].map((p) => p.id).sort().join(","),
@@ -213,6 +238,24 @@ export default function HomePage() {
     }
     return out;
   }, [holdingsByPortfolio, quotes]);
+
+  // Per shared portfolio: count holdings created after the viewer's last
+  // portfolio-open timestamp. Only populated for portfolios with a view
+  // record (otherwise the baseline write is still in flight — skip).
+  const unreadBySharedId = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const p of shared) {
+      const view = portfolioViews.get(p.id);
+      if (!view) continue; // baseline not yet written — show nothing
+      const holdings = holdingsByPortfolio[p.id] ?? [];
+      let count = 0;
+      for (const h of holdings) {
+        if ((h.createdAt ?? 0) > view.lastPortfolioViewAt) count++;
+      }
+      out[p.id] = count;
+    }
+    return out;
+  }, [shared, portfolioViews, holdingsByPortfolio]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -386,8 +429,13 @@ export default function HomePage() {
                       <ArrowUpRight className="w-4 h-4 text-fg-fade group-hover:text-accent transition" />
                     </div>
                     <h3 className="text-lg font-medium mb-1 truncate">{p.name}</h3>
-                    <div className="text-xs text-fg-fade mb-2">
-                      by <OwnerLabel uid={p.ownerId} />
+                    <div className="text-xs text-fg-fade mb-2 flex items-center gap-2">
+                      <span>by <OwnerLabel uid={p.ownerId} /></span>
+                      {unreadBySharedId[p.id] ? (
+                        <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-accent/15 text-accent border border-accent/30">
+                          {unreadBySharedId[p.id]} new
+                        </span>
+                      ) : null}
                     </div>
                     <div className="num text-sm min-h-[1.25rem]">
                       {g?.ready ? (
