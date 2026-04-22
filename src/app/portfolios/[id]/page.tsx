@@ -270,6 +270,19 @@ export default function PortfolioPage({
   const tradeLog = useMemo(() => buildTradeLog(holdings), [holdings]);
   const [tab, setTab] = useState<"positions" | "logbook">("positions");
 
+  // Total current market value across positions with resolved quotes. Used to
+  // compute per-row allocation % in the owner positions table. Positions
+  // without a quote are excluded from the denominator so allocation adds to
+  // 100% of the "covered" portion.
+  const positionsTotalMarket = useMemo(() => {
+    let total = 0;
+    for (const p of positions) {
+      const q = quotes[p.symbol];
+      if (q) total += p.shares * q.c;
+    }
+    return total;
+  }, [positions, quotes]);
+
   const seriesTickFormatter = useMemo(() => {
     const spanMs =
       series.length > 1
@@ -1046,13 +1059,14 @@ export default function PortfolioPage({
             </div>
           ) : (
             <div className="card overflow-hidden">
-              <div className="hidden md:grid grid-cols-[1fr_0.8fr_0.9fr_0.9fr_1fr_1.1fr_1.4fr_0.5fr] gap-4 px-5 py-3 label border-b border-line">
+              <div className="hidden md:grid grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] gap-4 px-5 py-3 label border-b border-line">
                 <span>Symbol</span>
                 <span className="text-right">Shares</span>
                 <span className="text-right">Avg cost</span>
                 <span className="text-right">Current</span>
                 <span className="text-right">Cost</span>
                 <span className="text-right">Market</span>
+                <span className="text-right">Allocation</span>
                 <span className="text-right">Gain</span>
                 <span className="text-right">Lots</span>
               </div>
@@ -1062,6 +1076,10 @@ export default function PortfolioPage({
                 const gain = market !== null ? market - p.cost : null;
                 const gainPct =
                   gain !== null && p.cost > 0 ? (gain / p.cost) * 100 : null;
+                const allocationPct =
+                  market !== null && positionsTotalMarket > 0
+                    ? (market / positionsTotalMarket) * 100
+                    : null;
                 const tone =
                   gain === null
                     ? ""
@@ -1074,7 +1092,7 @@ export default function PortfolioPage({
                     onClick={() =>
                       router.push(`/portfolios/${id}/${p.symbol}`)
                     }
-                    className={`w-full text-left grid grid-cols-[1fr_auto] md:grid-cols-[1fr_0.8fr_0.9fr_0.9fr_1fr_1.1fr_1.4fr_0.5fr] gap-4 px-5 py-4 hover:bg-bg-3 transition group ${
+                    className={`w-full text-left grid grid-cols-[1fr_auto] md:grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] gap-4 px-5 py-4 hover:bg-bg-3 transition group ${
                       i !== positions.length - 1 ? "border-b border-line" : ""
                     }`}
                   >
@@ -1100,6 +1118,11 @@ export default function PortfolioPage({
                     </span>
                     <span className="num text-sm text-right hidden md:block">
                       {market !== null ? fmtMoney(market) : "…"}
+                    </span>
+                    <span className="num text-sm text-right text-fg-dim hidden md:block">
+                      {allocationPct !== null
+                        ? `${allocationPct.toFixed(1)}%`
+                        : "…"}
                     </span>
                     <span className={`num text-sm text-right ${tone} md:hidden`}>
                       {gain === null
