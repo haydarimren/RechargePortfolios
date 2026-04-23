@@ -8,7 +8,7 @@ are actually trading.
 
 Built with Next.js 16, React 19, Tailwind v4, and Firebase (Auth + Firestore).
 
-> **Live demo:** _(add your Vercel URL here)_
+> **Live demo:** https://recharge-portfolios.vercel.app/
 
 ## Why this exists
 
