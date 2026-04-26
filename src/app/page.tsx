@@ -28,7 +28,7 @@ import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
 import { useEncryption } from "@/lib/use-encryption";
 import { getUnlocked } from "@/lib/key-store";
-import { loadPortfolioKey } from "@/lib/holdings-repo";
+import { loadPortfolioKey, subscribeHoldings } from "@/lib/holdings-repo";
 import { ArrowUpRight, Plus, Trash2, UserPlus, X } from "lucide-react";
 
 export default function HomePage() {
@@ -44,6 +44,29 @@ export default function HomePage() {
   const [portfolioViews, setPortfolioViews] = useState<Map<string, PortfolioView>>(new Map());
   const router = useRouter();
   const encryption = useEncryption();
+
+  // K_portfolio for every encrypted portfolio (mine OR shared with me).
+  // Resolved opportunistically once the user is unlocked. Two reasons we
+  // need this on the home page specifically:
+  //   1. Rendering the per-portfolio summary cards needs decoded holdings,
+  //      which means each encrypted portfolio's symmetric key must be in
+  //      hand before subscribeHoldings can decode anything.
+  //   2. Cache key: portfolioId. We never cache failures (a missing
+  //      wrappedKey doc throws → entry stays absent), so the next render
+  //      pass will retry. That's how the "owner ran reconcile after I
+  //      enrolled" case auto-heals without an extra subscription.
+  const [portfolioKeys, setPortfolioKeys] = useState<Map<string, CryptoKey>>(
+    new Map(),
+  );
+  // Read-only mirror of `portfolioKeys` so the resolution effect can check
+  // what's already resolved without depending on the state itself (which
+  // would either re-run on every key arrival or wedge into a stale
+  // closure). Updated in an effect to satisfy react-hooks/refs (don't
+  // mutate refs during render).
+  const portfolioKeysRef = useRef(portfolioKeys);
+  useEffect(() => {
+    portfolioKeysRef.current = portfolioKeys;
+  }, [portfolioKeys]);
 
   // K_portfolio for the current share-modal target. Resolved when an
   // encrypted portfolio's share dialog opens, so SharePanel can wrap +
@@ -136,18 +159,80 @@ export default function HomePage() {
     [mine, shared]
   );
 
+  // Eagerly resolve K_portfolio for every encrypted portfolio in view.
+  // We resolve in parallel so the worst case is bounded by the slowest
+  // single Firestore read (~50ms), not the sum across N portfolios.
+  // Failed resolutions are intentionally NOT cached: a sharer whose owner
+  // hasn't run reconcile yet stays absent from the map, and the next
+  // render pass (e.g. when the shared array updates from Firestore)
+  // retries automatically. That's how "owner enrolled after me" auto-
+  // heals without subscribing to wrappedKeys/{me}.
+  useEffect(() => {
+    if (!user) return;
+    if (encryption.state.kind !== "unlocked") return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) return;
+
+    const all = [...mine, ...shared];
+    const needsResolve = all.filter(
+      (p) => p.encrypted && !portfolioKeysRef.current.has(p.id),
+    );
+    if (needsResolve.length === 0) return;
+
+    let cancelled = false;
+    Promise.all(
+      needsResolve.map(async (p) => {
+        try {
+          const k = await loadPortfolioKey(p.id, user.uid, unlocked.privateKey);
+          return [p.id, k] as const;
+        } catch {
+          // Owner hasn't wrapped K_portfolio for this viewer yet (sharer
+          // who enrolled after the last owner-side reconcile). Drop —
+          // we'll retry on the next render-trigger.
+          return null;
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) return;
+      const successes = results.filter(
+        (r): r is readonly [string, CryptoKey] => r !== null,
+      );
+      if (successes.length === 0) return;
+      setPortfolioKeys((prev) => {
+        const next = new Map(prev);
+        for (const [id, k] of successes) next.set(id, k);
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, mine, shared, encryption.state.kind]);
+
+  // Drop the key cache when the encryption session ends. CryptoKey
+  // objects are tab-scoped JS handles — letting them survive a sign-out
+  // is a footgun (next sign-in would briefly hold someone else's keys).
+  useEffect(() => {
+    if (encryption.state.kind !== "unlocked") {
+      setPortfolioKeys(new Map());
+    }
+  }, [encryption.state.kind]);
+
+  // Holdings subscriptions. Routed through subscribeHoldings so the
+  // encrypted shape (`payload`+`iv` envelopes) gets decoded when we have
+  // the key, and the legacy plaintext shape passes through unchanged for
+  // pre-migration portfolios. Re-runs when portfolioKeys changes; this
+  // tears down + rebuilds all subscriptions, but at ≤10 portfolios the
+  // cost is negligible.
   useEffect(() => {
     if (!portfolioIds) return;
     const ids = portfolioIds.split(",");
-    const unsubs = ids.map((id) =>
-      onSnapshot(
-        collection(db, "portfolios", id, "holdings"),
-        (snap) => {
-          const rows = snap.docs.map(
-            (d) => ({ id: d.id, ...(d.data() as Omit<Holding, "id">) })
-          );
-          setHoldingsByPortfolio((prev) => ({ ...prev, [id]: rows }));
-        },
+    const subs = ids.map((id) =>
+      subscribeHoldings(
+        id,
+        portfolioKeys.get(id) ?? null,
+        (rows) => setHoldingsByPortfolio((prev) => ({ ...prev, [id]: rows })),
         () => {
           setHoldingsByPortfolio((prev) => {
             if (!(id in prev)) return prev;
@@ -155,11 +240,11 @@ export default function HomePage() {
             delete next[id];
             return next;
           });
-        }
-      )
+        },
+      ),
     );
-    return () => unsubs.forEach((u) => u());
-  }, [portfolioIds]);
+    return () => subs.forEach((s) => s.unsubscribe());
+  }, [portfolioIds, portfolioKeys]);
 
   // Display symbol → Yahoo query symbol, derived from any holding that
   // carries `yahooSymbol`. Used by every quote fetch path below so that
@@ -482,6 +567,14 @@ export default function HomePage() {
               {shared.map((p) => {
                 const g = gainByPortfolio[p.id];
                 const tint = tintForGain(g?.ready ? g.gain : null);
+                // Encrypted-but-no-key state: distinguish "owner hasn't
+                // shared K_portfolio with us yet" from "portfolio is
+                // genuinely empty." Without this hint the card looks the
+                // same in both cases, which is misleading.
+                const encryptionPending =
+                  !!p.encrypted &&
+                  encryption.state.kind === "unlocked" &&
+                  !portfolioKeys.has(p.id);
                 return (
                 <li key={p.id}>
                   <Link
@@ -502,7 +595,12 @@ export default function HomePage() {
                       ) : null}
                     </div>
                     <div className="num text-sm min-h-[1.25rem]">
-                      {g?.ready ? (
+                      {encryptionPending ? (
+                        <span className="text-fg-fade text-xs">
+                          Waiting for owner&apos;s next sign-in to share
+                          encryption
+                        </span>
+                      ) : g?.ready ? (
                         <span className={g.gain >= 0 ? "text-pos" : "text-neg"}>
                           {g.gain >= 0 ? "+" : ""}{g.gainPct.toFixed(2)}%
                           {g.partial && (
