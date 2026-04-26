@@ -6,11 +6,15 @@ import {
   createUserWithEmailAndPassword,
   signInWithPopup,
   GoogleAuthProvider,
+  getAdditionalUserInfo,
 } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { ensureUserProfile } from "@/lib/users";
+import { getEncryptionStatus } from "@/lib/encryption-setup";
 import { useRouter } from "next/navigation";
 import { ThemeToggle } from "@/lib/theme";
+
+const ONBOARDING_HANDOFF_KEY = "recharge-signup-pw";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -19,6 +23,37 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+
+  // Decide where to send the user after auth resolves. New signups (or
+  // existing users who never enrolled) go to encryption onboarding. Anyone
+  // already enrolled lands on the home page; the unlock prompt itself comes
+  // later in Phase 2 when there's actually encrypted data to gate on.
+  const routeAfterAuth = async (
+    uid: string,
+    isNewUser: boolean,
+    cachedPasswordForHandoff?: string,
+  ) => {
+    const status = await getEncryptionStatus(uid);
+    if (status.kind === "uninitialized" && isNewUser) {
+      // Brand-new account: always onboard. Stash the password so the
+      // onboarding page can pre-fill it for email/password signups.
+      if (cachedPasswordForHandoff) {
+        try {
+          sessionStorage.setItem(
+            ONBOARDING_HANDOFF_KEY,
+            cachedPasswordForHandoff,
+          );
+        } catch {
+          // Ignore — onboarding will just prompt explicitly.
+        }
+      }
+      router.push("/onboarding/encryption");
+      return;
+    }
+    // Existing user OR returning enrolled user — keep current behavior.
+    // Phase 2 will add an unlock prompt for enrolled returning users.
+    router.push("/");
+  };
 
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,7 +64,7 @@ export default function LoginPage() {
         ? await createUserWithEmailAndPassword(auth, email, password)
         : await signInWithEmailAndPassword(auth, email, password);
       await ensureUserProfile(cred.user);
-      router.push("/");
+      await routeAfterAuth(cred.user.uid, isRegister, password);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to authenticate");
     } finally {
@@ -43,7 +78,10 @@ export default function LoginPage() {
     try {
       const cred = await signInWithPopup(auth, new GoogleAuthProvider());
       await ensureUserProfile(cred.user);
-      router.push("/");
+      const isNew = !!getAdditionalUserInfo(cred)?.isNewUser;
+      // Google users have no Firebase password to hand off — onboarding
+      // will prompt explicitly.
+      await routeAfterAuth(cred.user.uid, isNew);
     } catch (err: unknown) {
       setError(
         err instanceof Error ? err.message : "Failed to sign in with Google"
