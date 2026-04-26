@@ -27,7 +27,10 @@
 
 import {
   addDoc,
+  arrayRemove,
+  arrayUnion,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -431,4 +434,233 @@ export async function migratePortfolioToEncrypted(
   // pass `portfolioKey` to subsequent operations within the same session.
   await exportPortfolioKey(portfolioKey);
   return { migrated, alreadyEncrypted };
+}
+
+// ---------- sharing operations -------------------------------------------
+
+/**
+ * Read the public key (hex SPKI) of a user from `users/{uid}.publicKey`.
+ * Returns null if the user hasn't enrolled yet — callers use that as the
+ * "ask them to log in once" signal.
+ */
+export async function readUserPublicKeyHex(uid: string): Promise<string | null> {
+  const snap = await getDoc(doc(db, "users", uid));
+  if (!snap.exists()) return null;
+  const data = snap.data() as { publicKey?: string };
+  return data.publicKey ?? null;
+}
+
+/**
+ * Add a friend to a portfolio. For encrypted portfolios this also wraps
+ * K_portfolio under the friend's public key. Throws (with a helpful
+ * message) if the friend hasn't enrolled yet on an encrypted portfolio —
+ * callers surface this in the UI.
+ *
+ * For pre-migration plaintext portfolios, falls back to the legacy
+ * arrayUnion-only update.
+ */
+export async function shareWithUser(
+  portfolioId: string,
+  friendUid: string,
+  // Encryption context: omit for pre-migration plaintext shares.
+  ctx?: {
+    portfolioKey: CryptoKey;
+    ownerPrivateKey: CryptoKey;
+    ownerPublicKeyHex: string;
+  },
+): Promise<void> {
+  const portfolioRef = doc(db, "portfolios", portfolioId);
+  if (!ctx) {
+    await updateDoc(portfolioRef, { sharedWith: arrayUnion(friendUid) });
+    return;
+  }
+  const friendPublicKeyHex = await readUserPublicKeyHex(friendUid);
+  if (!friendPublicKeyHex) {
+    throw new Error(
+      `${friendUid.slice(0, 8)}… hasn't enabled encryption — ask them to log in once, then try again.`,
+    );
+  }
+  await wrapPortfolioKeyForUser(
+    portfolioId,
+    friendUid,
+    friendPublicKeyHex,
+    ctx.portfolioKey,
+    ctx.ownerPrivateKey,
+    ctx.ownerPublicKeyHex,
+  );
+  await updateDoc(portfolioRef, { sharedWith: arrayUnion(friendUid) });
+}
+
+/**
+ * Remove a friend from a portfolio and rotate K_portfolio so the removed
+ * user can't read future updates. Re-encrypts every holding under a fresh
+ * key, re-wraps that key for the owner + every remaining sharer, deletes
+ * the removed user's wrappedKey doc, and updates `sharedWith`. All in a
+ * single Firestore batch.
+ *
+ * UI honesty: anything the removed user has already viewed is in their
+ * browser's memory; we can't reach in and shred it. This matches WhatsApp's
+ * "no future reads" promise — not "memory wipe."
+ *
+ * For pre-migration plaintext portfolios, just removes from `sharedWith`
+ * (no encryption to rotate).
+ */
+export async function revokeFromUser(
+  portfolioId: string,
+  removeUid: string,
+  // Encryption context: omit for pre-migration plaintext.
+  ctx?: {
+    oldKey: CryptoKey;
+    ownerUid: string;
+    ownerPrivateKey: CryptoKey;
+    ownerPublicKey: CryptoKey;
+    ownerPublicKeyHex: string;
+    remainingSharerUids: string[];
+  },
+): Promise<void> {
+  const portfolioRef = doc(db, "portfolios", portfolioId);
+  if (!ctx) {
+    await updateDoc(portfolioRef, { sharedWith: arrayRemove(removeUid) });
+    return;
+  }
+
+  // Look up remaining sharers' public keys before any writes — that way
+  // a missing publicKey aborts cleanly without leaving the portfolio in a
+  // half-rotated state.
+  const remaining: Array<{ uid: string; publicKeyHex: string }> = [];
+  for (const friendUid of ctx.remainingSharerUids) {
+    const hex = await readUserPublicKeyHex(friendUid);
+    if (!hex) {
+      // Skip silently — they couldn't read before either. Phase 5 cleanup
+      // could prune `sharedWith` of these stale entries.
+      continue;
+    }
+    remaining.push({ uid: friendUid, publicKeyHex: hex });
+  }
+
+  // Generate the new K_portfolio + wrap for owner upfront.
+  const newKey = await generatePortfolioKey();
+  const ownerWrap = await wrapPortfolioKeyForRecipient(
+    newKey,
+    ctx.ownerPrivateKey,
+    ctx.ownerPublicKey,
+  );
+
+  // Re-encrypt every holding under the new key. Done outside the batch
+  // because each encrypt is async; we accumulate the writes into a batch
+  // afterward.
+  const holdingsCol = collection(db, "portfolios", portfolioId, "holdings");
+  const snap = await getDocs(holdingsCol);
+  const writes: Array<{ id: string; payload: string; iv: string }> = [];
+  for (const d of snap.docs) {
+    const data = d.data();
+    if (!isEncryptedDoc(data)) continue;
+    const plain = await decryptHolding(
+      { payload: data.payload, iv: data.iv },
+      ctx.oldKey,
+    );
+    const ct = await encryptHolding(plain, newKey);
+    writes.push({ id: d.id, payload: ct.payload, iv: ct.iv });
+  }
+
+  // Wrap for each remaining sharer.
+  const friendWraps: Array<{ uid: string; payload: Ciphertext; senderHex: string }> = [];
+  for (const r of remaining) {
+    const recipientPub = await importPublicKey(r.publicKeyHex);
+    const wrapped = await wrapPortfolioKeyForRecipient(
+      newKey,
+      ctx.ownerPrivateKey,
+      recipientPub,
+    );
+    friendWraps.push({
+      uid: r.uid,
+      payload: wrapped,
+      senderHex: ctx.ownerPublicKeyHex,
+    });
+  }
+
+  // Single Firestore batch for the swap. We can't use updateDoc across
+  // multiple subcollection paths in one transaction without a batch.
+  const batch = writeBatch(db);
+
+  for (const w of writes) {
+    batch.update(
+      doc(db, "portfolios", portfolioId, "holdings", w.id),
+      { payload: w.payload, iv: w.iv },
+    );
+  }
+  // Owner's wrappedKey overwrite
+  batch.set(
+    doc(db, "portfolios", portfolioId, "wrappedKeys", ctx.ownerUid),
+    {
+      wrappedKey: ownerWrap,
+      wrappedBy: ctx.ownerPublicKeyHex,
+      schemaVersion: 1,
+    },
+  );
+  for (const fw of friendWraps) {
+    batch.set(
+      doc(db, "portfolios", portfolioId, "wrappedKeys", fw.uid),
+      {
+        wrappedKey: fw.payload,
+        wrappedBy: fw.senderHex,
+        schemaVersion: 1,
+      },
+    );
+  }
+  // Removed user's wrappedKey doc
+  batch.delete(
+    doc(db, "portfolios", portfolioId, "wrappedKeys", removeUid),
+  );
+  batch.update(portfolioRef, { sharedWith: arrayRemove(removeUid) });
+
+  await batch.commit();
+  // Cleanup: ensure deleteDoc succeeded even if the batch got reordered.
+  // (No-op if already deleted.)
+  await deleteDoc(
+    doc(db, "portfolios", portfolioId, "wrappedKeys", removeUid),
+  ).catch(() => {});
+}
+
+/**
+ * Reconcile the wrappedKeys subcollection against the current `sharedWith`
+ * list. For any sharer that has a publicKey on the server but no wrappedKey
+ * doc yet, write the wrap silently. This is the "re-share reconnection"
+ * step — runs whenever the owner opens an encrypted portfolio so that
+ * friends who finally enrolled get access without an explicit re-share
+ * action.
+ *
+ * Friends without a publicKey are left alone — they need to enroll first.
+ */
+export async function reconcileSharedWrappedKeys(
+  portfolioId: string,
+  sharedWith: string[],
+  ctx: {
+    portfolioKey: CryptoKey;
+    ownerPrivateKey: CryptoKey;
+    ownerPublicKeyHex: string;
+  },
+): Promise<{ added: number; pending: number }> {
+  let added = 0;
+  let pending = 0;
+  for (const friendUid of sharedWith) {
+    const wkRef = doc(db, "portfolios", portfolioId, "wrappedKeys", friendUid);
+    const existing = await getDoc(wkRef);
+    if (existing.exists()) continue;
+    const friendPublicKeyHex = await readUserPublicKeyHex(friendUid);
+    if (!friendPublicKeyHex) {
+      pending++;
+      continue;
+    }
+    await wrapPortfolioKeyForUser(
+      portfolioId,
+      friendUid,
+      friendPublicKeyHex,
+      ctx.portfolioKey,
+      ctx.ownerPrivateKey,
+      ctx.ownerPublicKeyHex,
+    );
+    added++;
+  }
+  return { added, pending };
 }

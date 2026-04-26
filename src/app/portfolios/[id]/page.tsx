@@ -44,6 +44,7 @@ import {
   addHolding,
   loadPortfolioKey,
   migratePortfolioToEncrypted,
+  reconcileSharedWrappedKeys,
   subscribeHoldings,
   updateHoldingFields,
 } from "@/lib/holdings-repo";
@@ -196,6 +197,16 @@ export default function PortfolioPage({
         try {
           const k = await loadPortfolioKey(id, user.uid, unlocked.privateKey);
           if (!cancelled) setPortfolioKey(k);
+          // Re-share reconnection: if any sharer enrolled after this
+          // portfolio was migrated, they have a publicKey but no
+          // wrappedKey doc. Silently fix that on every owner load.
+          if (isPortfolioOwner && portfolio.sharedWith.length > 0) {
+            await reconcileSharedWrappedKeys(id, portfolio.sharedWith, {
+              portfolioKey: k,
+              ownerPrivateKey: unlocked.privateKey,
+              ownerPublicKeyHex: unlocked.publicKeyHex,
+            });
+          }
         } catch (err) {
           if (!cancelled) {
             setMigrationError(
@@ -1504,8 +1515,22 @@ export default function PortfolioPage({
             </div>
             <SharePanel
               portfolioId={id}
+              ownerUid={portfolio.ownerId}
               sharedWith={portfolio.sharedWith}
               onClose={() => setShowShare(false)}
+              encryption={
+                portfolio.encrypted &&
+                portfolioKey &&
+                user &&
+                getUnlocked(user.uid)
+                  ? {
+                      portfolioKey,
+                      ownerPrivateKey: getUnlocked(user.uid)!.privateKey,
+                      ownerPublicKey: getUnlocked(user.uid)!.publicKey,
+                      ownerPublicKeyHex: getUnlocked(user.uid)!.publicKeyHex,
+                    }
+                  : undefined
+              }
             />
           </div>
         </div>

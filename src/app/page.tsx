@@ -27,6 +27,8 @@ import {
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
 import { useEncryption } from "@/lib/use-encryption";
+import { getUnlocked } from "@/lib/key-store";
+import { loadPortfolioKey } from "@/lib/holdings-repo";
 import { ArrowUpRight, Plus, Trash2, UserPlus, X } from "lucide-react";
 
 export default function HomePage() {
@@ -42,6 +44,31 @@ export default function HomePage() {
   const [portfolioViews, setPortfolioViews] = useState<Map<string, PortfolioView>>(new Map());
   const router = useRouter();
   const encryption = useEncryption();
+
+  // K_portfolio for the current share-modal target. Resolved when an
+  // encrypted portfolio's share dialog opens, so SharePanel can wrap +
+  // rotate without reaching into the key store itself.
+  const [shareTargetKey, setShareTargetKey] = useState<CryptoKey | null>(null);
+  useEffect(() => {
+    setShareTargetKey(null);
+    if (!shareTarget || !user) return;
+    if (!shareTarget.encrypted) return;
+    if (encryption.state.kind !== "unlocked") return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) return;
+    let cancelled = false;
+    loadPortfolioKey(shareTarget.id, user.uid, unlocked.privateKey)
+      .then((k) => {
+        if (!cancelled) setShareTargetKey(k);
+      })
+      .catch(() => {
+        // Owner doesn't have a wrappedKey doc — shouldn't happen post-
+        // migration. SharePanel will refuse to share without context.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shareTarget, user, encryption.state.kind]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -263,13 +290,30 @@ export default function HomePage() {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !newName.trim()) return;
-    await addDoc(collection(db, "portfolios"), {
+    // If the user is enrolled + unlocked, mint the new portfolio as
+    // encrypted from day one — provision K_portfolio + wrap for self
+    // before returning. Pre-encryption users (uninitialized) keep the
+    // legacy plaintext path.
+    const unlocked = getUnlocked(user.uid);
+    const isEncryptedFromStart = encryption.state.kind === "unlocked" && !!unlocked;
+    const ref = await addDoc(collection(db, "portfolios"), {
       ownerId: user.uid,
       ownerEmail: user.email ?? "",
       name: newName.trim(),
       sharedWith: [],
       createdAt: Date.now(),
+      ...(isEncryptedFromStart ? { encrypted: true } : {}),
     });
+    if (isEncryptedFromStart && unlocked) {
+      const { provisionPortfolioKey } = await import("@/lib/holdings-repo");
+      await provisionPortfolioKey(
+        ref.id,
+        user.uid,
+        unlocked.privateKey,
+        unlocked.publicKey,
+        unlocked.publicKeyHex,
+      );
+    }
     setNewName("");
     setShowNew(false);
   };
@@ -525,8 +569,22 @@ export default function HomePage() {
         >
           <SharePanel
             portfolioId={shareTarget.id}
+            ownerUid={shareTarget.ownerId}
             sharedWith={shareTarget.sharedWith}
             onClose={() => setShareTarget(null)}
+            encryption={
+              shareTarget.encrypted &&
+              shareTargetKey &&
+              user &&
+              getUnlocked(user.uid)
+                ? {
+                    portfolioKey: shareTargetKey,
+                    ownerPrivateKey: getUnlocked(user.uid)!.privateKey,
+                    ownerPublicKey: getUnlocked(user.uid)!.publicKey,
+                    ownerPublicKeyHex: getUnlocked(user.uid)!.publicKeyHex,
+                  }
+                : undefined
+            }
           />
         </Modal>
       )}
