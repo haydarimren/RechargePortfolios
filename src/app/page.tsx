@@ -25,6 +25,8 @@ import {
   subscribeToPortfolioViews,
 } from "@/lib/views";
 import { SharePanel } from "@/components/SharePanel";
+import { UnlockModal } from "@/components/UnlockModal";
+import { useEncryption } from "@/lib/use-encryption";
 import { ArrowUpRight, Plus, Trash2, UserPlus, X } from "lucide-react";
 
 export default function HomePage() {
@@ -39,6 +41,7 @@ export default function HomePage() {
   const [quotes, setQuotes] = useState<Record<string, StockQuote | null>>({});
   const [portfolioViews, setPortfolioViews] = useState<Map<string, PortfolioView>>(new Map());
   const router = useRouter();
+  const encryption = useEncryption();
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -284,8 +287,25 @@ export default function HomePage() {
     );
   }
 
+  // Encryption gate: shown over the home page when the user is enrolled
+  // but locked. Pre-encryption users (kind === "uninitialized") fall
+  // through to the legacy plaintext path until they choose to enroll.
+  const showUnlockGate =
+    encryption.state.kind === "locked" ||
+    encryption.state.kind === "needs-recovery";
+
   return (
     <div className="min-h-screen">
+      {showUnlockGate &&
+        (encryption.state.kind === "locked" ||
+          encryption.state.kind === "needs-recovery") && (
+          <UnlockModal
+            uid={encryption.state.uid}
+            needsRecovery={encryption.state.kind === "needs-recovery"}
+            onUnlock={encryption.unlock}
+            onRestore={encryption.restore}
+          />
+        )}
       <header className="px-6 lg:px-10 pt-6 pb-4 border-b border-line">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
           <div className="font-semibold tracking-tight">Recharge</div>

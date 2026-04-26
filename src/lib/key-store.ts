@@ -104,11 +104,14 @@ export async function clearPersistedState(uid: string): Promise<void> {
  * same household-multiple-accounts reason. Reset on tab close; never
  * persisted.
  */
-interface UnlockedState {
+export interface UnlockedState {
   uid: string;
   masterSecret: Uint8Array;
   privateKey: CryptoKey;
   publicKey: CryptoKey;
+  /** Hex SPKI of the public key — convenience copy so callers don't have
+   * to re-export every time they need to address themselves as a sender. */
+  publicKeyHex: string;
 }
 
 let unlocked: UnlockedState | null = null;

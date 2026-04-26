@@ -17,6 +17,10 @@ import { HistoricalPoint } from "@/lib/yahoo";
 import { getCachedHistoricalCloses } from "@/lib/historical-cache";
 import { closeOnOrBefore, fmtShares, poolPositions } from "@/lib/portfolio";
 import { ThemeToggle, useChartColors } from "@/lib/theme";
+import { UnlockModal } from "@/components/UnlockModal";
+import { useEncryption } from "@/lib/use-encryption";
+import { getUnlocked } from "@/lib/key-store";
+import { loadPortfolioKey, subscribeHoldings } from "@/lib/holdings-repo";
 import { ArrowLeft, Trash2 } from "lucide-react";
 import {
   AreaChart,
@@ -47,6 +51,9 @@ export default function TickerPage({
   const [history, setHistory] = useState<HistoricalPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+
+  const encryption = useEncryption();
+  const [portfolioKey, setPortfolioKey] = useState<CryptoKey | null>(null);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -82,25 +89,47 @@ export default function TickerPage({
       }
     );
 
-    const unsubHoldings = onSnapshot(
-      collection(db, "portfolios", id, "holdings"),
-      (snap) => {
-        const rows = snap.docs
-          .map((d) => ({ id: d.id, ...(d.data() as Omit<Holding, "id">) }))
-          .filter((h) => h.symbol === symbol);
-        rows.sort((a, b) => a.purchaseDate.localeCompare(b.purchaseDate));
-        setLots(rows);
+    // Decode through the repo so encrypted-shape docs come back with
+    // plaintext symbol/shares/price after the unwrap. Pre-migration docs
+    // pass through unchanged.
+    const sub = subscribeHoldings(
+      id,
+      portfolioKey,
+      (rows) => {
+        const filtered = rows.filter((h) => h.symbol === symbol);
+        filtered.sort((a, b) => a.purchaseDate.localeCompare(b.purchaseDate));
+        setLots(filtered);
       },
-      () => {
-        setLots([]);
-      }
+      () => setLots([]),
     );
 
     return () => {
       unsubPortfolio();
-      unsubHoldings();
+      sub.unsubscribe();
     };
-  }, [user, id, symbol]);
+  }, [user, id, symbol, portfolioKey]);
+
+  // Resolve K_portfolio for encrypted portfolios. Mirrors the detail page;
+  // drilldown is read-only so we never trigger migration here.
+  useEffect(() => {
+    if (!portfolio || !user) return;
+    if (!portfolio.encrypted) return;
+    if (encryption.state.kind !== "unlocked") return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) return;
+    let cancelled = false;
+    loadPortfolioKey(id, user.uid, unlocked.privateKey)
+      .then((k) => {
+        if (!cancelled) setPortfolioKey(k);
+      })
+      .catch(() => {
+        // Owner hasn't wrapped for this viewer yet — Phase 3 closes that
+        // gap. For now the page just shows no lots.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [portfolio, user, id, encryption.state.kind]);
 
   // Use the Yahoo-resolved symbol when any lot has one — but only if it
   // plausibly matches the route symbol. A stale pre-merger mapping
@@ -264,8 +293,22 @@ export default function TickerPage({
     return date.toLocaleDateString("en-US", { year: "numeric" });
   };
 
+  const showUnlockGate =
+    encryption.state.kind === "locked" ||
+    encryption.state.kind === "needs-recovery";
+
   return (
     <div className="min-h-screen">
+      {showUnlockGate &&
+        (encryption.state.kind === "locked" ||
+          encryption.state.kind === "needs-recovery") && (
+          <UnlockModal
+            uid={encryption.state.uid}
+            needsRecovery={encryption.state.kind === "needs-recovery"}
+            onUnlock={encryption.unlock}
+            onRestore={encryption.restore}
+          />
+        )}
       <header className="px-6 lg:px-10 pt-6 pb-4 border-b border-line">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
           <Link

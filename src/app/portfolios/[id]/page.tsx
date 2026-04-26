@@ -35,8 +35,19 @@ import {
 import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { useDisplayName } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
+import { UnlockModal } from "@/components/UnlockModal";
 import { fetchTrading212Orders } from "@/lib/trading212";
 import { encryptSecret, decryptSecret } from "@/lib/crypto";
+import { useEncryption } from "@/lib/use-encryption";
+import { getUnlocked } from "@/lib/key-store";
+import {
+  addHolding,
+  loadPortfolioKey,
+  migratePortfolioToEncrypted,
+  subscribeHoldings,
+  updateHoldingFields,
+} from "@/lib/holdings-repo";
+import { encryptHolding } from "@/lib/crypto-client";
 import {
   PortfolioView,
   subscribeToPortfolioViews,
@@ -106,6 +117,13 @@ export default function PortfolioPage({
   const [syncLoading, setSyncLoading] = useState<string | null>(null);
   const [syncError, setSyncError] = useState("");
 
+  const encryption = useEncryption();
+  // Unwrapped K_portfolio for the active portfolio. Set once per portfolio
+  // load (or after a migration). null means the holdings subscription falls
+  // back to the legacy plaintext shape.
+  const [portfolioKey, setPortfolioKey] = useState<CryptoKey | null>(null);
+  const [migrationError, setMigrationError] = useState("");
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
@@ -140,25 +158,86 @@ export default function PortfolioPage({
       }
     );
 
-    const unsubHoldings = onSnapshot(
-      collection(db, "portfolios", id, "holdings"),
-      (snap) => {
-        const rows = snap.docs.map(
-          (d) => ({ id: d.id, ...(d.data() as Omit<Holding, "id">) })
-        );
-        rows.sort((a, b) => a.purchaseDate.localeCompare(b.purchaseDate));
-        setHoldings(rows);
-      },
-      () => {
-        setHoldings([]);
-      }
+    // The encrypted-shape decoder is wired up via subscribeHoldings, which
+    // dispatches per-doc on whether `payload`/`iv` are present. Pre-
+    // migration portfolios still have plaintext docs and surface
+    // unchanged. Once the user unlocks and we resolve `portfolioKey`,
+    // ciphertext docs decrypt transparently.
+    const sub = subscribeHoldings(
+      id,
+      portfolioKey,
+      (rows) => setHoldings(rows),
+      () => setHoldings([]),
     );
 
     return () => {
       unsubPortfolio();
-      unsubHoldings();
+      sub.unsubscribe();
     };
-  }, [user, id]);
+  }, [user, id, portfolioKey]);
+
+  // Resolve K_portfolio when the portfolio is loaded + user is unlocked.
+  // For owners viewing a not-yet-encrypted portfolio, also kick off the
+  // one-shot migration that re-encrypts all holdings. For shared viewers,
+  // we just attempt to fetch their wrappedKey doc — Phase 3 makes this
+  // robust against owners who haven't yet wrapped for them.
+  useEffect(() => {
+    if (!portfolio || !user) return;
+    if (encryption.state.kind !== "unlocked") return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) return;
+    const isPortfolioOwner = portfolio.ownerId === user.uid;
+    let cancelled = false;
+    setMigrationError("");
+
+    (async () => {
+      // Path 1: portfolio is already encrypted → just fetch + unwrap our key.
+      if (portfolio.encrypted) {
+        try {
+          const k = await loadPortfolioKey(id, user.uid, unlocked.privateKey);
+          if (!cancelled) setPortfolioKey(k);
+        } catch (err) {
+          if (!cancelled) {
+            setMigrationError(
+              isPortfolioOwner
+                ? "Couldn't unlock your portfolio key — try refreshing."
+                : "This portfolio is encrypted but the owner hasn't shared the key with you yet.",
+            );
+          }
+          console.warn("loadPortfolioKey failed", err);
+        }
+        return;
+      }
+      // Path 2: not encrypted, owner is here → migrate.
+      if (isPortfolioOwner) {
+        try {
+          await migratePortfolioToEncrypted(
+            id,
+            user.uid,
+            unlocked.privateKey,
+            unlocked.publicKey,
+            unlocked.publicKeyHex,
+          );
+          // After migration, the portfolio doc snapshot will deliver
+          // `encrypted: true` shortly; that triggers Path 1 above and
+          // populates portfolioKey. Nothing more to do here.
+        } catch (err) {
+          if (!cancelled) {
+            setMigrationError(
+              "Couldn't migrate your portfolio to encrypted storage. Refresh to try again.",
+            );
+          }
+          console.warn("migratePortfolioToEncrypted failed", err);
+        }
+      }
+      // Path 3: not encrypted, viewer is a sharer → leave plaintext path
+      // active until the owner migrates.
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [portfolio, user, id, encryption.state.kind]);
 
   useEffect(() => {
     const symbols = Array.from(new Set(holdings.map((h) => h.symbol)));
@@ -441,7 +520,10 @@ export default function PortfolioPage({
     const yahooSymbol = form.exchange
       ? `${bareSymbol}${form.exchange}`
       : bareSymbol;
-    const holdingData: Record<string, unknown> = {
+    // Encryption-aware add: passes through addHolding which writes the
+    // encrypted shape if a portfolioKey is in hand, else falls back to the
+    // legacy plaintext shape (pre-migration portfolios).
+    await addHolding(id, portfolioKey, {
       symbol: bareSymbol,
       shares,
       purchasePrice: price,
@@ -449,8 +531,7 @@ export default function PortfolioPage({
       createdAt: Date.now(),
       side: form.side,
       yahooSymbol,
-    };
-    await addDoc(collection(db, "portfolios", id, "holdings"), holdingData);
+    });
     setForm({
       symbol: "",
       exchange: "",
@@ -526,17 +607,28 @@ export default function PortfolioPage({
         (d) => ({ id: d.id, ...(d.data() as Omit<Holding, "id">) })
       );
 
-      const batch = writeBatch(db);
-      const holdingsCol = collection(db, "portfolios", id, "holdings");
+      // Read the holdings fresh again — `currentHoldings` was decoded from
+      // the legacy plaintext shape only. After migration the shape changes,
+      // so re-decode through the repo to get the canonical view.
+      const decodedCurrent = currentHoldings;
+      // Decisions are sequential (encrypt-then-write) but we can still
+      // batch the Firestore round-trip for the new-doc writes. Backfill
+      // updates of encrypted docs need a read-decrypt-merge-encrypt-write
+      // cycle each, so they're not batchable — issue them serially.
+      const newDocsBuffer: Array<{
+        encryptedShape: Record<string, unknown>;
+        plaintextShape: Record<string, unknown>;
+      }> = [];
+
       for (const order of result.orders) {
-        const existing = currentHoldings.find(
+        const existing = decodedCurrent.find(
           (h) =>
             h.importSource === "trading212" &&
             h.t212OrderId === order.id
         );
         const byShape = existing
           ? undefined
-          : currentHoldings.find(
+          : decodedCurrent.find(
               (h) =>
                 !h.t212OrderId &&
                 h.symbol === order.symbol &&
@@ -545,30 +637,27 @@ export default function PortfolioPage({
             );
         const target = existing ?? byShape;
         if (target) {
-          // Backfill yahooSymbol/isin on pre-existing holdings that were
-          // imported before these fields existed. Without this, re-syncing
-          // doesn't help tickers like VUAA that need `.L` to quote.
-          const patch: Record<string, unknown> = {};
-          // Refresh yahooSymbol when the import gives us something different
-          // from what's stored — handles corporate renames (e.g. ASTS
-          // pre-merger lots that were imported as NPA before the T212
-          // shortName fix landed).
+          // Backfill yahooSymbol/isin/symbol corrections — same logic as
+          // before, but routed through updateHoldingFields so encrypted
+          // docs go through decrypt-merge-encrypt rather than naively
+          // updating top-level fields that don't exist on ciphertext docs.
+          const patch: Record<string, string | undefined> = {};
           if (order.yahooSymbol && target.yahooSymbol !== order.yahooSymbol) {
             patch.yahooSymbol = order.yahooSymbol;
           }
           if (!target.isin && order.isin) patch.isin = order.isin;
-          // Same logic for `symbol` — if T212 metadata now reports a
-          // different shortName, align the stored symbol with it.
           if (order.symbol && target.symbol !== order.symbol) {
             patch.symbol = order.symbol;
           }
           if (Object.keys(patch).length > 0) {
-            batch.update(doc(db, "portfolios", id, "holdings", target.id), patch);
+            await updateHoldingFields(id, target.id, portfolioKey, patch);
           }
           skipped++;
           continue;
         }
-        const holdingData: Record<string, unknown> = {
+        // New holding. Pre-encrypt now so the write batch can be a single
+        // round-trip at the end.
+        const plaintextShape: Record<string, unknown> = {
           symbol: order.symbol,
           shares: order.shares,
           purchasePrice: order.purchasePrice,
@@ -578,12 +667,46 @@ export default function PortfolioPage({
           t212OrderId: order.id,
           side: order.side,
         };
-        if (order.currency) holdingData.currency = order.currency;
-        if (order.isin) holdingData.isin = order.isin;
-        if (order.yahooSymbol) holdingData.yahooSymbol = order.yahooSymbol;
-        batch.set(doc(holdingsCol), holdingData);
+        if (order.currency) plaintextShape.currency = order.currency;
+        if (order.isin) plaintextShape.isin = order.isin;
+        if (order.yahooSymbol) plaintextShape.yahooSymbol = order.yahooSymbol;
+
+        if (portfolioKey) {
+          const ct = await encryptHolding(
+            {
+              symbol: order.symbol,
+              shares: order.shares,
+              purchasePrice: order.purchasePrice,
+              purchaseDate: order.purchaseDate,
+              side: order.side,
+              currency: order.currency,
+              isin: order.isin,
+              yahooSymbol: order.yahooSymbol,
+            },
+            portfolioKey,
+          );
+          newDocsBuffer.push({
+            plaintextShape,
+            encryptedShape: {
+              payload: ct.payload,
+              iv: ct.iv,
+              createdAt: plaintextShape.createdAt,
+              schemaVersion: 1,
+              importSource: provider,
+              t212OrderId: order.id,
+            },
+          });
+        } else {
+          // Legacy path — plaintext doc.
+          newDocsBuffer.push({ plaintextShape, encryptedShape: plaintextShape });
+        }
         if (order.side === "SELL") sells++;
         else buys++;
+      }
+      const batch = writeBatch(db);
+      const holdingsCol = collection(db, "portfolios", id, "holdings");
+      for (const item of newDocsBuffer) {
+        batch.set(doc(holdingsCol), item.encryptedShape);
       }
       await batch.commit();
       setSyncResults((prev) => ({
@@ -646,8 +769,27 @@ export default function PortfolioPage({
     );
   }
 
+  const showUnlockGate =
+    encryption.state.kind === "locked" ||
+    encryption.state.kind === "needs-recovery";
+
   return (
     <div className="min-h-screen">
+      {showUnlockGate &&
+        (encryption.state.kind === "locked" ||
+          encryption.state.kind === "needs-recovery") && (
+          <UnlockModal
+            uid={encryption.state.uid}
+            needsRecovery={encryption.state.kind === "needs-recovery"}
+            onUnlock={encryption.unlock}
+            onRestore={encryption.restore}
+          />
+        )}
+      {migrationError && (
+        <div className="fixed top-3 right-3 z-40 max-w-sm border border-neg/40 bg-neg/10 text-neg text-xs rounded-md p-3 num">
+          {migrationError}
+        </div>
+      )}
       <header className="px-6 lg:px-10 pt-6 pb-4 border-b border-line">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
           <Link

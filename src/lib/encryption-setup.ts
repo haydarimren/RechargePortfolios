@@ -142,6 +142,7 @@ export async function enrollEncryption(
     masterSecret,
     privateKey: keyPair.privateKey,
     publicKey: keyPair.publicKey,
+    publicKeyHex,
   });
 }
 
@@ -168,7 +169,13 @@ export async function unlockEncryption(
   );
   const publicKey = await importPublicKey(persisted.publicKeyHex);
 
-  setUnlocked({ uid, masterSecret, privateKey, publicKey });
+  setUnlocked({
+    uid,
+    masterSecret,
+    privateKey,
+    publicKey,
+    publicKeyHex: persisted.publicKeyHex,
+  });
 }
 
 /**
@@ -225,7 +232,13 @@ export async function restoreFromPhrase(
     wrappedPrivateKey: data.wrappedPrivateKey,
     publicKeyHex: data.publicKey,
   });
-  setUnlocked({ uid, masterSecret, privateKey, publicKey });
+  setUnlocked({
+    uid,
+    masterSecret,
+    privateKey,
+    publicKey,
+    publicKeyHex: data.publicKey,
+  });
 }
 
 /**
