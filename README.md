@@ -92,16 +92,10 @@ npm run build       # typecheck + lint
 npm run test        # vitest
 ```
 
-Environment variables (see [`.env.example`](.env.example)):
-
-- `T212_ENCRYPTION_KEY` — **required.** Base64-encoded 32-byte master key
-  used to encrypt Trading 212 credentials at rest. Generate with
-  `openssl rand -base64 32`. Must be set locally and in every Vercel
-  environment. Losing or rotating this key makes stored credentials
-  unrecoverable — users then reconnect.
-
-Market data needs no env vars — it comes from Yahoo Finance's public
-endpoints. Firebase client config is embedded in
+Environment variables: **none required.** Trading 212 credentials are
+encrypted client-side under each user's master secret before reaching
+Firestore — the previous `T212_ENCRYPTION_KEY` env var is obsolete.
+Market data comes from Yahoo Finance's public endpoints. Firebase client config is embedded in
 [`src/lib/firebase.ts`](src/lib/firebase.ts); it's a public web config,
 which is why App Check + Firestore rules exist.
 
