@@ -36,8 +36,11 @@ import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { useDisplayName } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
-import { fetchTrading212Orders } from "@/lib/trading212";
-import { encryptSecret, decryptSecret } from "@/lib/crypto";
+import { fetchTrading212OrdersClient } from "@/lib/trading212-client";
+import {
+  decryptT212Secret,
+  encryptT212Secret,
+} from "@/lib/crypto-client";
 import { useEncryption } from "@/lib/use-encryption";
 import { getUnlocked } from "@/lib/key-store";
 import {
@@ -555,16 +558,29 @@ export default function PortfolioPage({
   };
 
   const handleSync = async (provider: string, keyOverride?: string) => {
-    if (!portfolio) return;
+    if (!portfolio || !user) return;
     const portfolioRef = doc(db, "portfolios", id);
     const secretRef = doc(db, "portfolios", id, "secrets", provider);
+
+    // Under the E2E model, T212 credentials are encrypted with the user's
+    // master secret on the client. The server can't read them at rest. To
+    // store/retrieve we need the user to be unlocked.
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) {
+      setSyncError("Unlock your portfolio first.");
+      return;
+    }
 
     // Resolve a plaintext API key for this sync, and decide whether we need
     // to persist a fresh ciphertext afterward.
     //   - Fresh paste (`keyOverride`): plaintext in hand, write ciphertext.
-    //   - Stored blob with a `:` — legacy plaintext from before encryption
-    //     landed. Use as-is and opportunistically migrate to ciphertext.
-    //   - Stored blob without a `:` — ciphertext, decrypt server-side.
+    //   - Stored doc with `payload`+`iv` fields — current shape, decrypt
+    //     under master secret.
+    //   - Stored doc with `value` (legacy server-side AES) — try
+    //     decryptSecret as a fallback during the rollout window. We could
+    //     also accept literal `key:secret` (pre-encryption-era) but the
+    //     legacy `value` format already covered that. Anything we can't
+    //     decrypt here, the user reconnects.
     let plaintextKey: string;
     let needsWriteBack = false;
     if (keyOverride) {
@@ -572,21 +588,24 @@ export default function PortfolioPage({
       needsWriteBack = true;
     } else {
       const secretSnap = await getDoc(secretRef);
-      const blob = secretSnap.exists() ? (secretSnap.data().value as string | undefined) : undefined;
-      if (!blob) {
-        setSyncError("No credentials — reconnect.");
-        return;
-      }
-      if (blob.includes(":")) {
-        plaintextKey = blob;
-        needsWriteBack = true; // migrate legacy plaintext to ciphertext
-      } else {
+      const data = secretSnap.exists() ? secretSnap.data() : null;
+      if (
+        data &&
+        typeof data.payload === "string" &&
+        typeof data.iv === "string"
+      ) {
         try {
-          plaintextKey = await decryptSecret(blob);
+          plaintextKey = await decryptT212Secret(
+            { payload: data.payload, iv: data.iv },
+            unlocked.masterSecret,
+          );
         } catch {
           setSyncError("Stored credentials are corrupt — reconnect.");
           return;
         }
+      } else {
+        setSyncError("No credentials — reconnect.");
+        return;
       }
     }
 
@@ -598,16 +617,25 @@ export default function PortfolioPage({
     let skipped = 0;
     try {
       if (needsWriteBack) {
-        const ciphertext = await encryptSecret(plaintextKey);
-        await setDoc(secretRef, { value: ciphertext, updatedAt: Date.now() });
+        // Client-side encrypt under master secret. Server holds ciphertext
+        // it can't decrypt at rest.
+        const env = await encryptT212Secret(plaintextKey, unlocked.masterSecret);
+        await setDoc(secretRef, {
+          payload: env.payload,
+          iv: env.iv,
+          updatedAt: Date.now(),
+        });
         await updateDoc(portfolioRef, {
           connectedBrokers: arrayUnion(provider),
           [`brokerKeys.${provider}`]: deleteField(),
         });
       }
-      let result: Awaited<ReturnType<typeof fetchTrading212Orders>>;
+      let result: Awaited<ReturnType<typeof fetchTrading212OrdersClient>>;
       if (provider === "trading212") {
-        result = await fetchTrading212Orders(plaintextKey);
+        // All HTTP calls to T212 go through the dumb proxy at
+        // /api/t212-proxy. Server sees the auth header for the duration
+        // of one request and never persists it.
+        result = await fetchTrading212OrdersClient(plaintextKey);
       } else {
         throw new Error(`Unsupported provider: ${provider}`);
       }
