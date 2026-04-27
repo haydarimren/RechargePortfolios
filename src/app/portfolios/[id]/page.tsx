@@ -10,13 +10,9 @@ import {
   onSnapshot,
   addDoc,
   updateDoc,
-  deleteField,
   writeBatch,
-  arrayUnion,
-  arrayRemove,
   setDoc,
   getDoc,
-  getDocs,
   deleteDoc,
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
@@ -35,8 +31,24 @@ import {
 import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { useDisplayName } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
-import { fetchTrading212Orders } from "@/lib/trading212";
-import { encryptSecret, decryptSecret } from "@/lib/crypto";
+import { UnlockModal } from "@/components/UnlockModal";
+import { fetchTrading212OrdersClient } from "@/lib/trading212-client";
+import { cleanT212Symbol } from "@/lib/trading212-utils";
+import {
+  decryptT212Secret,
+  encryptT212Secret,
+} from "@/lib/crypto-client";
+import { useEncryption } from "@/lib/use-encryption";
+import { getUnlocked } from "@/lib/key-store";
+import {
+  addHolding,
+  loadPortfolioKey,
+  migratePortfolioToEncrypted,
+  reconcileSharedWrappedKeys,
+  subscribeHoldings,
+  updateHoldingFields,
+} from "@/lib/holdings-repo";
+import { encryptHolding } from "@/lib/crypto-client";
 import {
   PortfolioView,
   subscribeToPortfolioViews,
@@ -70,7 +82,7 @@ export default function PortfolioPage({
   const chartColors = useChartColors();
 
   const [user, setUser] = useState<User | null>(null);
-  const [portfolio, setPortfolio] = useState<(Portfolio & { connectedBrokers?: string[] }) | null>(null);
+  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [quotes, setQuotes] = useState<Record<string, StockQuote | null>>({});
   const [loading, setLoading] = useState(true);
@@ -106,6 +118,20 @@ export default function PortfolioPage({
   const [syncLoading, setSyncLoading] = useState<string | null>(null);
   const [syncError, setSyncError] = useState("");
 
+  const encryption = useEncryption();
+  // Unwrapped K_portfolio for the active portfolio. Set once per portfolio
+  // load (or after a migration). null means the holdings subscription falls
+  // back to the legacy plaintext shape.
+  const [portfolioKey, setPortfolioKey] = useState<CryptoKey | null>(null);
+  const [migrationError, setMigrationError] = useState("");
+
+  // Which brokers are currently connected on this portfolio. Derived from
+  // the existence of `secrets/credentials` (= some broker connected); we
+  // can't tell *which* broker without decrypting, but with single-broker
+  // support today we default to the only one we know about. Replaces the
+  // deprecated plaintext `connectedBrokers` array on the portfolio doc.
+  const [connectedProviders, setConnectedProviders] = useState<string[]>([]);
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
@@ -117,10 +143,14 @@ export default function PortfolioPage({
     return () => unsub();
   }, [router]);
 
+  // Portfolio doc listener — stable, never tears down due to portfolioKey
+  // changes. Splitting this from the holdings listener avoids a feedback
+  // loop where every snapshot would create a new portfolio object,
+  // re-fire the encryption-state effect, resolve a fresh K_portfolio,
+  // and tear down + recreate this listener on every cycle.
   useEffect(() => {
     if (!user) return;
-
-    const unsubPortfolio = onSnapshot(
+    return onSnapshot(
       doc(db, "portfolios", id),
       (snap) => {
         if (!snap.exists()) {
@@ -137,28 +167,137 @@ export default function PortfolioPage({
       () => {
         setNotFound(true);
         setLoading(false);
-      }
-    );
-
-    const unsubHoldings = onSnapshot(
-      collection(db, "portfolios", id, "holdings"),
-      (snap) => {
-        const rows = snap.docs.map(
-          (d) => ({ id: d.id, ...(d.data() as Omit<Holding, "id">) })
-        );
-        rows.sort((a, b) => a.purchaseDate.localeCompare(b.purchaseDate));
-        setHoldings(rows);
       },
-      () => {
-        setHoldings([]);
-      }
     );
+  }, [user, id]);
+
+  // Holdings listener — depends on portfolioKey. Re-subscribes when the
+  // key arrives so encrypted docs start decoding. Pre-migration portfolios
+  // pass through to the legacy plaintext shape.
+  useEffect(() => {
+    if (!user) return;
+    const sub = subscribeHoldings(
+      id,
+      portfolioKey,
+      (rows) => setHoldings(rows),
+      () => setHoldings([]),
+    );
+    return () => sub.unsubscribe();
+  }, [user, id, portfolioKey]);
+
+  // Watch the credentials doc to populate `connectedProviders`. The doc's
+  // existence signals "a broker is connected"; with single-broker support
+  // today we map that to the only broker we know about. Multi-broker
+  // future moves provider discrimination INTO the encrypted payload,
+  // requiring a decrypt here.
+  useEffect(() => {
+    if (!user) return;
+    return onSnapshot(
+      doc(db, "portfolios", id, "secrets", "credentials"),
+      (snap) => {
+        setConnectedProviders(snap.exists() ? ["trading212"] : []);
+      },
+      () => setConnectedProviders([]),
+    );
+  }, [user, id]);
+
+  // Resolve K_portfolio when the portfolio is loaded + user is unlocked.
+  // For owners viewing a not-yet-encrypted portfolio, also kick off the
+  // one-shot migration that re-encrypts all holdings. For shared viewers,
+  // we just attempt to fetch their wrappedKey doc — Phase 3 makes this
+  // robust against owners who haven't yet wrapped for them.
+  //
+  // Critical: deps are *scalar* projections of `portfolio` (encrypted flag,
+  // ownerId, sharedWith joined into a string). Using the whole portfolio
+  // object would re-fire this effect on every snapshot delivery — even
+  // when nothing changed — because `setPortfolio` always allocates a new
+  // object. That re-firing was causing a feedback loop with the holdings
+  // listener: new key → new listener → new snapshot → new portfolio
+  // object → new key → … → 200+ Firestore requests per 10s.
+  const portfolioEncrypted = portfolio?.encrypted ?? false;
+  const portfolioOwnerId = portfolio?.ownerId;
+  // Sort first so the sig is order-independent — Firestore sometimes
+  // delivers sharedWith in different orders across snapshots.
+  const portfolioSharedSig = portfolio?.sharedWith
+    ? [...portfolio.sharedWith].sort().join(",")
+    : "";
+  useEffect(() => {
+    if (!portfolioOwnerId || !user) return;
+    if (encryption.state.kind !== "unlocked") return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) return;
+    const isPortfolioOwner = portfolioOwnerId === user.uid;
+    const sharedWith = portfolioSharedSig
+      ? portfolioSharedSig.split(",")
+      : [];
+    let cancelled = false;
+    setMigrationError("");
+
+    (async () => {
+      // Path 1: portfolio is already encrypted → just fetch + unwrap our key.
+      if (portfolioEncrypted) {
+        try {
+          const k = await loadPortfolioKey(id, user.uid, unlocked.privateKey);
+          if (!cancelled) setPortfolioKey(k);
+          // Re-share reconnection: if any sharer enrolled after this
+          // portfolio was migrated, they have a publicKey but no
+          // wrappedKey doc. Silently fix that on every owner load.
+          if (isPortfolioOwner && sharedWith.length > 0) {
+            await reconcileSharedWrappedKeys(id, sharedWith, {
+              portfolioKey: k,
+              ownerPrivateKey: unlocked.privateKey,
+              ownerPublicKeyHex: unlocked.publicKeyHex,
+            });
+          }
+        } catch (err) {
+          if (!cancelled) {
+            setMigrationError(
+              isPortfolioOwner
+                ? "Couldn't unlock your portfolio key — try refreshing."
+                : "This portfolio is encrypted but the owner hasn't shared the key with you yet.",
+            );
+          }
+          console.warn("loadPortfolioKey failed", err);
+        }
+        return;
+      }
+      // Path 2: not encrypted, owner is here → migrate.
+      if (isPortfolioOwner) {
+        try {
+          await migratePortfolioToEncrypted(
+            id,
+            user.uid,
+            unlocked.privateKey,
+            unlocked.publicKey,
+            unlocked.publicKeyHex,
+          );
+          // After migration, the portfolio doc snapshot will deliver
+          // `encrypted: true` shortly; that triggers Path 1 above and
+          // populates portfolioKey. Nothing more to do here.
+        } catch (err) {
+          if (!cancelled) {
+            setMigrationError(
+              "Couldn't migrate your portfolio to encrypted storage. Refresh to try again.",
+            );
+          }
+          console.warn("migratePortfolioToEncrypted failed", err);
+        }
+      }
+      // Path 3: not encrypted, viewer is a sharer → leave plaintext path
+      // active until the owner migrates.
+    })();
 
     return () => {
-      unsubPortfolio();
-      unsubHoldings();
+      cancelled = true;
     };
-  }, [user, id]);
+  }, [
+    portfolioEncrypted,
+    portfolioOwnerId,
+    portfolioSharedSig,
+    user,
+    id,
+    encryption.state.kind,
+  ]);
 
   useEffect(() => {
     const symbols = Array.from(new Set(holdings.map((h) => h.symbol)));
@@ -441,7 +580,10 @@ export default function PortfolioPage({
     const yahooSymbol = form.exchange
       ? `${bareSymbol}${form.exchange}`
       : bareSymbol;
-    const holdingData: Record<string, unknown> = {
+    // Encryption-aware add: passes through addHolding which writes the
+    // encrypted shape if a portfolioKey is in hand, else falls back to the
+    // legacy plaintext shape (pre-migration portfolios).
+    await addHolding(id, portfolioKey, {
       symbol: bareSymbol,
       shares,
       purchasePrice: price,
@@ -449,8 +591,7 @@ export default function PortfolioPage({
       createdAt: Date.now(),
       side: form.side,
       yahooSymbol,
-    };
-    await addDoc(collection(db, "portfolios", id, "holdings"), holdingData);
+    });
     setForm({
       symbol: "",
       exchange: "",
@@ -463,16 +604,27 @@ export default function PortfolioPage({
   };
 
   const handleSync = async (provider: string, keyOverride?: string) => {
-    if (!portfolio) return;
-    const portfolioRef = doc(db, "portfolios", id);
-    const secretRef = doc(db, "portfolios", id, "secrets", provider);
+    if (!portfolio || !user) return;
+    // Single generic secrets doc per portfolio. The provider name (e.g.
+    // "trading212") is stamped inside the encrypted payload, never on
+    // the doc path.
+    const secretRef = doc(db, "portfolios", id, "secrets", "credentials");
 
-    // Resolve a plaintext API key for this sync, and decide whether we need
-    // to persist a fresh ciphertext afterward.
+    // Under the E2E model, broker credentials are encrypted with the user's
+    // master secret on the client. The server can't read them at rest. To
+    // store/retrieve we need the user to be unlocked.
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) {
+      setSyncError("Unlock your portfolio first.");
+      return;
+    }
+
+    // Resolve a plaintext API key for this sync.
     //   - Fresh paste (`keyOverride`): plaintext in hand, write ciphertext.
-    //   - Stored blob with a `:` — legacy plaintext from before encryption
-    //     landed. Use as-is and opportunistically migrate to ciphertext.
-    //   - Stored blob without a `:` — ciphertext, decrypt server-side.
+    //   - Stored `secrets/credentials` doc: `{ payload, iv }` envelope —
+    //     decrypt under master secret. The eager migration on home-page
+    //     load already renamed any legacy `secrets/trading212` to this
+    //     path, so by the time sync runs we shouldn't see the old name.
     let plaintextKey: string;
     let needsWriteBack = false;
     if (keyOverride) {
@@ -480,21 +632,24 @@ export default function PortfolioPage({
       needsWriteBack = true;
     } else {
       const secretSnap = await getDoc(secretRef);
-      const blob = secretSnap.exists() ? (secretSnap.data().value as string | undefined) : undefined;
-      if (!blob) {
-        setSyncError("No credentials — reconnect.");
-        return;
-      }
-      if (blob.includes(":")) {
-        plaintextKey = blob;
-        needsWriteBack = true; // migrate legacy plaintext to ciphertext
-      } else {
+      const data = secretSnap.exists() ? secretSnap.data() : null;
+      if (
+        data &&
+        typeof data.payload === "string" &&
+        typeof data.iv === "string"
+      ) {
         try {
-          plaintextKey = await decryptSecret(blob);
+          plaintextKey = await decryptT212Secret(
+            { payload: data.payload, iv: data.iv },
+            unlocked.masterSecret,
+          );
         } catch {
           setSyncError("Stored credentials are corrupt — reconnect.");
           return;
         }
+      } else {
+        setSyncError("No credentials — reconnect.");
+        return;
       }
     }
 
@@ -506,37 +661,102 @@ export default function PortfolioPage({
     let skipped = 0;
     try {
       if (needsWriteBack) {
-        const ciphertext = await encryptSecret(plaintextKey);
-        await setDoc(secretRef, { value: ciphertext, updatedAt: Date.now() });
-        await updateDoc(portfolioRef, {
-          connectedBrokers: arrayUnion(provider),
-          [`brokerKeys.${provider}`]: deleteField(),
+        // Client-side encrypt under master secret. Server holds ciphertext
+        // it can't decrypt at rest. The provider field is informational
+        // only — we know which broker this portfolio talks to once we've
+        // decrypted; before that the server sees only "credentials".
+        const env = await encryptT212Secret(plaintextKey, unlocked.masterSecret);
+        // No `provider` field on the doc itself — that would leak the
+        // broker name. With single-broker support today, the UI infers
+        // "this is a T212 connection" from the doc's existence. Adding
+        // a second broker in the future means moving provider
+        // discrimination INTO the encrypted payload (e.g. encrypting a
+        // `{ provider, apiKey }` object instead of just the API key).
+        await setDoc(secretRef, {
+          payload: env.payload,
+          iv: env.iv,
+          updatedAt: Date.now(),
         });
+        // Note: previously this call also wrote `connectedBrokers:
+        // arrayUnion(provider)` on the portfolio doc. That field has
+        // been deprecated — UI now infers connection state from the
+        // existence of `secrets/credentials`. Eager migration cleans up
+        // any leftover values.
       }
-      let result: Awaited<ReturnType<typeof fetchTrading212Orders>>;
+      let result: Awaited<ReturnType<typeof fetchTrading212OrdersClient>>;
       if (provider === "trading212") {
-        result = await fetchTrading212Orders(plaintextKey);
+        // All HTTP calls to the broker go through the dumb relay at
+        // /api/broker-proxy. Server sees the auth header for the
+        // duration of one request and never persists it.
+        //
+        // The `isOrderKnown` callback lets the client stop paginating
+        // as soon as a full page of orders is already imported — T212
+        // returns orders newest-first, so once we hit a fully-known
+        // page everything older is also already imported. Repeat
+        // syncs of an active account drop from N pages to 1-2,
+        // critical for staying under T212's per-minute rate limit on
+        // history/orders.
+        //
+        // We match BOTH on `t212OrderId` (preferred — exact identity)
+        // AND on shape (symbol + purchaseDate + shares — the
+        // fallback used by the post-fetch dedup loop below). The
+        // shape match catches holdings that were imported before
+        // we tracked t212OrderId; without it, the optimization
+        // would be nearly useless on legacy portfolios.
+        const isOrderKnown = (args: {
+          orderId: string;
+          rawTicker: string;
+          purchaseDate: string;
+          shares: number;
+        }) => {
+          for (const h of holdings) {
+            if (h.t212OrderId === args.orderId) return true;
+          }
+          const cleaned = cleanT212Symbol(args.rawTicker);
+          for (const h of holdings) {
+            if (h.t212OrderId) continue; // covered by id check above
+            if (h.symbol !== cleaned) continue;
+            if (h.purchaseDate !== args.purchaseDate) continue;
+            if (Math.abs(h.shares - args.shares) > 0.0001) continue;
+            return true;
+          }
+          return false;
+        };
+        result = await fetchTrading212OrdersClient(
+          plaintextKey,
+          isOrderKnown,
+        );
       } else {
         throw new Error(`Unsupported provider: ${provider}`);
       }
 
-      // Fresh read to avoid stale closure on holdings
-      const currentSnap = await getDocs(collection(db, "portfolios", id, "holdings"));
-      const currentHoldings: Holding[] = currentSnap.docs.map(
-        (d) => ({ id: d.id, ...(d.data() as Omit<Holding, "id">) })
-      );
+      // Use the already-decoded `holdings` state from the live
+      // subscription. handleSync is recreated on every render, so the
+      // closure captures the latest holdings — no stale-snapshot race.
+      // Crucial that this is the DECODED shape: for v2 docs, the
+      // dedup-by-t212OrderId check below would always fail against the
+      // raw `getDocs` shape (t212OrderId lives inside the encrypted
+      // payload there, not at the doc top level). That bug caused
+      // every sync after the first to double-import every order.
+      const decodedCurrent = holdings;
+      // Decisions are sequential (encrypt-then-write) but we can still
+      // batch the Firestore round-trip for the new-doc writes. Backfill
+      // updates of encrypted docs need a read-decrypt-merge-encrypt-write
+      // cycle each, so they're not batchable — issue them serially.
+      const newDocsBuffer: Array<{
+        encryptedShape: Record<string, unknown>;
+        plaintextShape: Record<string, unknown>;
+      }> = [];
 
-      const batch = writeBatch(db);
-      const holdingsCol = collection(db, "portfolios", id, "holdings");
       for (const order of result.orders) {
-        const existing = currentHoldings.find(
+        const existing = decodedCurrent.find(
           (h) =>
             h.importSource === "trading212" &&
             h.t212OrderId === order.id
         );
         const byShape = existing
           ? undefined
-          : currentHoldings.find(
+          : decodedCurrent.find(
               (h) =>
                 !h.t212OrderId &&
                 h.symbol === order.symbol &&
@@ -545,30 +765,35 @@ export default function PortfolioPage({
             );
         const target = existing ?? byShape;
         if (target) {
-          // Backfill yahooSymbol/isin on pre-existing holdings that were
-          // imported before these fields existed. Without this, re-syncing
-          // doesn't help tickers like VUAA that need `.L` to quote.
-          const patch: Record<string, unknown> = {};
-          // Refresh yahooSymbol when the import gives us something different
-          // from what's stored — handles corporate renames (e.g. ASTS
-          // pre-merger lots that were imported as NPA before the T212
-          // shortName fix landed).
+          // Backfill yahooSymbol/isin/symbol corrections — same logic as
+          // before, but routed through updateHoldingFields so encrypted
+          // docs go through decrypt-merge-encrypt rather than naively
+          // updating top-level fields that don't exist on ciphertext docs.
+          //
+          // Also backfill t212OrderId on holdings that were matched by
+          // shape rather than by id — without this, the dedup-and-stop
+          // optimization stays expensive forever on these holdings
+          // (each shape lookup is O(holdings) instead of O(1)). After
+          // one sync post-this-fix, future syncs are fully on the
+          // cheap id path.
+          const patch: Record<string, string | undefined> = {};
           if (order.yahooSymbol && target.yahooSymbol !== order.yahooSymbol) {
             patch.yahooSymbol = order.yahooSymbol;
           }
           if (!target.isin && order.isin) patch.isin = order.isin;
-          // Same logic for `symbol` — if T212 metadata now reports a
-          // different shortName, align the stored symbol with it.
           if (order.symbol && target.symbol !== order.symbol) {
             patch.symbol = order.symbol;
           }
+          if (!target.t212OrderId) patch.t212OrderId = order.id;
           if (Object.keys(patch).length > 0) {
-            batch.update(doc(db, "portfolios", id, "holdings", target.id), patch);
+            await updateHoldingFields(id, target.id, portfolioKey, patch);
           }
           skipped++;
           continue;
         }
-        const holdingData: Record<string, unknown> = {
+        // New holding. Pre-encrypt now so the write batch can be a single
+        // round-trip at the end.
+        const plaintextShape: Record<string, unknown> = {
           symbol: order.symbol,
           shares: order.shares,
           purchasePrice: order.purchasePrice,
@@ -578,12 +803,51 @@ export default function PortfolioPage({
           t212OrderId: order.id,
           side: order.side,
         };
-        if (order.currency) holdingData.currency = order.currency;
-        if (order.isin) holdingData.isin = order.isin;
-        if (order.yahooSymbol) holdingData.yahooSymbol = order.yahooSymbol;
-        batch.set(doc(holdingsCol), holdingData);
+        if (order.currency) plaintextShape.currency = order.currency;
+        if (order.isin) plaintextShape.isin = order.isin;
+        if (order.yahooSymbol) plaintextShape.yahooSymbol = order.yahooSymbol;
+
+        if (portfolioKey) {
+          // v2 shape: importSource and t212OrderId go INSIDE the
+          // encrypted payload along with every other field. The
+          // Firestore doc top level only carries the envelope plus
+          // createdAt and schemaVersion — nothing identifying the
+          // broker.
+          const ct = await encryptHolding(
+            {
+              symbol: order.symbol,
+              shares: order.shares,
+              purchasePrice: order.purchasePrice,
+              purchaseDate: order.purchaseDate,
+              side: order.side,
+              currency: order.currency,
+              isin: order.isin,
+              yahooSymbol: order.yahooSymbol,
+              importSource: provider,
+              t212OrderId: order.id,
+            },
+            portfolioKey,
+          );
+          newDocsBuffer.push({
+            plaintextShape,
+            encryptedShape: {
+              payload: ct.payload,
+              iv: ct.iv,
+              createdAt: plaintextShape.createdAt,
+              schemaVersion: 2,
+            },
+          });
+        } else {
+          // Legacy path — plaintext doc.
+          newDocsBuffer.push({ plaintextShape, encryptedShape: plaintextShape });
+        }
         if (order.side === "SELL") sells++;
         else buys++;
+      }
+      const batch = writeBatch(db);
+      const holdingsCol = collection(db, "portfolios", id, "holdings");
+      for (const item of newDocsBuffer) {
+        batch.set(doc(holdingsCol), item.encryptedShape);
       }
       await batch.commit();
       setSyncResults((prev) => ({
@@ -600,8 +864,11 @@ export default function PortfolioPage({
     } finally {
       setSyncLoading(null);
       try {
+        // syncLog used to record `provider: "trading212"`; that's gone
+        // now — the existence of `secrets/credentials` already implies a
+        // broker connection, and we don't need to broadcast which one in
+        // the diagnostic log.
         await addDoc(collection(db, "portfolios", id, "syncLogs"), {
-          provider,
           timestamp: Date.now(),
           imported: buys + sells,
           buys,
@@ -616,11 +883,12 @@ export default function PortfolioPage({
   };
 
   const handleDisconnect = async (provider: string) => {
-    await deleteDoc(doc(db, "portfolios", id, "secrets", provider));
-    await updateDoc(doc(db, "portfolios", id), {
-      connectedBrokers: arrayRemove(provider),
-      [`brokerKeys.${provider}`]: deleteField(),
-    });
+    // Generic credentials doc; the provider name is/was stamped in the
+    // encrypted payload, not the path. No portfolio-doc field to update
+    // — connectedBrokers is deprecated and connection state is now
+    // implicit in the existence of `secrets/credentials`.
+    await deleteDoc(doc(db, "portfolios", id, "secrets", "credentials"));
+    void provider; // signature kept for the existing call sites; unused now
     setSyncResults((prev) => {
       const next = { ...prev };
       delete next[provider];
@@ -646,8 +914,24 @@ export default function PortfolioPage({
     );
   }
 
+  // Daily login auto-unlocks silently. The modal here is only for the
+  // browser-cleared / new-device case where we need the user's
+  // recovery phrase to rebuild local key state.
+  const needsRecovery = encryption.state.kind === "needs-recovery";
+
   return (
     <div className="min-h-screen">
+      {needsRecovery && encryption.state.kind === "needs-recovery" && (
+        <UnlockModal
+          uid={encryption.state.uid}
+          onRestore={encryption.restore}
+        />
+      )}
+      {migrationError && (
+        <div className="fixed top-3 right-3 z-40 max-w-sm border border-neg/40 bg-neg/10 text-neg text-xs rounded-md p-3 num">
+          {migrationError}
+        </div>
+      )}
       <header className="px-6 lg:px-10 pt-6 pb-4 border-b border-line">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
           <Link
@@ -816,7 +1100,7 @@ export default function PortfolioPage({
                     Not enough data.
                   </div>
                 ) : (
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height={340}>
                     <AreaChart
                       data={isOwner ? series : normalizedSeries}
                       margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
@@ -1245,11 +1529,11 @@ export default function PortfolioPage({
             </div>
 
             {/* Connected brokers */}
-            {(portfolio.connectedBrokers ?? []).length > 0 && (
+            {connectedProviders.length > 0 && (
               <div className="mb-5">
                 <div className="label mb-3">Connected brokers</div>
                 <ul className="space-y-2">
-                  {(portfolio.connectedBrokers ?? []).map((provider) => {
+                  {connectedProviders.map((provider) => {
                     const result = syncResults[provider];
                     const isLoading = syncLoading === provider;
                     return (
@@ -1302,7 +1586,7 @@ export default function PortfolioPage({
                     className="field"
                   >
                     {SUPPORTED_BROKERS.filter(
-                      (b) => !(portfolio.connectedBrokers ?? []).includes(b)
+                      (b) => !connectedProviders.includes(b)
                     ).map((b) => (
                       <option key={b} value={b}>{BROKER_LABELS[b]}</option>
                     ))}
@@ -1362,8 +1646,22 @@ export default function PortfolioPage({
             </div>
             <SharePanel
               portfolioId={id}
+              ownerUid={portfolio.ownerId}
               sharedWith={portfolio.sharedWith}
               onClose={() => setShowShare(false)}
+              encryption={
+                portfolio.encrypted &&
+                portfolioKey &&
+                user &&
+                getUnlocked(user.uid)
+                  ? {
+                      portfolioKey,
+                      ownerPrivateKey: getUnlocked(user.uid)!.privateKey,
+                      ownerPublicKey: getUnlocked(user.uid)!.publicKey,
+                      ownerPublicKeyHex: getUnlocked(user.uid)!.publicKeyHex,
+                    }
+                  : undefined
+              }
             />
           </div>
         </div>

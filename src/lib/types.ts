@@ -6,6 +6,14 @@ export interface Portfolio {
   sharedWith: string[];
   createdAt: number;
   brokerKeys?: Record<string, string>;
+  /**
+   * `true` once the owner has run the one-shot Phase 2 migration. Holdings
+   * under this portfolio are stored as `{ payload, iv, createdAt, ... }`
+   * ciphertext envelopes and require K_portfolio (read from
+   * `wrappedKeys/{uid}`) to decode. Pre-migration portfolios omit this
+   * field entirely; the read path treats absence as plaintext mode.
+   */
+  encrypted?: boolean;
 }
 
 export interface Holding {

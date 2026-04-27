@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/lib/theme";
+import { EnrollmentGate } from "@/components/EnrollmentGate";
 
 const geist = Geist({
   variable: "--font-geist",
@@ -55,7 +56,9 @@ export default function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>
       <body className="min-h-full flex flex-col">
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider>
+          <EnrollmentGate>{children}</EnrollmentGate>
+        </ThemeProvider>
       </body>
     </html>
   );

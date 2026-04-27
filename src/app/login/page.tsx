@@ -20,6 +20,10 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
+  // After auth resolves, just push home — the EnrollmentGate handles
+  // routing to onboarding for unenrolled users, and useEncryption
+  // silently auto-unlocks anyone who's already enrolled. Login itself
+  // doesn't need to know about encryption state.
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
