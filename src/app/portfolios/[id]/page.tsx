@@ -32,6 +32,7 @@ import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { useDisplayName } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
+import { AllocationTreemap } from "@/components/AllocationTreemap";
 import { fetchTrading212OrdersClient } from "@/lib/trading212-client";
 import { cleanT212Symbol } from "@/lib/trading212-utils";
 import {
@@ -448,6 +449,8 @@ export default function PortfolioPage({
       touchLogbookView(user.uid, id);
     }
   };
+
+  const [posView, setPosView] = useState<"table" | "map">("table");
 
   // Total current market value across positions with resolved quotes. Used to
   // compute per-row allocation % in the owner positions table. Positions
@@ -1215,7 +1218,7 @@ export default function PortfolioPage({
               </h2>
               <p className="text-sm text-fg-dim mt-1">
                 {tab === "positions"
-                  ? "Click a row to see lot history and price chart."
+                  ? `Click a ${posView === "map" ? "tile" : "row"} to see lot history and price chart.`
                   : "Every buy and sell, newest first."}
               </p>
             </div>
@@ -1379,7 +1382,43 @@ export default function PortfolioPage({
             <div className="card p-10 text-center text-fg-dim text-sm">
               No holdings yet.
             </div>
-          ) : !isOwner ? (
+          ) : (
+            <>
+              <div className="mb-3 flex justify-end">
+                <div className="flex gap-1 bg-bg-3 border border-line rounded-full p-1">
+                  <button
+                    onClick={() => setPosView("table")}
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition ${
+                      posView === "table"
+                        ? "bg-bg text-fg shadow-sm"
+                        : "text-fg-dim hover:text-fg"
+                    }`}
+                    aria-pressed={posView === "table"}
+                  >
+                    Table
+                  </button>
+                  <button
+                    onClick={() => setPosView("map")}
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition ${
+                      posView === "map"
+                        ? "bg-bg text-fg shadow-sm"
+                        : "text-fg-dim hover:text-fg"
+                    }`}
+                    aria-pressed={posView === "map"}
+                  >
+                    Map
+                  </button>
+                </div>
+              </div>
+              {posView === "map" ? (
+                <AllocationTreemap
+                  positions={positions}
+                  quotes={quotes}
+                  totalMarket={positionsTotalMarket}
+                  isOwner={isOwner}
+                  portfolioId={id}
+                />
+              ) : !isOwner ? (
             <div className="card overflow-hidden">
               <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-3 label border-b border-line">
                 <span>Symbol</span>
@@ -1511,6 +1550,8 @@ export default function PortfolioPage({
                 );
               })}
             </div>
+              )}
+            </>
           )}
         </section>
       </main>
