@@ -108,10 +108,23 @@ export async function savePersistedState(
 ): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(state);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    try {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () =>
+        reject(tx.error ?? new Error("IndexedDB transaction failed"));
+      tx.onabort = () =>
+        reject(tx.error ?? new Error("IndexedDB transaction aborted"));
+      const req = tx.objectStore(STORE).put(state);
+      // Some browsers report structured-clone errors via the request's
+      // onerror rather than the transaction's. Catch both.
+      req.onerror = () =>
+        reject(req.error ?? new Error("IndexedDB put failed"));
+    } catch (err) {
+      // IDBObjectStore.put() can throw synchronously when the value isn't
+      // structured-cloneable. Without this catch, the Promise hangs forever.
+      reject(err);
+    }
   });
 }
 
