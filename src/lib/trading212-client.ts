@@ -3,12 +3,17 @@
 /**
  * Browser-side port of the Trading 212 sync logic. Mirrors the original
  * `src/lib/trading212.ts` server action but routes every HTTP call through
- * `/api/t212-proxy` so the server stays a TLS-terminating relay rather than
- * a data processor.
+ * `/api/broker-proxy` so the server stays a TLS-terminating relay rather
+ * than a data processor.
  *
  * The orchestration (pagination, ISIN map, exchange-letter normalization,
  * 429 retries, sequential rate-limit queue) all lives here. Tests against
  * the original logic still apply; only the transport layer differs.
+ *
+ * The proxy URL and request body field names are deliberately broker-
+ * agnostic so server access logs don't broadcast that the user is using
+ * Trading 212 specifically. The actual outbound destination is hardcoded
+ * server-side; this client just speaks "broker-proxy" to it.
  */
 
 import { auth } from "./firebase";
@@ -75,9 +80,9 @@ function validateApiKey(apiKey: string): void {
 }
 
 /**
- * Issue a single proxy call. Always uses POST to `/api/t212-proxy` since
- * that's where our auth-gating lives; the proxy translates this into the
- * appropriate GET to T212.
+ * Issue a single proxy call. Always uses POST to `/api/broker-proxy`
+ * with a generic body shape; the proxy translates into the appropriate
+ * GET to the broker (destination hardcoded server-side).
  *
  * Retries once on 429 after a 65s sleep — T212's rate window is 60s, so
  * one extra wait usually unblocks subsequent requests. Beyond that we
@@ -92,13 +97,13 @@ async function proxyFetch(
     const idToken = await auth.currentUser?.getIdToken();
     if (!idToken) throw new Error("not signed in");
     for (let attempt = 0; attempt <= retries; attempt++) {
-      const res = await fetch("/api/t212-proxy", {
+      const res = await fetch("/api/broker-proxy", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${idToken}`,
         },
-        body: JSON.stringify({ t212Auth: apiKey, path }),
+        body: JSON.stringify({ auth: apiKey, path }),
         cache: "no-store",
       });
       if (res.status !== 429) return res;

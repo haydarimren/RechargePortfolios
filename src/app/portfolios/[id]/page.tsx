@@ -10,10 +10,7 @@ import {
   onSnapshot,
   addDoc,
   updateDoc,
-  deleteField,
   writeBatch,
-  arrayUnion,
-  arrayRemove,
   setDoc,
   getDoc,
   getDocs,
@@ -85,7 +82,7 @@ export default function PortfolioPage({
   const chartColors = useChartColors();
 
   const [user, setUser] = useState<User | null>(null);
-  const [portfolio, setPortfolio] = useState<(Portfolio & { connectedBrokers?: string[] }) | null>(null);
+  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [quotes, setQuotes] = useState<Record<string, StockQuote | null>>({});
   const [loading, setLoading] = useState(true);
@@ -127,6 +124,13 @@ export default function PortfolioPage({
   // back to the legacy plaintext shape.
   const [portfolioKey, setPortfolioKey] = useState<CryptoKey | null>(null);
   const [migrationError, setMigrationError] = useState("");
+
+  // Which brokers are currently connected on this portfolio. Derived from
+  // the existence of `secrets/credentials` (= some broker connected); we
+  // can't tell *which* broker without decrypting, but with single-broker
+  // support today we default to the only one we know about. Replaces the
+  // deprecated plaintext `connectedBrokers` array on the portfolio doc.
+  const [connectedProviders, setConnectedProviders] = useState<string[]>([]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -180,6 +184,22 @@ export default function PortfolioPage({
     );
     return () => sub.unsubscribe();
   }, [user, id, portfolioKey]);
+
+  // Watch the credentials doc to populate `connectedProviders`. The doc's
+  // existence signals "a broker is connected"; with single-broker support
+  // today we map that to the only broker we know about. Multi-broker
+  // future moves provider discrimination INTO the encrypted payload,
+  // requiring a decrypt here.
+  useEffect(() => {
+    if (!user) return;
+    return onSnapshot(
+      doc(db, "portfolios", id, "secrets", "credentials"),
+      (snap) => {
+        setConnectedProviders(snap.exists() ? ["trading212"] : []);
+      },
+      () => setConnectedProviders([]),
+    );
+  }, [user, id]);
 
   // Resolve K_portfolio when the portfolio is loaded + user is unlocked.
   // For owners viewing a not-yet-encrypted portfolio, also kick off the
@@ -585,10 +605,12 @@ export default function PortfolioPage({
 
   const handleSync = async (provider: string, keyOverride?: string) => {
     if (!portfolio || !user) return;
-    const portfolioRef = doc(db, "portfolios", id);
-    const secretRef = doc(db, "portfolios", id, "secrets", provider);
+    // Single generic secrets doc per portfolio. The provider name (e.g.
+    // "trading212") is stamped inside the encrypted payload, never on
+    // the doc path.
+    const secretRef = doc(db, "portfolios", id, "secrets", "credentials");
 
-    // Under the E2E model, T212 credentials are encrypted with the user's
+    // Under the E2E model, broker credentials are encrypted with the user's
     // master secret on the client. The server can't read them at rest. To
     // store/retrieve we need the user to be unlocked.
     const unlocked = getUnlocked(user.uid);
@@ -597,16 +619,12 @@ export default function PortfolioPage({
       return;
     }
 
-    // Resolve a plaintext API key for this sync, and decide whether we need
-    // to persist a fresh ciphertext afterward.
+    // Resolve a plaintext API key for this sync.
     //   - Fresh paste (`keyOverride`): plaintext in hand, write ciphertext.
-    //   - Stored doc with `payload`+`iv` fields — current shape, decrypt
-    //     under master secret.
-    //   - Stored doc with `value` (legacy server-side AES) — try
-    //     decryptSecret as a fallback during the rollout window. We could
-    //     also accept literal `key:secret` (pre-encryption-era) but the
-    //     legacy `value` format already covered that. Anything we can't
-    //     decrypt here, the user reconnects.
+    //   - Stored `secrets/credentials` doc: `{ payload, iv }` envelope —
+    //     decrypt under master secret. The eager migration on home-page
+    //     load already renamed any legacy `secrets/trading212` to this
+    //     path, so by the time sync runs we shouldn't see the old name.
     let plaintextKey: string;
     let needsWriteBack = false;
     if (keyOverride) {
@@ -644,23 +662,32 @@ export default function PortfolioPage({
     try {
       if (needsWriteBack) {
         // Client-side encrypt under master secret. Server holds ciphertext
-        // it can't decrypt at rest.
+        // it can't decrypt at rest. The provider field is informational
+        // only — we know which broker this portfolio talks to once we've
+        // decrypted; before that the server sees only "credentials".
         const env = await encryptT212Secret(plaintextKey, unlocked.masterSecret);
+        // No `provider` field on the doc itself — that would leak the
+        // broker name. With single-broker support today, the UI infers
+        // "this is a T212 connection" from the doc's existence. Adding
+        // a second broker in the future means moving provider
+        // discrimination INTO the encrypted payload (e.g. encrypting a
+        // `{ provider, apiKey }` object instead of just the API key).
         await setDoc(secretRef, {
           payload: env.payload,
           iv: env.iv,
           updatedAt: Date.now(),
         });
-        await updateDoc(portfolioRef, {
-          connectedBrokers: arrayUnion(provider),
-          [`brokerKeys.${provider}`]: deleteField(),
-        });
+        // Note: previously this call also wrote `connectedBrokers:
+        // arrayUnion(provider)` on the portfolio doc. That field has
+        // been deprecated — UI now infers connection state from the
+        // existence of `secrets/credentials`. Eager migration cleans up
+        // any leftover values.
       }
       let result: Awaited<ReturnType<typeof fetchTrading212OrdersClient>>;
       if (provider === "trading212") {
-        // All HTTP calls to T212 go through the dumb proxy at
-        // /api/t212-proxy. Server sees the auth header for the duration
-        // of one request and never persists it.
+        // All HTTP calls to the broker go through the dumb relay at
+        // /api/broker-proxy. Server sees the auth header for the
+        // duration of one request and never persists it.
         result = await fetchTrading212OrdersClient(plaintextKey);
       } else {
         throw new Error(`Unsupported provider: ${provider}`);
@@ -737,6 +764,11 @@ export default function PortfolioPage({
         if (order.yahooSymbol) plaintextShape.yahooSymbol = order.yahooSymbol;
 
         if (portfolioKey) {
+          // v2 shape: importSource and t212OrderId go INSIDE the
+          // encrypted payload along with every other field. The
+          // Firestore doc top level only carries the envelope plus
+          // createdAt and schemaVersion — nothing identifying the
+          // broker.
           const ct = await encryptHolding(
             {
               symbol: order.symbol,
@@ -747,6 +779,8 @@ export default function PortfolioPage({
               currency: order.currency,
               isin: order.isin,
               yahooSymbol: order.yahooSymbol,
+              importSource: provider,
+              t212OrderId: order.id,
             },
             portfolioKey,
           );
@@ -756,9 +790,7 @@ export default function PortfolioPage({
               payload: ct.payload,
               iv: ct.iv,
               createdAt: plaintextShape.createdAt,
-              schemaVersion: 1,
-              importSource: provider,
-              t212OrderId: order.id,
+              schemaVersion: 2,
             },
           });
         } else {
@@ -788,8 +820,11 @@ export default function PortfolioPage({
     } finally {
       setSyncLoading(null);
       try {
+        // syncLog used to record `provider: "trading212"`; that's gone
+        // now — the existence of `secrets/credentials` already implies a
+        // broker connection, and we don't need to broadcast which one in
+        // the diagnostic log.
         await addDoc(collection(db, "portfolios", id, "syncLogs"), {
-          provider,
           timestamp: Date.now(),
           imported: buys + sells,
           buys,
@@ -804,11 +839,12 @@ export default function PortfolioPage({
   };
 
   const handleDisconnect = async (provider: string) => {
-    await deleteDoc(doc(db, "portfolios", id, "secrets", provider));
-    await updateDoc(doc(db, "portfolios", id), {
-      connectedBrokers: arrayRemove(provider),
-      [`brokerKeys.${provider}`]: deleteField(),
-    });
+    // Generic credentials doc; the provider name is/was stamped in the
+    // encrypted payload, not the path. No portfolio-doc field to update
+    // — connectedBrokers is deprecated and connection state is now
+    // implicit in the existence of `secrets/credentials`.
+    await deleteDoc(doc(db, "portfolios", id, "secrets", "credentials"));
+    void provider; // signature kept for the existing call sites; unused now
     setSyncResults((prev) => {
       const next = { ...prev };
       delete next[provider];
@@ -1449,11 +1485,11 @@ export default function PortfolioPage({
             </div>
 
             {/* Connected brokers */}
-            {(portfolio.connectedBrokers ?? []).length > 0 && (
+            {connectedProviders.length > 0 && (
               <div className="mb-5">
                 <div className="label mb-3">Connected brokers</div>
                 <ul className="space-y-2">
-                  {(portfolio.connectedBrokers ?? []).map((provider) => {
+                  {connectedProviders.map((provider) => {
                     const result = syncResults[provider];
                     const isLoading = syncLoading === provider;
                     return (
@@ -1506,7 +1542,7 @@ export default function PortfolioPage({
                     className="field"
                   >
                     {SUPPORTED_BROKERS.filter(
-                      (b) => !(portfolio.connectedBrokers ?? []).includes(b)
+                      (b) => !connectedProviders.includes(b)
                     ).map((b) => (
                       <option key={b} value={b}>{BROKER_LABELS[b]}</option>
                     ))}

@@ -31,6 +31,7 @@ import { getUnlocked } from "@/lib/key-store";
 import {
   loadPortfolioKey,
   reconcileSharedWrappedKeys,
+  runEagerMigrations,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
 import { ArrowUpRight, Plus, Trash2, UserPlus, X } from "lucide-react";
@@ -222,6 +223,36 @@ export default function HomePage() {
       setPortfolioKeys(new Map());
     }
   }, [encryption.state.kind]);
+
+  // Eager migrations on first unlock. Walks every owned portfolio and
+  // brings each up to date on all current schema migrations:
+  //   - plaintext → ciphertext (Phase 2)
+  //   - v1 holding shape → v2 (move importSource/t212OrderId inside payload)
+  //   - secrets/trading212 → secrets/credentials path rename
+  //   - drop deprecated connectedBrokers field
+  // Runs once per session via the ref-guarded flag below — re-renders
+  // don't trigger re-migration. After a single successful pass, the
+  // migration helpers all become idempotent no-ops on subsequent visits.
+  const ranEagerMigrationsForUidRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!user || encryption.state.kind !== "unlocked") return;
+    if (ranEagerMigrationsForUidRef.current === user.uid) return;
+    if (mine.length === 0) return; // wait for the portfolio list to land
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) return;
+    ranEagerMigrationsForUidRef.current = user.uid;
+    void runEagerMigrations(
+      user.uid,
+      mine.map((p) => ({ id: p.id, encrypted: p.encrypted })),
+      unlocked.privateKey,
+      unlocked.publicKey,
+      unlocked.publicKeyHex,
+    ).catch((err) => {
+      console.warn("eager migrations failed", err);
+      // Allow retry on next render after a failure.
+      ranEagerMigrationsForUidRef.current = null;
+    });
+  }, [user, mine, encryption.state.kind]);
 
   // Owner-side reconcile: for every encrypted portfolio I own that has
   // sharers, walk sharedWith and write missing wrappedKey docs for any
