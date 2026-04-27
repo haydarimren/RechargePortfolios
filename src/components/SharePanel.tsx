@@ -13,7 +13,7 @@
  * directly.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { arrayRemove, arrayUnion, doc, updateDoc } from "firebase/firestore";
 import { X } from "lucide-react";
 import { db } from "@/lib/firebase";
@@ -48,6 +48,15 @@ export function SharePanel({
   void _onClose;
   const [uid, setUid] = useState("");
   const [error, setError] = useState("");
+  // Optimistic mirror of `sharedWith` so the list updates the moment a
+  // share/revoke call resolves, rather than waiting for the Firestore
+  // snapshot to round-trip back to the parent — that round-trip can lag
+  // by seconds under long-polling. Synced from the prop whenever the
+  // server-side value changes; our optimistic mutations land on top.
+  const [localShared, setLocalShared] = useState<string[]>(sharedWith);
+  useEffect(() => {
+    setLocalShared(sharedWith);
+  }, [sharedWith]);
   const [busy, setBusy] = useState(false);
 
   const handleAdd = async (e: React.FormEvent) => {
@@ -68,6 +77,8 @@ export function SharePanel({
           sharedWith: arrayUnion(trimmed),
         });
       }
+      // Optimistic add. Idempotent — re-syncs from prop on the next snapshot.
+      setLocalShared((s) => (s.includes(trimmed) ? s : [...s, trimmed]));
       setUid("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't share");
@@ -81,7 +92,7 @@ export function SharePanel({
     setError("");
     try {
       if (encryption) {
-        const remaining = sharedWith.filter((u) => u !== target);
+        const remaining = localShared.filter((u) => u !== target);
         await revokeFromUser(portfolioId, target, {
           oldKey: encryption.portfolioKey,
           ownerUid,
@@ -95,6 +106,9 @@ export function SharePanel({
           sharedWith: arrayRemove(target),
         });
       }
+      // Optimistic remove — list updates instantly even if the Firestore
+      // snapshot for the portfolio doc hasn't propagated back yet.
+      setLocalShared((s) => s.filter((u) => u !== target));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't revoke");
     } finally {
@@ -135,11 +149,11 @@ export function SharePanel({
           {busy ? "Working…" : "Add friend"}
         </button>
       </form>
-      {sharedWith.length > 0 && (
+      {localShared.length > 0 && (
         <div className="mt-5 pt-5 border-t border-line">
           <div className="label mb-3">Currently shared with</div>
           <ul className="space-y-1.5">
-            {sharedWith.map((friendUid) => (
+            {localShared.map((friendUid) => (
               <SharedUserRow
                 key={friendUid}
                 uid={friendUid}
