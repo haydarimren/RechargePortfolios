@@ -156,8 +156,28 @@ async function fetchOpenPositionTickers(
   }
 }
 
+/** Predicate evaluated for each raw T212 order to decide whether we've
+ *  already imported it. Used to short-circuit pagination. The caller has
+ *  the full holdings list and the right notion of "known," so the
+ *  paginator just consults this callback per item. */
+export type IsOrderKnownFn = (args: {
+  orderId: string;
+  rawTicker: string;
+  purchaseDate: string;
+  shares: number;
+}) => boolean;
+
 export async function fetchTrading212OrdersClient(
   apiKey: string,
+  /**
+   * Optional predicate: returns true for orders we've already imported.
+   * When supplied, pagination stops as soon as a page is fully made up
+   * of known orders — T212 is documented as returning orders
+   * newest-first, so any older orders on subsequent pages are by
+   * definition also already imported. Repeat syncs of an active
+   * account drop from N pages to 1.
+   */
+  isOrderKnown?: IsOrderKnownFn,
 ): Promise<ImportResult> {
   validateApiKey(apiKey);
 
@@ -183,10 +203,34 @@ export async function fetchTrading212OrdersClient(
       throw new Error(`Trading212 API error ${res.status}: ${text}`);
     }
     const data = (await res.json()) as T212OrdersResponse;
-    orders.push(...(data.items ?? []));
-    if (!data.nextPagePath) break;
+    const items = data.items ?? [];
+    for (const item of items) orders.push(item);
+    // Stop only when EVERY item on this page is already imported. T212
+    // pagination is documented as newest-first by id, but a defensive
+    // page-level threshold tolerates any out-of-order delivery within
+    // a window equal to the page size (50). Mixed pages (some new,
+    // some old) keep paginating; only a fully-existing page is the
+    // signal that we've reached already-known territory.
+    const pageFullyExisting =
+      items.length > 0 &&
+      !!isOrderKnown &&
+      items.every((item) => {
+        if (!item.fill?.filledAt) return false;
+        return isOrderKnown({
+          orderId: String(item.order.id),
+          rawTicker: item.order.ticker,
+          purchaseDate: item.fill.filledAt.split("T")[0],
+          shares: Math.abs(item.fill.quantity),
+        });
+      });
+    if (!data.nextPagePath || pageFullyExisting) break;
     path = data.nextPagePath;
-    await sleep(500);
+    // T212's documented rate limit on /equity/history/orders is 6/min
+    // (1 every 10s). Sleep 11s to leave a small safety margin so a
+    // multi-page first sync runs to completion without ever tripping
+    // 429. For repeat syncs the dedup-and-stop above usually keeps
+    // us at 1-2 pages, so this only matters on initial imports.
+    await sleep(11_000);
   }
 
   let sellsImported = 0;

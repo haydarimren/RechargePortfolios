@@ -33,6 +33,7 @@ import { useDisplayName } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
 import { fetchTrading212OrdersClient } from "@/lib/trading212-client";
+import { cleanT212Symbol } from "@/lib/trading212-utils";
 import {
   decryptT212Secret,
   encryptT212Secret,
@@ -687,7 +688,44 @@ export default function PortfolioPage({
         // All HTTP calls to the broker go through the dumb relay at
         // /api/broker-proxy. Server sees the auth header for the
         // duration of one request and never persists it.
-        result = await fetchTrading212OrdersClient(plaintextKey);
+        //
+        // The `isOrderKnown` callback lets the client stop paginating
+        // as soon as a full page of orders is already imported — T212
+        // returns orders newest-first, so once we hit a fully-known
+        // page everything older is also already imported. Repeat
+        // syncs of an active account drop from N pages to 1-2,
+        // critical for staying under T212's per-minute rate limit on
+        // history/orders.
+        //
+        // We match BOTH on `t212OrderId` (preferred — exact identity)
+        // AND on shape (symbol + purchaseDate + shares — the
+        // fallback used by the post-fetch dedup loop below). The
+        // shape match catches holdings that were imported before
+        // we tracked t212OrderId; without it, the optimization
+        // would be nearly useless on legacy portfolios.
+        const isOrderKnown = (args: {
+          orderId: string;
+          rawTicker: string;
+          purchaseDate: string;
+          shares: number;
+        }) => {
+          for (const h of holdings) {
+            if (h.t212OrderId === args.orderId) return true;
+          }
+          const cleaned = cleanT212Symbol(args.rawTicker);
+          for (const h of holdings) {
+            if (h.t212OrderId) continue; // covered by id check above
+            if (h.symbol !== cleaned) continue;
+            if (h.purchaseDate !== args.purchaseDate) continue;
+            if (Math.abs(h.shares - args.shares) > 0.0001) continue;
+            return true;
+          }
+          return false;
+        };
+        result = await fetchTrading212OrdersClient(
+          plaintextKey,
+          isOrderKnown,
+        );
       } else {
         throw new Error(`Unsupported provider: ${provider}`);
       }
@@ -731,6 +769,13 @@ export default function PortfolioPage({
           // before, but routed through updateHoldingFields so encrypted
           // docs go through decrypt-merge-encrypt rather than naively
           // updating top-level fields that don't exist on ciphertext docs.
+          //
+          // Also backfill t212OrderId on holdings that were matched by
+          // shape rather than by id — without this, the dedup-and-stop
+          // optimization stays expensive forever on these holdings
+          // (each shape lookup is O(holdings) instead of O(1)). After
+          // one sync post-this-fix, future syncs are fully on the
+          // cheap id path.
           const patch: Record<string, string | undefined> = {};
           if (order.yahooSymbol && target.yahooSymbol !== order.yahooSymbol) {
             patch.yahooSymbol = order.yahooSymbol;
@@ -739,6 +784,7 @@ export default function PortfolioPage({
           if (order.symbol && target.symbol !== order.symbol) {
             patch.symbol = order.symbol;
           }
+          if (!target.t212OrderId) patch.t212OrderId = order.id;
           if (Object.keys(patch).length > 0) {
             await updateHoldingFields(id, target.id, portfolioKey, patch);
           }
