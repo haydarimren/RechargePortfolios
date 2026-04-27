@@ -6,7 +6,6 @@ import {
   createUserWithEmailAndPassword,
   signInWithPopup,
   GoogleAuthProvider,
-  getAdditionalUserInfo,
 } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { ensureUserProfile } from "@/lib/users";
@@ -24,34 +23,35 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
-  // Decide where to send the user after auth resolves. New signups (or
-  // existing users who never enrolled) go to encryption onboarding. Anyone
-  // already enrolled lands on the home page; the unlock prompt itself comes
-  // later in Phase 2 when there's actually encrypted data to gate on.
+  // Decide where to send the user after auth resolves.
+  //   - Brand-new email/password signup: hand off the password and go
+  //     to onboarding directly. Saves a redirect bounce through the
+  //     EnrollmentGate.
+  //   - Anyone signing in with email/password who isn't enrolled yet:
+  //     also hand off the password (for transparent reuse during
+  //     onboarding) and let the EnrollmentGate redirect them from "/".
+  //   - Anyone already enrolled, or any Google user: just go home and
+  //     let the gate / unlock modal take it from there.
   const routeAfterAuth = async (
     uid: string,
-    isNewUser: boolean,
     cachedPasswordForHandoff?: string,
   ) => {
     const status = await getEncryptionStatus(uid);
-    if (status.kind === "uninitialized" && isNewUser) {
-      // Brand-new account: always onboard. Stash the password so the
-      // onboarding page can pre-fill it for email/password signups.
-      if (cachedPasswordForHandoff) {
-        try {
-          sessionStorage.setItem(
-            ONBOARDING_HANDOFF_KEY,
-            cachedPasswordForHandoff,
-          );
-        } catch {
-          // Ignore — onboarding will just prompt explicitly.
-        }
+    const needsOnboarding = status.kind === "uninitialized";
+    if (needsOnboarding && cachedPasswordForHandoff) {
+      try {
+        sessionStorage.setItem(
+          ONBOARDING_HANDOFF_KEY,
+          cachedPasswordForHandoff,
+        );
+      } catch {
+        // sessionStorage unavailable in private modes — onboarding will
+        // just prompt explicitly.
       }
-      router.push("/onboarding/encryption");
-      return;
     }
-    // Existing user OR returning enrolled user — keep current behavior.
-    // Phase 2 will add an unlock prompt for enrolled returning users.
+    // Always push to "/" — the EnrollmentGate decides if the user
+    // should be funneled through onboarding from there. Single source
+    // of truth for the unenrolled-redirect.
     router.push("/");
   };
 
@@ -64,7 +64,7 @@ export default function LoginPage() {
         ? await createUserWithEmailAndPassword(auth, email, password)
         : await signInWithEmailAndPassword(auth, email, password);
       await ensureUserProfile(cred.user);
-      await routeAfterAuth(cred.user.uid, isRegister, password);
+      await routeAfterAuth(cred.user.uid, password);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to authenticate");
     } finally {
@@ -78,10 +78,9 @@ export default function LoginPage() {
     try {
       const cred = await signInWithPopup(auth, new GoogleAuthProvider());
       await ensureUserProfile(cred.user);
-      const isNew = !!getAdditionalUserInfo(cred)?.isNewUser;
       // Google users have no Firebase password to hand off — onboarding
       // will prompt explicitly.
-      await routeAfterAuth(cred.user.uid, isNew);
+      await routeAfterAuth(cred.user.uid);
     } catch (err: unknown) {
       setError(
         err instanceof Error ? err.message : "Failed to sign in with Google"
