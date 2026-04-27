@@ -139,10 +139,14 @@ export default function PortfolioPage({
     return () => unsub();
   }, [router]);
 
+  // Portfolio doc listener — stable, never tears down due to portfolioKey
+  // changes. Splitting this from the holdings listener avoids a feedback
+  // loop where every snapshot would create a new portfolio object,
+  // re-fire the encryption-state effect, resolve a fresh K_portfolio,
+  // and tear down + recreate this listener on every cycle.
   useEffect(() => {
     if (!user) return;
-
-    const unsubPortfolio = onSnapshot(
+    return onSnapshot(
       doc(db, "portfolios", id),
       (snap) => {
         if (!snap.exists()) {
@@ -159,25 +163,22 @@ export default function PortfolioPage({
       () => {
         setNotFound(true);
         setLoading(false);
-      }
+      },
     );
+  }, [user, id]);
 
-    // The encrypted-shape decoder is wired up via subscribeHoldings, which
-    // dispatches per-doc on whether `payload`/`iv` are present. Pre-
-    // migration portfolios still have plaintext docs and surface
-    // unchanged. Once the user unlocks and we resolve `portfolioKey`,
-    // ciphertext docs decrypt transparently.
+  // Holdings listener — depends on portfolioKey. Re-subscribes when the
+  // key arrives so encrypted docs start decoding. Pre-migration portfolios
+  // pass through to the legacy plaintext shape.
+  useEffect(() => {
+    if (!user) return;
     const sub = subscribeHoldings(
       id,
       portfolioKey,
       (rows) => setHoldings(rows),
       () => setHoldings([]),
     );
-
-    return () => {
-      unsubPortfolio();
-      sub.unsubscribe();
-    };
+    return () => sub.unsubscribe();
   }, [user, id, portfolioKey]);
 
   // Resolve K_portfolio when the portfolio is loaded + user is unlocked.
@@ -185,26 +186,44 @@ export default function PortfolioPage({
   // one-shot migration that re-encrypts all holdings. For shared viewers,
   // we just attempt to fetch their wrappedKey doc — Phase 3 makes this
   // robust against owners who haven't yet wrapped for them.
+  //
+  // Critical: deps are *scalar* projections of `portfolio` (encrypted flag,
+  // ownerId, sharedWith joined into a string). Using the whole portfolio
+  // object would re-fire this effect on every snapshot delivery — even
+  // when nothing changed — because `setPortfolio` always allocates a new
+  // object. That re-firing was causing a feedback loop with the holdings
+  // listener: new key → new listener → new snapshot → new portfolio
+  // object → new key → … → 200+ Firestore requests per 10s.
+  const portfolioEncrypted = portfolio?.encrypted ?? false;
+  const portfolioOwnerId = portfolio?.ownerId;
+  // Sort first so the sig is order-independent — Firestore sometimes
+  // delivers sharedWith in different orders across snapshots.
+  const portfolioSharedSig = portfolio?.sharedWith
+    ? [...portfolio.sharedWith].sort().join(",")
+    : "";
   useEffect(() => {
-    if (!portfolio || !user) return;
+    if (!portfolioOwnerId || !user) return;
     if (encryption.state.kind !== "unlocked") return;
     const unlocked = getUnlocked(user.uid);
     if (!unlocked) return;
-    const isPortfolioOwner = portfolio.ownerId === user.uid;
+    const isPortfolioOwner = portfolioOwnerId === user.uid;
+    const sharedWith = portfolioSharedSig
+      ? portfolioSharedSig.split(",")
+      : [];
     let cancelled = false;
     setMigrationError("");
 
     (async () => {
       // Path 1: portfolio is already encrypted → just fetch + unwrap our key.
-      if (portfolio.encrypted) {
+      if (portfolioEncrypted) {
         try {
           const k = await loadPortfolioKey(id, user.uid, unlocked.privateKey);
           if (!cancelled) setPortfolioKey(k);
           // Re-share reconnection: if any sharer enrolled after this
           // portfolio was migrated, they have a publicKey but no
           // wrappedKey doc. Silently fix that on every owner load.
-          if (isPortfolioOwner && portfolio.sharedWith.length > 0) {
-            await reconcileSharedWrappedKeys(id, portfolio.sharedWith, {
+          if (isPortfolioOwner && sharedWith.length > 0) {
+            await reconcileSharedWrappedKeys(id, sharedWith, {
               portfolioKey: k,
               ownerPrivateKey: unlocked.privateKey,
               ownerPublicKeyHex: unlocked.publicKeyHex,
@@ -251,7 +270,14 @@ export default function PortfolioPage({
     return () => {
       cancelled = true;
     };
-  }, [portfolio, user, id, encryption.state.kind]);
+  }, [
+    portfolioEncrypted,
+    portfolioOwnerId,
+    portfolioSharedSig,
+    user,
+    id,
+    encryption.state.kind,
+  ]);
 
   useEffect(() => {
     const symbols = Array.from(new Set(holdings.map((h) => h.symbol)));
