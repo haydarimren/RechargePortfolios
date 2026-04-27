@@ -51,6 +51,7 @@ export default function RootLayout({
       lang="en"
       data-theme="dark"
       className={`${geist.variable} ${geistMono.variable} ${plex.variable} ${plexMono.variable} h-full antialiased`}
+      suppressHydrationWarning
     >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
