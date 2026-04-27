@@ -293,22 +293,16 @@ export default function TickerPage({
     return date.toLocaleDateString("en-US", { year: "numeric" });
   };
 
-  const showUnlockGate =
-    encryption.state.kind === "locked" ||
-    encryption.state.kind === "needs-recovery";
+  const needsRecovery = encryption.state.kind === "needs-recovery";
 
   return (
     <div className="min-h-screen">
-      {showUnlockGate &&
-        (encryption.state.kind === "locked" ||
-          encryption.state.kind === "needs-recovery") && (
-          <UnlockModal
-            uid={encryption.state.uid}
-            needsRecovery={encryption.state.kind === "needs-recovery"}
-            onUnlock={encryption.unlock}
-            onRestore={encryption.restore}
-          />
-        )}
+      {needsRecovery && encryption.state.kind === "needs-recovery" && (
+        <UnlockModal
+          uid={encryption.state.uid}
+          onRestore={encryption.restore}
+        />
+      )}
       <header className="px-6 lg:px-10 pt-6 pb-4 border-b border-line">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
           <Link

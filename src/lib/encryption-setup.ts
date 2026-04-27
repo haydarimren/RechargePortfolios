@@ -7,31 +7,39 @@
  * the IndexedDB persistence layer (`key-store.ts`), and Firestore. UI code
  * should never call those directly — call these three functions instead.
  *
- * State machine:
- *   - "uninitialized" — no `users/{uid}.publicKey` doc, no IndexedDB state.
- *     Path: signup/migration → `enrollEncryption`.
- *   - "locked" — `users/{uid}.publicKey` exists AND IndexedDB state exists.
- *     Path: daily login → `unlockEncryption`.
- *   - "needs-recovery" — `users/{uid}.publicKey` exists but IndexedDB is
- *     empty (new device, cleared cookies, etc.). Path: `restoreFromPhrase`.
- *   - "unlocked" — `getUnlocked(uid)` returns a non-null state. Reads/writes
- *     can proceed.
+ * The model in plain English (Option B / WhatsApp-on-web flow):
+ *   - Enrollment generates the user's identity keypair + master secret +
+ *     a non-extractable `localWrapKey` for this browser profile. The
+ *     master secret is wrapped under the localWrapKey and persisted to
+ *     IndexedDB. The user sees their 12-word recovery phrase once.
+ *   - Daily login: every page load auto-unlocks from IndexedDB. No
+ *     password prompt. Same behavior as opening WhatsApp.
+ *   - New device or browser-data-cleared: IndexedDB is empty, server
+ *     still has the wrapped private key. User enters their phrase →
+ *     master secret derived from phrase → server-stored wrappedPrivateKey
+ *     unwrapped → fresh localWrapKey generated → state seeded into the
+ *     new IndexedDB.
  *
- * Caller is responsible for picking which path based on Firestore + IndexedDB
- * inspection (see `getEncryptionStatus`).
+ * State machine driven by `getEncryptionStatus`:
+ *   - "uninitialized" — no `users/{uid}.publicKey` doc. Path: signup →
+ *     `enrollEncryption`.
+ *   - "locked" — server has publicKey AND IndexedDB has localWrapKey.
+ *     Path: `unlockEncryption` (silent; no UI).
+ *   - "needs-recovery" — server has publicKey, IndexedDB is empty.
+ *     Path: `restoreFromPhrase`.
  */
 
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "./firebase";
 import {
   type Ciphertext,
-  type PasswordWrappedSecret,
   exportPublicKey,
   generateIdentityKeyPair,
+  generateLocalWrapKey,
   importPublicKey,
-  unwrapMasterSecretWithPassword,
+  unwrapMasterSecretLocally,
   unwrapPrivateKeyWithMasterSecret,
-  wrapMasterSecretWithPassword,
+  wrapMasterSecretLocally,
   wrapPrivateKeyWithMasterSecret,
 } from "./crypto-client";
 import {
@@ -42,9 +50,7 @@ import {
 } from "./key-store";
 
 /**
- * Server-side shape under `users/{uid}` once the user has enrolled. Both
- * fields are added in Phase 1 alongside the existing `displayName`/
- * `createdAt`/`updatedAt` profile fields.
+ * Server-side shape under `users/{uid}` once the user has enrolled.
  */
 interface UserEncryptionDoc {
   publicKey?: string; // hex SPKI
@@ -79,34 +85,28 @@ export async function getEncryptionStatus(
 }
 
 /**
- * First-time enrollment for a new (or freshly migrating) user. Wraps the
- * supplied master secret + a fresh identity keypair, persists locally, and
- * uploads the public artefacts to Firestore.
+ * First-time enrollment for a new user. Wraps the supplied master secret
+ * + a fresh identity keypair, persists locally under a non-extractable
+ * localWrapKey, and uploads the public artefacts to Firestore. No password
+ * required: this is the "open the app and it just works" flow.
  *
- * The caller is expected to have already generated the master secret and
- * shown the user their recovery phrase (so it's the same secret that's
- * actually stored). See the onboarding page for the standard flow.
+ * The caller is expected to have generated the master secret and shown
+ * the user their recovery phrase first (so the displayed phrase matches
+ * what's actually stored). See the onboarding page for the standard flow.
  */
 export async function enrollEncryption(
   uid: string,
-  encryptionPassword: string,
   masterSecret: Uint8Array,
 ): Promise<void> {
-  if (encryptionPassword.length < 6) {
-    // We don't enforce a strong password policy server-side because the
-    // master secret has full 128-bit entropy — but a 1-char password would
-    // be unwrapped instantly. 6 is a soft floor that catches obvious mistakes.
-    throw new Error("encryption password must be at least 6 characters");
-  }
   if (masterSecret.length !== 16) {
     throw new Error("masterSecret must be 16 bytes");
   }
 
   const keyPair = await generateIdentityKeyPair();
-
-  const wrappedMasterSecret = await wrapMasterSecretWithPassword(
+  const localWrapKey = await generateLocalWrapKey();
+  const wrappedMasterSecret = await wrapMasterSecretLocally(
     masterSecret,
-    encryptionPassword,
+    localWrapKey,
   );
   const wrappedPrivateKey = await wrapPrivateKeyWithMasterSecret(
     keyPair.privateKey,
@@ -114,17 +114,18 @@ export async function enrollEncryption(
   );
   const publicKeyHex = await exportPublicKey(keyPair.publicKey);
 
-  // Persist locally first — if this fails we don't want to leave a half-
-  // configured server doc behind.
+  // Persist locally first. If this fails (e.g. private mode without
+  // IndexedDB) we don't want to leave a half-configured server doc.
   await savePersistedState({
     uid,
+    localWrapKey,
     wrappedMasterSecret,
     wrappedPrivateKey,
     publicKeyHex,
   });
 
-  // Then upload the public artefacts. Merge so we don't clobber the
-  // existing displayName/createdAt fields written by `ensureUserProfile`.
+  // Then upload public artefacts. Merge so we don't clobber the existing
+  // displayName/createdAt fields written by `ensureUserProfile`.
   await setDoc(
     doc(db, "users", uid),
     {
@@ -135,8 +136,8 @@ export async function enrollEncryption(
     { merge: true },
   );
 
-  // Stash the unwrapped key material in memory so the user doesn't have to
-  // re-enter their password immediately after enrolling.
+  // Stash the unwrapped key material in memory so the user can immediately
+  // start using their portfolio without a re-load round-trip.
   setUnlocked({
     uid,
     masterSecret,
@@ -147,21 +148,22 @@ export async function enrollEncryption(
 }
 
 /**
- * Daily-login unlock on a device that already has IndexedDB state.
- * Throws on wrong password.
+ * Auto-unlock from IndexedDB. Called on every signed-in page load when
+ * local state is present. Silent — no UI, no user input.
+ *
+ * Throws on missing local state (caller falls back to recovery flow) or
+ * decryption failure (which would indicate IndexedDB corruption — should
+ * never happen, but caller should fall back to recovery flow if so).
  */
-export async function unlockEncryption(
-  uid: string,
-  encryptionPassword: string,
-): Promise<void> {
+export async function unlockEncryption(uid: string): Promise<void> {
   const persisted = await loadPersistedState(uid);
   if (!persisted) {
     throw new Error("no local key state — use restoreFromPhrase instead");
   }
 
-  const masterSecret = await unwrapMasterSecretWithPassword(
+  const masterSecret = await unwrapMasterSecretLocally(
     persisted.wrappedMasterSecret,
-    encryptionPassword,
+    persisted.localWrapKey,
   );
   const privateKey = await unwrapPrivateKeyWithMasterSecret(
     persisted.wrappedPrivateKey,
@@ -179,23 +181,15 @@ export async function unlockEncryption(
 }
 
 /**
- * New-device path: user enters their 12-word phrase + a new password.
- * Pulls the wrapped private key from Firestore (server holds ciphertext
- * only) and rebuilds local state.
- *
- * Note: this both unlocks the session AND re-wraps the master secret under
- * the new password — i.e. it doubles as the "forgot password" recovery
- * flow.
+ * Cross-device / browser-cleared recovery: user enters their 12-word
+ * phrase. Pulls the wrapped private key from Firestore (server holds
+ * ciphertext only) and rebuilds local state with a fresh localWrapKey
+ * for this browser profile.
  */
 export async function restoreFromPhrase(
   uid: string,
   phrase: string,
-  newEncryptionPassword: string,
 ): Promise<void> {
-  if (newEncryptionPassword.length < 6) {
-    throw new Error("encryption password must be at least 6 characters");
-  }
-
   const { phraseToSeed } = await import("./recovery-phrase");
   const masterSecret = await phraseToSeed(phrase);
 
@@ -223,11 +217,18 @@ export async function restoreFromPhrase(
   }
   const publicKey = await importPublicKey(data.publicKey);
 
-  const wrappedMasterSecret: PasswordWrappedSecret =
-    await wrapMasterSecretWithPassword(masterSecret, newEncryptionPassword);
+  // Fresh localWrapKey for this device. Per-device by design — different
+  // browsers / devices each have their own at-rest scrambler, all backed
+  // by the same master secret.
+  const localWrapKey = await generateLocalWrapKey();
+  const wrappedMasterSecret = await wrapMasterSecretLocally(
+    masterSecret,
+    localWrapKey,
+  );
 
   await savePersistedState({
     uid,
+    localWrapKey,
     wrappedMasterSecret,
     wrappedPrivateKey: data.wrappedPrivateKey,
     publicKeyHex: data.publicKey,

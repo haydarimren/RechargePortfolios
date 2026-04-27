@@ -6,19 +6,22 @@
  *
  *   - "loading"           — auth/state hasn't resolved yet
  *   - "no-user"           — signed out
- *   - "uninitialized"     — signed in but never enrolled (Phase 2: existing
- *                           pre-encryption users; the home page will route
- *                           them through onboarding)
+ *   - "uninitialized"     — signed in but never enrolled (forced through
+ *                           onboarding by EnrollmentGate)
  *   - "needs-recovery"    — enrolled on the server but no local key state
  *                           (new device, cleared cookies). User must enter
  *                           their recovery phrase.
- *   - "locked"            — enrolled + local state present, password not
- *                           yet entered this tab session.
- *   - "unlocked"          — happy path; `state` has the unlocked key
- *                           material.
+ *   - "unlocked"          — happy path; in-memory key state populated.
  *
- * Exposes `unlock(password)` and `restore(phrase, newPassword)` to drive
- * state transitions; on success the hook re-evaluates.
+ * Note: under the Option B / WhatsApp-on-web design there's no separate
+ * "locked" state visible to the user. When `getEncryptionStatus` returns
+ * "locked" (server has publicKey + IndexedDB has localWrapKey), this hook
+ * silently auto-unlocks via `unlockEncryption` and reports "unlocked"
+ * directly. No password prompt.
+ *
+ * If auto-unlock fails (corrupt IndexedDB, schema mismatch, etc.), the
+ * hook downgrades to "needs-recovery" so the user can re-establish their
+ * keys via the recovery phrase.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -36,13 +39,11 @@ export type EncryptionUiState =
   | { kind: "no-user" }
   | { kind: "uninitialized"; uid: string }
   | { kind: "needs-recovery"; uid: string }
-  | { kind: "locked"; uid: string }
   | { kind: "unlocked"; uid: string };
 
 export function useEncryption(): {
   state: EncryptionUiState;
-  unlock: (password: string) => Promise<void>;
-  restore: (phrase: string, newPassword: string) => Promise<void>;
+  restore: (phrase: string) => Promise<void>;
   refresh: () => Promise<void>;
 } {
   const [user, setUser] = useState<User | null | undefined>(undefined);
@@ -61,15 +62,29 @@ export function useEncryption(): {
     const status = await getEncryptionStatus(currentUser.uid);
     if (status.kind === "uninitialized") {
       setState({ kind: "uninitialized", uid: currentUser.uid });
-    } else if (status.kind === "needs-recovery") {
-      setState({ kind: "needs-recovery", uid: currentUser.uid });
-    } else if (status.kind === "locked") {
-      setState({ kind: "locked", uid: currentUser.uid });
-    } else {
-      // "error" status — show locked so user can retry. The error itself
-      // surfaces if they try to unlock.
-      setState({ kind: "locked", uid: currentUser.uid });
+      return;
     }
+    if (status.kind === "needs-recovery") {
+      setState({ kind: "needs-recovery", uid: currentUser.uid });
+      return;
+    }
+    if (status.kind === "locked") {
+      // Silent auto-unlock from IndexedDB. No password, no UI.
+      try {
+        await unlockEncryption(currentUser.uid);
+        setState({ kind: "unlocked", uid: currentUser.uid });
+      } catch (err) {
+        // IndexedDB corrupt / schema mismatch / non-extractable key
+        // unusable for some reason. Downgrade to recovery so the user
+        // can re-establish from their phrase.
+        console.warn("auto-unlock failed; falling back to recovery", err);
+        setState({ kind: "needs-recovery", uid: currentUser.uid });
+      }
+      return;
+    }
+    // "error" — show recovery so user can retry. The error itself surfaces
+    // if they try to restore.
+    setState({ kind: "needs-recovery", uid: currentUser.uid });
   }, []);
 
   useEffect(() => {
@@ -80,19 +95,10 @@ export function useEncryption(): {
     return () => unsub();
   }, [evaluate]);
 
-  const unlock = useCallback(
-    async (password: string) => {
-      if (!user) throw new Error("not signed in");
-      await unlockEncryption(user.uid, password);
-      setState({ kind: "unlocked", uid: user.uid });
-    },
-    [user],
-  );
-
   const restore = useCallback(
-    async (phrase: string, newPassword: string) => {
+    async (phrase: string) => {
       if (!user) throw new Error("not signed in");
-      await restoreFromPhrase(user.uid, phrase, newPassword);
+      await restoreFromPhrase(user.uid, phrase);
       setState({ kind: "unlocked", uid: user.uid });
     },
     [user],
@@ -102,5 +108,5 @@ export function useEncryption(): {
     await evaluate(user ?? null);
   }, [evaluate, user]);
 
-  return { state, unlock, restore, refresh };
+  return { state, restore, refresh };
 }

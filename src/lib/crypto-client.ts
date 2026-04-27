@@ -151,7 +151,55 @@ async function deriveAesKeyFromMaster(
   );
 }
 
-// ---------- password-derived key (for IndexedDB master-secret wrap) -------
+// ---------- device-bound local wrap key ----------------------------------
+
+/**
+ * Generate a non-extractable AES-GCM key bound to this browser's IndexedDB.
+ * Our analogue to iOS Keychain / Android Keystore: the app can encrypt and
+ * decrypt with it, but the raw bytes are never accessible to JavaScript or
+ * to anyone reading the IndexedDB file off disk.
+ *
+ * The key is structured-cloneable so it can be stored in IndexedDB as-is.
+ * Browsers keep it in a managed slot — even an attacker reading the disk
+ * gets the wrapped blob but can't pull the wrapping key out without
+ * exploiting the browser itself.
+ *
+ * Per-device: every browser profile generates its own localWrapKey on
+ * enrollment OR on first recovery-phrase restore. They all wrap the same
+ * cross-device master secret. The localWrapKey is purely an at-rest
+ * scrambler for this one browser profile.
+ *
+ * On a future native mobile app, the localWrapKey moves to Keychain /
+ * Keystore — same code shape, different backing store. The wire format
+ * (wrappedMasterSecret, wrappedPrivateKey, etc.) is platform-agnostic so
+ * a recovery-phrase restore works across web ↔ mobile.
+ */
+export async function generateLocalWrapKey(): Promise<CryptoKey> {
+  return SUBTLE().generateKey(
+    { name: "AES-GCM", length: 256 },
+    false, // non-extractable: no JS access to raw bytes, ever
+    ["encrypt", "decrypt"],
+  );
+}
+
+export async function wrapMasterSecretLocally(
+  masterSecret: Uint8Array,
+  localWrapKey: CryptoKey,
+): Promise<Ciphertext> {
+  return aesGcmEncrypt(localWrapKey, masterSecret);
+}
+
+export async function unwrapMasterSecretLocally(
+  wrapped: Ciphertext,
+  localWrapKey: CryptoKey,
+): Promise<Uint8Array> {
+  return aesGcmDecrypt(localWrapKey, wrapped);
+}
+
+// ---------- password-derived key (legacy, currently unused) ---------------
+// Kept around for tests + the option to opt into a paranoid mode later
+// (e.g. a settings toggle "require password every session"). The default
+// flow uses the localWrapKey path above so daily UX matches WhatsApp.
 
 /** PBKDF2 iteration count. Picked via OWASP 2023 guidance for SHA-256. */
 const PBKDF2_ITERATIONS = 600_000;

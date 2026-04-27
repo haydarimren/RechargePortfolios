@@ -4,40 +4,60 @@
  * IndexedDB-backed session-state for end-to-end encryption keys.
  *
  * What lives here:
- *   - `wrappedSecret` — the user's 16-byte master secret, encrypted under a
- *     password-derived key (PBKDF2). Persisted across reloads. Survives a
- *     refresh, lost on browser-data clear.
- *   - In-memory cache (NOT in IndexedDB) — once the user enters their
- *     encryption password, the unwrapped master secret + the unwrapped
- *     identity private key live in memory only, scoped to the tab session.
- *     Closing the tab forgets them; opening a new tab requires re-unlock.
+ *   - `localWrapKey` — a non-extractable AES-GCM key generated once on this
+ *     device. Stored in IndexedDB as a structured-cloned CryptoKey. The
+ *     browser keeps the actual bytes in a managed slot — JavaScript can
+ *     use it for encrypt/decrypt but can never read its raw value.
+ *   - `wrappedMasterSecret` — the user's 16-byte master secret encrypted
+ *     under `localWrapKey`. Together with the key, this gives us
+ *     "WhatsApp on web": the app auto-unlocks every time the user opens
+ *     it, no password prompt.
+ *   - `wrappedPrivateKey` — the user's identity private key, wrapped
+ *     under master secret. Cached locally to avoid a round-trip to the
+ *     server on each load.
+ *   - In-memory cache (NOT in IndexedDB) — the unwrapped master secret
+ *     and CryptoKey objects live in module-level memory once unlocked.
+ *     Reset on tab close.
  *
- * Why split persistence and runtime state:
- *   - We never want plaintext key material on disk. IndexedDB is on disk.
- *     Therefore: only ciphertext goes in IndexedDB, plaintext stays in JS
- *     memory.
- *   - The "unlock" UX is "enter your password once per session." If we kept
- *     plaintext in IndexedDB users would never need to unlock — but that
- *     defeats the entire threat model (someone who steals your laptop with
- *     an open browser session could already see plaintext, but at least the
- *     IndexedDB-on-disk attack vector is gone).
+ * Threat model alignment:
+ *   - Server compromise: server only sees ciphertext (Firestore docs).
+ *     The local IndexedDB blob is irrelevant to this attack. ✓
+ *   - Friend / app-owner snooping: ciphertext-only on the server, no
+ *     way to read holdings without a wrappedKey doc. ✓
+ *   - Stolen unlocked device: same exposure as WhatsApp on an unlocked
+ *     phone. We don't try to defend against this — it's beyond what the
+ *     web platform can offer without per-session password prompts, which
+ *     defeats the UX goal.
+ *   - Disk forensics on a powered-off device: protected by (a) the OS's
+ *     encryption of the browser profile and (b) the non-extractability
+ *     of the localWrapKey. An attacker reading raw IndexedDB files gets
+ *     the wrapped-secret blob but no way to decrypt without exploiting
+ *     the browser itself.
  *
- * Naming: scoped per Firebase UID so a household with multiple accounts on
- * the same browser keeps its state separate.
+ * Naming: scoped per Firebase UID so a household with multiple accounts
+ * on the same browser keeps its state separate.
  */
 
-import type { Ciphertext, PasswordWrappedSecret } from "./crypto-client";
+import type { Ciphertext } from "./crypto-client";
 
 const DB_NAME = "recharge-e2e";
-const DB_VERSION = 1;
+// Bumped from v1 → v2 when we changed PersistedKeyState's shape. Old v1
+// rows (password-wrapped) are dropped on the upgrade — there are no
+// production users on v1 yet (E2E hasn't shipped to anyone).
+const DB_VERSION = 2;
 const STORE = "user-state";
 
 /** Persisted-per-user shape in IndexedDB. */
 export interface PersistedKeyState {
   uid: string;
-  wrappedMasterSecret: PasswordWrappedSecret;
-  /** The user's identity private key, wrapped under master secret. Cached
-   * locally so we don't have to round-trip the server on every reload. */
+  /** Non-extractable AES-GCM key bound to this browser profile. Used to
+   * unwrap `wrappedMasterSecret` on every app load. Generated once at
+   * enrollment / phrase-restore time and never rotated within a single
+   * IndexedDB lifetime. */
+  localWrapKey: CryptoKey;
+  /** Master secret, encrypted under localWrapKey. */
+  wrappedMasterSecret: Ciphertext;
+  /** Identity private key, wrapped under master secret. */
   wrappedPrivateKey: Ciphertext;
   /** Public key, hex-encoded SPKI. Mirrors the server doc; stored locally
    * for cheap sanity-checking. */
@@ -50,8 +70,16 @@ function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result;
+      const oldVersion = event.oldVersion;
+      // v1 → v2: schema changed from password-wrapped to localWrapKey.
+      // Drop the old store rather than try to migrate; v1 records aren't
+      // recoverable under the new flow without forcing the user through
+      // recovery anyway. No-op for fresh installs (oldVersion === 0).
+      if (oldVersion < 2 && db.objectStoreNames.contains(STORE)) {
+        db.deleteObjectStore(STORE);
+      }
       if (!db.objectStoreNames.contains(STORE)) {
         db.createObjectStore(STORE, { keyPath: "uid" });
       }

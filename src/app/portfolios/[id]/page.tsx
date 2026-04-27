@@ -808,22 +808,19 @@ export default function PortfolioPage({
     );
   }
 
-  const showUnlockGate =
-    encryption.state.kind === "locked" ||
-    encryption.state.kind === "needs-recovery";
+  // Daily login auto-unlocks silently. The modal here is only for the
+  // browser-cleared / new-device case where we need the user's
+  // recovery phrase to rebuild local key state.
+  const needsRecovery = encryption.state.kind === "needs-recovery";
 
   return (
     <div className="min-h-screen">
-      {showUnlockGate &&
-        (encryption.state.kind === "locked" ||
-          encryption.state.kind === "needs-recovery") && (
-          <UnlockModal
-            uid={encryption.state.uid}
-            needsRecovery={encryption.state.kind === "needs-recovery"}
-            onUnlock={encryption.unlock}
-            onRestore={encryption.restore}
-          />
-        )}
+      {needsRecovery && encryption.state.kind === "needs-recovery" && (
+        <UnlockModal
+          uid={encryption.state.uid}
+          onRestore={encryption.restore}
+        />
+      )}
       {migrationError && (
         <div className="fixed top-3 right-3 z-40 max-w-sm border border-neg/40 bg-neg/10 text-neg text-xs rounded-md p-3 num">
           {migrationError}

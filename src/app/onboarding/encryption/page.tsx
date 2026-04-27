@@ -1,21 +1,21 @@
 "use client";
 
 /**
- * Encryption onboarding page. Reached via redirect from the login page on
- * a brand-new signup. Job:
+ * Encryption onboarding page. Reached via redirect from EnrollmentGate
+ * for any signed-in user who hasn't enrolled yet. Job:
  *
- *   1. Generate the user's identity keypair + master secret.
- *   2. Show the 12-word recovery phrase exactly once with a written-it-down
+ *   1. Generate the user's identity keypair + master secret + a
+ *      non-extractable localWrapKey for this browser.
+ *   2. Show the 12-word recovery phrase exactly once with a confirmation
  *      gate (user retypes 3 random words).
- *   3. Prompt for an encryption password (defaulting from sessionStorage
- *      hand-off if the user signed up with email/password — see
- *      `src/app/login/page.tsx` for the writer side).
- *   4. Call `enrollEncryption` to land the public key + wrapped private
- *      key in Firestore.
- *   5. Redirect home.
+ *   3. Call `enrollEncryption` to land the public key + wrapped private
+ *      key in Firestore and seed local IndexedDB state.
+ *   4. Redirect home.
  *
- * No going back: once enrolled the user has a publicKey and downstream
- * phases (encrypted holdings, sharing) are gated on this completing.
+ * No password prompt: the daily login flow uses silent auto-unlock from
+ * IndexedDB. The recovery phrase is the user's only piece of recoverable
+ * secret; it's only needed when switching devices or after browser-data
+ * clear.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -26,8 +26,6 @@ import { enrollEncryption, getEncryptionStatus } from "@/lib/encryption-setup";
 import { generateMasterSecret } from "@/lib/crypto-client";
 import { seedToPhrase } from "@/lib/recovery-phrase";
 import { ThemeToggle } from "@/lib/theme";
-
-const HANDOFF_KEY = "recharge-signup-pw";
 
 /** Pick 3 distinct random positions in [0, 11]. */
 function pickQuizPositions(): [number, number, number] {
@@ -48,10 +46,10 @@ export default function EncryptionOnboardingPage() {
   const [user, setUser] = useState<User | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
 
-  // Show-the-phrase state. We generate the seed *here* (not in a server
-  // action) so the master secret never leaves the browser. The same exact
-  // bytes get passed to enrollEncryption so the displayed phrase is the
-  // one that's actually wrapped and persisted.
+  // Show-the-phrase state. The seed is generated locally so the master
+  // secret never leaves the browser. The same exact bytes get passed to
+  // enrollEncryption so the displayed phrase is the one that's actually
+  // wrapped and persisted.
   const [phrase, setPhrase] = useState<string | null>(null);
   const [seed, setSeed] = useState<Uint8Array | null>(null);
   const [quizPositions] = useState<[number, number, number]>(() =>
@@ -63,11 +61,6 @@ export default function EncryptionOnboardingPage() {
     "",
   ]);
 
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [stage, setStage] = useState<"show" | "confirm" | "submit" | "done">(
-    "show",
-  );
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -88,24 +81,9 @@ export default function EncryptionOnboardingPage() {
         router.replace("/");
         return;
       }
-      // Generate the seed locally and never persist it to anything except
-      // memory — it'll be wrapped by enrollEncryption shortly.
       const generated = generateMasterSecret();
       setSeed(generated);
       setPhrase(await seedToPhrase(generated));
-      // Pre-fill from sessionStorage hand-off if email/password signup
-      // routed here with the password ready to go. We clear it immediately
-      // so it doesn't persist beyond a tab refresh.
-      try {
-        const handed = sessionStorage.getItem(HANDOFF_KEY);
-        if (handed) {
-          setPassword(handed);
-          setConfirmPassword(handed);
-          sessionStorage.removeItem(HANDOFF_KEY);
-        }
-      } catch {
-        // sessionStorage may be unavailable in private modes — ignore.
-      }
     });
     return () => unsub();
   }, [router]);
@@ -122,9 +100,6 @@ export default function EncryptionOnboardingPage() {
     );
   }, [phrase, phraseWords, quizPositions, quizAnswers]);
 
-  const passwordValid =
-    password.length >= 6 && password === confirmPassword;
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !phrase || !seed) return;
@@ -132,15 +107,10 @@ export default function EncryptionOnboardingPage() {
       setError("Confirm the recovery phrase first.");
       return;
     }
-    if (!passwordValid) {
-      setError("Encryption password must be 6+ characters and match.");
-      return;
-    }
     setSubmitting(true);
     setError("");
     try {
-      await enrollEncryption(user.uid, password, seed);
-      setStage("done");
+      await enrollEncryption(user.uid, seed);
       router.replace("/");
     } catch (err) {
       setError(
@@ -177,7 +147,8 @@ export default function EncryptionOnboardingPage() {
             <p className="text-sm text-fg-dim">
               Your portfolio is encrypted on this device before it reaches our
               servers. Even we can&apos;t read it. The recovery phrase below is
-              the only way to get back in if you lose access.
+              the only way to get back in if you switch devices or clear your
+              browser data.
             </p>
           </div>
 
@@ -192,7 +163,8 @@ export default function EncryptionOnboardingPage() {
               <div className="label mb-2">Your recovery phrase</div>
               <p className="text-xs text-fg-dim mb-3">
                 Write these 12 words down on paper. Store them somewhere safe.
-                Don&apos;t screenshot, don&apos;t email yourself.
+                Don&apos;t screenshot, don&apos;t email yourself. We can&apos;t
+                recover this for you.
               </p>
               <div className="grid grid-cols-3 gap-2 num">
                 {phraseWords.map((w, i) => (
@@ -214,7 +186,7 @@ export default function EncryptionOnboardingPage() {
             <div>
               <div className="label mb-2">Confirm you wrote it down</div>
               <p className="text-xs text-fg-dim mb-3">
-                Enter words at positions {quizPositions[0] + 1},{" "}
+                Enter the words at positions {quizPositions[0] + 1},{" "}
                 {quizPositions[1] + 1}, and {quizPositions[2] + 1}.
               </p>
               <div className="grid grid-cols-3 gap-2">
@@ -241,48 +213,12 @@ export default function EncryptionOnboardingPage() {
               </div>
             </div>
 
-            <div className="border-t border-line pt-4 space-y-3">
-              <div className="label">Encryption password</div>
-              <p className="text-xs text-fg-dim">
-                You&apos;ll enter this each time you open the app. Use the same
-                password as your account if you like — they&apos;re independent.
-                If you forget it you can recover with the phrase above.
-              </p>
-              <input
-                type="password"
-                placeholder="Encryption password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="field"
-                autoComplete="new-password"
-                required
-              />
-              <input
-                type="password"
-                placeholder="Confirm password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                className="field"
-                autoComplete="new-password"
-                required
-              />
-            </div>
-
             <button
               type="submit"
-              disabled={
-                !quizSatisfied ||
-                !passwordValid ||
-                submitting ||
-                stage === "done"
-              }
+              disabled={!quizSatisfied || submitting}
               className="btn-primary w-full disabled:opacity-50"
             >
-              {submitting
-                ? "Setting up…"
-                : stage === "done"
-                  ? "Done"
-                  : "Enable encryption"}
+              {submitting ? "Setting up…" : "Enable encryption"}
             </button>
           </form>
         </div>

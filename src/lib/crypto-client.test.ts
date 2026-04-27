@@ -5,6 +5,9 @@ import {
   generateMasterSecret,
   wrapMasterSecretWithPassword,
   unwrapMasterSecretWithPassword,
+  generateLocalWrapKey,
+  wrapMasterSecretLocally,
+  unwrapMasterSecretLocally,
   generateIdentityKeyPair,
   exportPublicKey,
   importPublicKey,
@@ -33,6 +36,34 @@ describe("hex helpers", () => {
 
   it("rejects invalid characters", () => {
     expect(() => hexToBytes("zz")).toThrow();
+  });
+});
+
+describe("master secret + localWrapKey (Option B daily unlock)", () => {
+  it("round-trips under the same localWrapKey", async () => {
+    const secret = generateMasterSecret();
+    const key = await generateLocalWrapKey();
+    const wrapped = await wrapMasterSecretLocally(secret, key);
+    const unwrapped = await unwrapMasterSecretLocally(wrapped, key);
+    expect(unwrapped).toEqual(secret);
+  });
+
+  it("fails under a different localWrapKey", async () => {
+    const secret = generateMasterSecret();
+    const k1 = await generateLocalWrapKey();
+    const k2 = await generateLocalWrapKey();
+    const wrapped = await wrapMasterSecretLocally(secret, k1);
+    await expect(unwrapMasterSecretLocally(wrapped, k2)).rejects.toThrow();
+  });
+
+  it("localWrapKey is non-extractable — cannot export raw bytes", async () => {
+    const key = await generateLocalWrapKey();
+    // Web Crypto throws on exportKey of a non-extractable key. This is
+    // the property that makes the IndexedDB-on-disk attacker unable to
+    // read the wrapping key out of a JS environment they control.
+    await expect(
+      globalThis.crypto.subtle.exportKey("raw", key),
+    ).rejects.toThrow();
   });
 });
 

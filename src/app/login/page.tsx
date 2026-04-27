@@ -9,11 +9,8 @@ import {
 } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { ensureUserProfile } from "@/lib/users";
-import { getEncryptionStatus } from "@/lib/encryption-setup";
 import { useRouter } from "next/navigation";
 import { ThemeToggle } from "@/lib/theme";
-
-const ONBOARDING_HANDOFF_KEY = "recharge-signup-pw";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -23,38 +20,10 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
-  // Decide where to send the user after auth resolves.
-  //   - Brand-new email/password signup: hand off the password and go
-  //     to onboarding directly. Saves a redirect bounce through the
-  //     EnrollmentGate.
-  //   - Anyone signing in with email/password who isn't enrolled yet:
-  //     also hand off the password (for transparent reuse during
-  //     onboarding) and let the EnrollmentGate redirect them from "/".
-  //   - Anyone already enrolled, or any Google user: just go home and
-  //     let the gate / unlock modal take it from there.
-  const routeAfterAuth = async (
-    uid: string,
-    cachedPasswordForHandoff?: string,
-  ) => {
-    const status = await getEncryptionStatus(uid);
-    const needsOnboarding = status.kind === "uninitialized";
-    if (needsOnboarding && cachedPasswordForHandoff) {
-      try {
-        sessionStorage.setItem(
-          ONBOARDING_HANDOFF_KEY,
-          cachedPasswordForHandoff,
-        );
-      } catch {
-        // sessionStorage unavailable in private modes — onboarding will
-        // just prompt explicitly.
-      }
-    }
-    // Always push to "/" — the EnrollmentGate decides if the user
-    // should be funneled through onboarding from there. Single source
-    // of truth for the unenrolled-redirect.
-    router.push("/");
-  };
-
+  // After auth resolves, just push home — the EnrollmentGate handles
+  // routing to onboarding for unenrolled users, and useEncryption
+  // silently auto-unlocks anyone who's already enrolled. Login itself
+  // doesn't need to know about encryption state.
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -64,7 +33,7 @@ export default function LoginPage() {
         ? await createUserWithEmailAndPassword(auth, email, password)
         : await signInWithEmailAndPassword(auth, email, password);
       await ensureUserProfile(cred.user);
-      await routeAfterAuth(cred.user.uid, password);
+      router.push("/");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to authenticate");
     } finally {
@@ -78,9 +47,7 @@ export default function LoginPage() {
     try {
       const cred = await signInWithPopup(auth, new GoogleAuthProvider());
       await ensureUserProfile(cred.user);
-      // Google users have no Firebase password to hand off — onboarding
-      // will prompt explicitly.
-      await routeAfterAuth(cred.user.uid);
+      router.push("/");
     } catch (err: unknown) {
       setError(
         err instanceof Error ? err.message : "Failed to sign in with Google"
