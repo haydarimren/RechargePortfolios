@@ -426,7 +426,7 @@ export default function TickerPage({
                   Loading history…
                 </div>
               ) : (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height={340}>
                   <AreaChart
                     data={history}
                     margin={{ top: 10, right: 10, left: 0, bottom: 0 }}

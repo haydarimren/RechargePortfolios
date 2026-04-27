@@ -994,7 +994,7 @@ export default function PortfolioPage({
                     Not enough data.
                   </div>
                 ) : (
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height={340}>
                     <AreaChart
                       data={isOwner ? series : normalizedSeries}
                       margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
