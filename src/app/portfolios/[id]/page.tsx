@@ -13,7 +13,6 @@ import {
   writeBatch,
   setDoc,
   getDoc,
-  getDocs,
   deleteDoc,
 } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
@@ -693,16 +692,15 @@ export default function PortfolioPage({
         throw new Error(`Unsupported provider: ${provider}`);
       }
 
-      // Fresh read to avoid stale closure on holdings
-      const currentSnap = await getDocs(collection(db, "portfolios", id, "holdings"));
-      const currentHoldings: Holding[] = currentSnap.docs.map(
-        (d) => ({ id: d.id, ...(d.data() as Omit<Holding, "id">) })
-      );
-
-      // Read the holdings fresh again — `currentHoldings` was decoded from
-      // the legacy plaintext shape only. After migration the shape changes,
-      // so re-decode through the repo to get the canonical view.
-      const decodedCurrent = currentHoldings;
+      // Use the already-decoded `holdings` state from the live
+      // subscription. handleSync is recreated on every render, so the
+      // closure captures the latest holdings — no stale-snapshot race.
+      // Crucial that this is the DECODED shape: for v2 docs, the
+      // dedup-by-t212OrderId check below would always fail against the
+      // raw `getDocs` shape (t212OrderId lives inside the encrypted
+      // payload there, not at the doc top level). That bug caused
+      // every sync after the first to double-import every order.
+      const decodedCurrent = holdings;
       // Decisions are sequential (encrypt-then-write) but we can still
       // batch the Firestore round-trip for the new-doc writes. Backfill
       // updates of encrypted docs need a read-decrypt-merge-encrypt-write

@@ -520,9 +520,13 @@ const LEGACY_CREDENTIAL_DOC_IDS = ["trading212"] as const;
 
 /**
  * Move a legacy `secrets/{provider}` doc to the new generic
- * `secrets/credentials` path. The doc body is already-encrypted ciphertext
- * (we don't re-encrypt). The provider name is preserved inside the
- * payload — callers know which broker to talk to once they decrypt.
+ * `secrets/credentials` path. The doc body is copied verbatim — already
+ * ciphertext, no re-encryption needed. We deliberately do NOT stamp a
+ * `provider` field on the new doc; that would re-introduce the
+ * broker-name leak this migration is meant to remove. With single-
+ * broker support today the UI infers "this is a T212 connection" from
+ * the doc's existence; multi-broker future moves provider
+ * discrimination INTO the encrypted payload.
  *
  * Idempotent: if `secrets/credentials` already exists OR no legacy doc
  * exists, returns without touching anything.
@@ -538,9 +542,7 @@ export async function migrateLegacyCredentialsDoc(
     const oldSnap = await getDoc(oldRef);
     if (!oldSnap.exists()) continue;
     const data = oldSnap.data();
-    // Carry over the existing fields verbatim, plus stamp the provider
-    // (the legacy doc ID was the provider name).
-    await setDoc(newRef, { ...data, provider: legacyId });
+    await setDoc(newRef, data);
     await deleteDoc(oldRef);
     return { migrated: true };
   }
@@ -560,6 +562,24 @@ export async function clearLegacyConnectedBrokers(
   const data = snap.data();
   if (!("connectedBrokers" in data)) return;
   await updateDoc(ref, { connectedBrokers: deleteField() });
+}
+
+/**
+ * Strip a leftover `provider` field from `secrets/credentials`. An earlier
+ * version of `migrateLegacyCredentialsDoc` stamped this field onto the
+ * new doc, which leaked the broker name in plaintext. Now-fixed migration
+ * doesn't add it; this helper cleans up docs written by the buggy
+ * version. Idempotent.
+ */
+export async function clearLegacySecretsProviderField(
+  portfolioId: string,
+): Promise<void> {
+  const ref = doc(db, "portfolios", portfolioId, "secrets", "credentials");
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return;
+  const data = snap.data();
+  if (!("provider" in data)) return;
+  await updateDoc(ref, { provider: deleteField() });
 }
 
 /**
@@ -606,6 +626,10 @@ export async function runEagerMigrations(
       await migrateLegacyCredentialsDoc(p.id);
       // Step 4: drop deprecated portfolio field.
       await clearLegacyConnectedBrokers(p.id);
+      // Step 5: strip leftover plaintext `provider` field from
+      // secrets/credentials docs written by an earlier buggy version
+      // of step 3. Pure cleanup; idempotent on docs that don't have it.
+      await clearLegacySecretsProviderField(p.id);
     } catch (err) {
       console.warn("eager migration failed for portfolio", p.id, err);
     }
