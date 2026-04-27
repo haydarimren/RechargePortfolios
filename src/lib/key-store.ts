@@ -157,6 +157,34 @@ export interface UnlockedState {
 
 let unlocked: UnlockedState | null = null;
 
+/**
+ * Listeners notified on any setUnlocked / clearUnlocked. Used by
+ * useEncryption so React consumers (EnrollmentGate, home page, etc.)
+ * immediately reflect lifecycle transitions — without this, the gate
+ * doesn't know enrollment just completed and ping-pongs the user
+ * between /onboarding/encryption and / until Firebase happens to fire
+ * an unrelated auth-state event.
+ */
+type UnlockListener = (state: UnlockedState | null) => void;
+const listeners = new Set<UnlockListener>();
+
+export function subscribeToUnlock(listener: UnlockListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function notifyListeners(state: UnlockedState | null): void {
+  for (const l of listeners) {
+    try {
+      l(state);
+    } catch (err) {
+      console.warn("unlock listener threw", err);
+    }
+  }
+}
+
 export function getUnlocked(uid: string): UnlockedState | null {
   if (unlocked && unlocked.uid === uid) return unlocked;
   return null;
@@ -164,10 +192,12 @@ export function getUnlocked(uid: string): UnlockedState | null {
 
 export function setUnlocked(state: UnlockedState): void {
   unlocked = state;
+  notifyListeners(state);
 }
 
 export function clearUnlocked(): void {
   unlocked = null;
+  notifyListeners(null);
 }
 
 export function isUnlocked(uid: string): boolean {

@@ -32,7 +32,7 @@ import {
   restoreFromPhrase,
   unlockEncryption,
 } from "./encryption-setup";
-import { getUnlocked } from "./key-store";
+import { getUnlocked, subscribeToUnlock } from "./key-store";
 
 export type EncryptionUiState =
   | { kind: "loading" }
@@ -94,6 +94,24 @@ export function useEncryption(): {
     });
     return () => unsub();
   }, [evaluate]);
+
+  // Keep React state in lock-step with the module-level unlocked state.
+  // Without this, callers like enrollEncryption that flip setUnlocked()
+  // directly would leave the EnrollmentGate stuck on a stale evaluation
+  // until the next auth-state event.
+  useEffect(() => {
+    const unsub = subscribeToUnlock((unlocked) => {
+      if (unlocked) {
+        setState({ kind: "unlocked", uid: unlocked.uid });
+      } else if (user) {
+        // Cleared — re-evaluate from scratch to pick up the new shape.
+        evaluate(user);
+      } else {
+        setState({ kind: "no-user" });
+      }
+    });
+    return () => unsub();
+  }, [user, evaluate]);
 
   const restore = useCallback(
     async (phrase: string) => {

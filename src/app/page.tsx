@@ -28,7 +28,11 @@ import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
 import { useEncryption } from "@/lib/use-encryption";
 import { getUnlocked } from "@/lib/key-store";
-import { loadPortfolioKey, subscribeHoldings } from "@/lib/holdings-repo";
+import {
+  loadPortfolioKey,
+  reconcileSharedWrappedKeys,
+  subscribeHoldings,
+} from "@/lib/holdings-repo";
 import { ArrowUpRight, Plus, Trash2, UserPlus, X } from "lucide-react";
 
 export default function HomePage() {
@@ -218,6 +222,44 @@ export default function HomePage() {
       setPortfolioKeys(new Map());
     }
   }, [encryption.state.kind]);
+
+  // Owner-side reconcile: for every encrypted portfolio I own that has
+  // sharers, walk sharedWith and write missing wrappedKey docs for any
+  // friend that has a publicKey but no wrap yet. This catches the case
+  // where a friend enrolls AFTER I migrated my portfolio — without it,
+  // the friend would see "Waiting for owner's next sign-in" indefinitely
+  // until I happened to click into that specific portfolio's detail page.
+  // Running on every home load is ~one Firestore read per (sharer ×
+  // unmigrated friend) — negligible at our scale, and it makes the
+  // migration window painless for both sides.
+  useEffect(() => {
+    if (!user || encryption.state.kind !== "unlocked") return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) return;
+    let cancelled = false;
+    (async () => {
+      for (const p of mine) {
+        if (cancelled) return;
+        if (!p.encrypted || p.sharedWith.length === 0) continue;
+        const key = portfolioKeys.get(p.id);
+        if (!key) continue; // key resolution effect hasn't filled this in yet
+        try {
+          await reconcileSharedWrappedKeys(p.id, p.sharedWith, {
+            portfolioKey: key,
+            ownerPrivateKey: unlocked.privateKey,
+            ownerPublicKeyHex: unlocked.publicKeyHex,
+          });
+        } catch (err) {
+          // Don't surface — failures are recoverable on next load. Most
+          // common cause is a transient network blip.
+          console.warn("reconcile from home failed", p.id, err);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, mine, portfolioKeys, encryption.state.kind]);
 
   // Holdings subscriptions. Routed through subscribeHoldings so the
   // encrypted shape (`payload`+`iv` envelopes) gets decoded when we have
