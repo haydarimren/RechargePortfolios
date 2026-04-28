@@ -32,6 +32,7 @@ import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { useDisplayName } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
+import { AllocationTreemap } from "@/components/AllocationTreemap";
 import { fetchTrading212OrdersClient } from "@/lib/trading212-client";
 import { cleanT212Symbol } from "@/lib/trading212-utils";
 import {
@@ -448,6 +449,8 @@ export default function PortfolioPage({
       touchLogbookView(user.uid, id);
     }
   };
+
+  const [posView, setPosView] = useState<"table" | "map">("table");
 
   // Total current market value across positions with resolved quotes. Used to
   // compute per-row allocation % in the owner positions table. Positions
@@ -1215,7 +1218,7 @@ export default function PortfolioPage({
               </h2>
               <p className="text-sm text-fg-dim mt-1">
                 {tab === "positions"
-                  ? "Click a row to see lot history and price chart."
+                  ? `Click a ${posView === "map" ? "tile" : "row"} to see lot history and price chart.`
                   : "Every buy and sell, newest first."}
               </p>
             </div>
@@ -1379,138 +1382,176 @@ export default function PortfolioPage({
             <div className="card p-10 text-center text-fg-dim text-sm">
               No holdings yet.
             </div>
-          ) : !isOwner ? (
-            <div className="card overflow-hidden">
-              <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-3 label border-b border-line">
-                <span>Symbol</span>
-                <span className="text-right">Allocation</span>
-                <span className="text-right">Gain</span>
-                <span />
-              </div>
-              {nonOwnerRows.map((row, i) => {
-                const tone =
-                  row.gainPct === null
-                    ? ""
-                    : row.gainPct >= 0
-                    ? "text-pos"
-                    : "text-neg";
-                return (
-                  <button
-                    key={row.symbol}
-                    onClick={() =>
-                      router.push(`/portfolios/${id}/${row.symbol}`)
-                    }
-                    className={`w-full text-left grid grid-cols-[1fr_auto_auto] md:grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-4 hover:bg-bg-3 transition group ${
-                      i !== nonOwnerRows.length - 1 ? "border-b border-line" : ""
-                    }`}
-                  >
-                    <span className="font-semibold text-base tracking-tight">
-                      {row.symbol}
-                    </span>
-                    <span className="num text-sm text-right text-fg-dim">
-                      {row.allocationPct !== null
-                        ? `${row.allocationPct.toFixed(1)}%`
-                        : "…"}
-                    </span>
-                    <span className={`num text-sm text-right ${tone}`}>
-                      {row.gainPct === null ? "…" : fmtPct(row.gainPct)}
-                    </span>
-                    <span className="flex items-center justify-end text-fg-fade group-hover:text-accent transition">
-                      <ChevronRight className="w-3.5 h-3.5" />
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
           ) : (
-            <div className="card overflow-hidden">
-              <div className="hidden md:grid grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] gap-4 px-5 py-3 label border-b border-line">
-                <span>Symbol</span>
-                <span className="text-right">Shares</span>
-                <span className="text-right">Avg cost</span>
-                <span className="text-right">Current</span>
-                <span className="text-right">Cost</span>
-                <span className="text-right">Market</span>
-                <span className="text-right">Allocation</span>
-                <span className="text-right">Gain</span>
-                <span className="text-right">Lots</span>
-              </div>
-              {positions.map((p, i) => {
-                const q = quotes[p.symbol];
-                const market = q ? p.shares * q.c : null;
-                const gain = market !== null ? market - p.cost : null;
-                const gainPct =
-                  gain !== null && p.cost > 0 ? (gain / p.cost) * 100 : null;
-                const allocationPct =
-                  market !== null && positionsTotalMarket > 0
-                    ? (market / positionsTotalMarket) * 100
-                    : null;
-                const tone =
-                  gain === null
-                    ? ""
-                    : gain >= 0
-                    ? "text-pos"
-                    : "text-neg";
-                return (
+            <>
+              <div className="mb-3 flex justify-end">
+                <div className="flex gap-1 bg-bg-3 border border-line rounded-full p-1">
                   <button
-                    key={p.symbol}
-                    onClick={() =>
-                      router.push(`/portfolios/${id}/${p.symbol}`)
-                    }
-                    className={`w-full text-left grid grid-cols-[1fr_auto] md:grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] gap-4 px-5 py-4 hover:bg-bg-3 transition group ${
-                      i !== positions.length - 1 ? "border-b border-line" : ""
+                    onClick={() => setPosView("table")}
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition ${
+                      posView === "table"
+                        ? "bg-bg text-fg shadow-sm"
+                        : "text-fg-dim hover:text-fg"
                     }`}
+                    aria-pressed={posView === "table"}
                   >
-                    <div className="flex items-baseline gap-2">
-                      <span className="font-semibold text-base tracking-tight">
-                        {p.symbol}
-                      </span>
-                      <span className="text-xs text-fg-fade md:hidden">
-                        · {p.lots.length} lot{p.lots.length === 1 ? "" : "s"}
-                      </span>
-                    </div>
-                    <span className="num text-sm text-right text-fg-dim hidden md:block truncate">
-                      {fmtShares(p.shares)}
-                    </span>
-                    <span className="num text-sm text-right text-fg-dim hidden md:block">
-                      {fmtMoney(p.avgPrice)}
-                    </span>
-                    <span className="num text-sm text-right text-fg-dim hidden md:block">
-                      {q ? fmtMoney(q.c) : "…"}
-                    </span>
-                    <span className="num text-sm text-right text-fg-dim hidden md:block">
-                      {fmtMoney(p.cost)}
-                    </span>
-                    <span className="num text-sm text-right hidden md:block">
-                      {market !== null ? fmtMoney(market) : "…"}
-                    </span>
-                    <span className="num text-sm text-right text-fg-dim hidden md:block">
-                      {allocationPct !== null
-                        ? `${allocationPct.toFixed(1)}%`
-                        : "…"}
-                    </span>
-                    <span className={`num text-sm text-right ${tone} md:hidden`}>
-                      {gain === null
-                        ? "…"
-                        : `${gain >= 0 ? "+" : ""}${fmtPct(gainPct!)}`}
-                    </span>
-                    <span
-                      className={`num text-sm text-right hidden md:inline-flex justify-end items-center gap-1 ${tone}`}
-                    >
-                      {gain === null
-                        ? "…"
-                        : `${gain >= 0 ? "+" : ""}${fmtMoney(gain)} · ${fmtPct(
-                            gainPct!
-                          )}`}
-                    </span>
-                    <span className="hidden md:flex items-center justify-end gap-1 text-fg-fade group-hover:text-accent transition">
-                      <span className="num text-xs">{p.lots.length}</span>
-                      <ChevronRight className="w-3.5 h-3.5" />
-                    </span>
+                    Table
                   </button>
-                );
-              })}
-            </div>
+                  <button
+                    onClick={() => setPosView("map")}
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition ${
+                      posView === "map"
+                        ? "bg-bg text-fg shadow-sm"
+                        : "text-fg-dim hover:text-fg"
+                    }`}
+                    aria-pressed={posView === "map"}
+                  >
+                    Map
+                  </button>
+                </div>
+              </div>
+              {posView === "map" ? (
+                <AllocationTreemap
+                  positions={positions}
+                  quotes={quotes}
+                  totalMarket={positionsTotalMarket}
+                  isOwner={isOwner}
+                  portfolioId={id}
+                />
+              ) : !isOwner ? (
+                <div className="card overflow-hidden">
+                  <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-3 label border-b border-line">
+                    <span>Symbol</span>
+                    <span className="text-right">Allocation</span>
+                    <span className="text-right">Gain</span>
+                    <span />
+                  </div>
+                  {nonOwnerRows.map((row, i) => {
+                    const tone =
+                      row.gainPct === null
+                        ? ""
+                        : row.gainPct >= 0
+                        ? "text-pos"
+                        : "text-neg";
+                    return (
+                      <button
+                        key={row.symbol}
+                        onClick={() =>
+                          router.push(`/portfolios/${id}/${row.symbol}`)
+                        }
+                        className={`w-full text-left grid grid-cols-[1fr_auto_auto] md:grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-4 hover:bg-bg-3 transition group ${
+                          i !== nonOwnerRows.length - 1 ? "border-b border-line" : ""
+                        }`}
+                      >
+                        <span className="font-semibold text-base tracking-tight">
+                          {row.symbol}
+                        </span>
+                        <span className="num text-sm text-right text-fg-dim">
+                          {row.allocationPct !== null
+                            ? `${row.allocationPct.toFixed(1)}%`
+                            : "…"}
+                        </span>
+                        <span className={`num text-sm text-right ${tone}`}>
+                          {row.gainPct === null ? "…" : fmtPct(row.gainPct)}
+                        </span>
+                        <span className="flex items-center justify-end text-fg-fade group-hover:text-accent transition">
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="card overflow-hidden">
+                  <div className="hidden md:grid grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] gap-4 px-5 py-3 label border-b border-line">
+                    <span>Symbol</span>
+                    <span className="text-right">Shares</span>
+                    <span className="text-right">Avg cost</span>
+                    <span className="text-right">Current</span>
+                    <span className="text-right">Cost</span>
+                    <span className="text-right">Market</span>
+                    <span className="text-right">Allocation</span>
+                    <span className="text-right">Gain</span>
+                    <span className="text-right">Lots</span>
+                  </div>
+                  {positions.map((p, i) => {
+                    const q = quotes[p.symbol];
+                    const market = q ? p.shares * q.c : null;
+                    const gain = market !== null ? market - p.cost : null;
+                    const gainPct =
+                      gain !== null && p.cost > 0 ? (gain / p.cost) * 100 : null;
+                    const allocationPct =
+                      market !== null && positionsTotalMarket > 0
+                        ? (market / positionsTotalMarket) * 100
+                        : null;
+                    const tone =
+                      gain === null
+                        ? ""
+                        : gain >= 0
+                        ? "text-pos"
+                        : "text-neg";
+                    return (
+                      <button
+                        key={p.symbol}
+                        onClick={() =>
+                          router.push(`/portfolios/${id}/${p.symbol}`)
+                        }
+                        className={`w-full text-left grid grid-cols-[1fr_auto] md:grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] gap-4 px-5 py-4 hover:bg-bg-3 transition group ${
+                          i !== positions.length - 1 ? "border-b border-line" : ""
+                        }`}
+                      >
+                        <div className="flex items-baseline gap-2">
+                          <span className="font-semibold text-base tracking-tight">
+                            {p.symbol}
+                          </span>
+                          <span className="text-xs text-fg-fade md:hidden">
+                            · {p.lots.length} lot{p.lots.length === 1 ? "" : "s"}
+                          </span>
+                        </div>
+                        <span className="num text-sm text-right text-fg-dim hidden md:block truncate">
+                          {fmtShares(p.shares)}
+                        </span>
+                        <span className="num text-sm text-right text-fg-dim hidden md:block">
+                          {fmtMoney(p.avgPrice)}
+                        </span>
+                        <span className="num text-sm text-right text-fg-dim hidden md:block">
+                          {q ? fmtMoney(q.c) : "…"}
+                        </span>
+                        <span className="num text-sm text-right text-fg-dim hidden md:block">
+                          {fmtMoney(p.cost)}
+                        </span>
+                        <span className="num text-sm text-right hidden md:block">
+                          {market !== null ? fmtMoney(market) : "…"}
+                        </span>
+                        <span className="num text-sm text-right text-fg-dim hidden md:block">
+                          {allocationPct !== null
+                            ? `${allocationPct.toFixed(1)}%`
+                            : "…"}
+                        </span>
+                        <span className={`num text-sm text-right ${tone} md:hidden`}>
+                          {gain === null
+                            ? "…"
+                            : `${gain >= 0 ? "+" : ""}${fmtPct(gainPct!)}`}
+                        </span>
+                        <span
+                          className={`num text-sm text-right hidden md:inline-flex justify-end items-center gap-1 ${tone}`}
+                        >
+                          {gain === null
+                            ? "…"
+                            : `${gain >= 0 ? "+" : ""}${fmtMoney(gain)} · ${fmtPct(
+                                gainPct!
+                              )}`}
+                        </span>
+                        <span className="hidden md:flex items-center justify-end gap-1 text-fg-fade group-hover:text-accent transition">
+                          <span className="num text-xs">{p.lots.length}</span>
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
         </section>
       </main>

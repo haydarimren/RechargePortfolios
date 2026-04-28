@@ -107,6 +107,23 @@ export function useChartColors() {
       tooltipBorder: "#d8d3c8",
       tooltipText: "#1a1a1a",
       tooltipLabel: "#8a867e",
+      pos: "#3d7a4f",
+      neg: "#a84a3e",
+      // Tile palette is its own thing: tiles work like stained glass against
+      // the card, all dark enough that one white text color always reads.
+      // Borders match the card surface so the gaps look like negative space,
+      // not extra strokes.
+      tileNeutral: "#a89f8d",
+      tilePos: "#2f6043",
+      tileNeg: "#7e3a2f",
+      tileBorder: "#efece6",
+      tileText: "#ffffff",
+      tileTextDim: "#e6e0d4",
+      // Bright accent text for the % line: same color family as the tile,
+      // amped up so it reads against the dark tile fill. These are reused
+      // across themes since both theme variants render dark tiles.
+      tileGainText: "#7be0b1",
+      tileLossText: "#f29ea2",
     };
   }
   return {
@@ -124,5 +141,16 @@ export function useChartColors() {
     tooltipBorder: "#2f3642",
     tooltipText: "#e6e8eb",
     tooltipLabel: "#6c7380",
+    pos: "#56c69c",
+    neg: "#e87e83",
+    // See comment in light-theme branch.
+    tileNeutral: "#2a2f38",
+    tilePos: "#1f5e3f",
+    tileNeg: "#7a2f2c",
+    tileBorder: "#161a1f",
+    tileText: "#eef2f5",
+    tileTextDim: "#9ba6b3",
+    tileGainText: "#7be0b1",
+    tileLossText: "#f29ea2",
   };
 }
