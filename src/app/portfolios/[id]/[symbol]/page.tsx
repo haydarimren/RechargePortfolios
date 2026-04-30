@@ -20,7 +20,10 @@ import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { UnlockModal } from "@/components/UnlockModal";
 import { useEncryption } from "@/lib/use-encryption";
 import { getUnlocked } from "@/lib/key-store";
-import { loadPortfolioKey, subscribeHoldings } from "@/lib/holdings-repo";
+import {
+  loadPortfolioKeyWithRetry,
+  subscribeHoldings,
+} from "@/lib/holdings-repo";
 import { ArrowLeft, Trash2 } from "lucide-react";
 import {
   AreaChart,
@@ -118,13 +121,15 @@ export default function TickerPage({
     const unlocked = getUnlocked(user.uid);
     if (!unlocked) return;
     let cancelled = false;
-    loadPortfolioKey(id, user.uid, unlocked.privateKey)
+    loadPortfolioKeyWithRetry(id, user.uid, unlocked.privateKey)
       .then((k) => {
         if (!cancelled) setPortfolioKey(k);
       })
       .catch(() => {
-        // Owner hasn't wrapped for this viewer yet — Phase 3 closes that
-        // gap. For now the page just shows no lots.
+        // After 3 retries with backoff, key resolution still failed. Most
+        // common cause: owner hasn't reconciled the wrappedKey doc yet
+        // (their next sign-in fixes it). For now the page just shows no
+        // lots.
       });
     return () => {
       cancelled = true;
