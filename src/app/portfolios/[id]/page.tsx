@@ -40,7 +40,7 @@ import {
   encryptT212Secret,
 } from "@/lib/crypto-client";
 import { useEncryption } from "@/lib/use-encryption";
-import { getUnlocked } from "@/lib/key-store";
+import { getCachedPortfolioKey, getUnlocked } from "@/lib/key-store";
 import {
   addHolding,
   loadPortfolioKeyWithRetry,
@@ -122,8 +122,12 @@ export default function PortfolioPage({
   const encryption = useEncryption();
   // Unwrapped K_portfolio for the active portfolio. Set once per portfolio
   // load (or after a migration). null means the holdings subscription falls
-  // back to the legacy plaintext shape.
-  const [portfolioKey, setPortfolioKey] = useState<CryptoKey | null>(null);
+  // back to the legacy plaintext shape. Seeded from the module-level cache
+  // so navigating between portfolios within the same tab doesn't trigger
+  // a fresh resolution for keys we already have.
+  const [portfolioKey, setPortfolioKey] = useState<CryptoKey | null>(
+    () => getCachedPortfolioKey(id),
+  );
   const [migrationError, setMigrationError] = useState("");
 
   // Which brokers are currently connected on this portfolio. Derived from

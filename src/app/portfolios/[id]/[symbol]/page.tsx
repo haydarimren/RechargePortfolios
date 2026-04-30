@@ -19,7 +19,7 @@ import { closeOnOrBefore, fmtShares, poolPositions } from "@/lib/portfolio";
 import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { UnlockModal } from "@/components/UnlockModal";
 import { useEncryption } from "@/lib/use-encryption";
-import { getUnlocked } from "@/lib/key-store";
+import { getCachedPortfolioKey, getUnlocked } from "@/lib/key-store";
 import {
   loadPortfolioKeyWithRetry,
   subscribeHoldings,
@@ -56,7 +56,22 @@ export default function TickerPage({
   const [notFound, setNotFound] = useState(false);
 
   const encryption = useEncryption();
-  const [portfolioKey, setPortfolioKey] = useState<CryptoKey | null>(null);
+  // Seed from the module-level cache — if we resolved this portfolio's
+  // key on any previous page in the tab, render with real data straight
+  // away (no skeleton, no Firestore round-trip). Cache persists across
+  // navigation; cleared on sign-out / user-switch.
+  const [portfolioKey, setPortfolioKey] = useState<CryptoKey | null>(
+    () => getCachedPortfolioKey(id),
+  );
+  // True once the resolution attempt for this portfolio has settled
+  // (success OR final failure). Until then, the page would otherwise
+  // render with shares=0/cost=$0/0 lots — which lies during the resolution
+  // window because we just haven't decrypted yet. The stat cards consult
+  // this flag to swap their values for pulse skeletons during the window.
+  // Cache hits are implicitly already attempted (success).
+  const [keyAttempted, setKeyAttempted] = useState<boolean>(
+    () => getCachedPortfolioKey(id) !== null,
+  );
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -121,15 +136,29 @@ export default function TickerPage({
     const unlocked = getUnlocked(user.uid);
     if (!unlocked) return;
     let cancelled = false;
+    // Note: no setKeyAttempted(false) here. The cache makes every call to
+    // loadPortfolioKeyWithRetry either return synchronously (hit, which
+    // means useState's lazy init already populated portfolioKey + set
+    // keyAttempted to true) or kick off a real resolution attempt. In
+    // either case the previous attempt's "true" state is correct for
+    // the fresh attempt — if we did flip back to false here, a cached
+    // hit would briefly flash the skeleton before re-resolving the same
+    // CryptoKey we already had.
     loadPortfolioKeyWithRetry(id, user.uid, unlocked.privateKey)
       .then((k) => {
-        if (!cancelled) setPortfolioKey(k);
+        if (!cancelled) {
+          setPortfolioKey(k);
+          setKeyAttempted(true);
+        }
       })
       .catch(() => {
         // After 3 retries with backoff, key resolution still failed. Most
         // common cause: owner hasn't reconciled the wrappedKey doc yet
-        // (their next sign-in fixes it). For now the page just shows no
-        // lots.
+        // (their next sign-in fixes it). The stat cards stop showing the
+        // pulse skeleton at this point; current behaviour is to render
+        // the (zeroed) values which is fine for the rare case until/if
+        // we add a "no key yet" message at the page level too.
+        if (!cancelled) setKeyAttempted(true);
       });
     return () => {
       cancelled = true;
@@ -179,6 +208,18 @@ export default function TickerPage({
   }, [lots, yahooSymbol]);
 
   const isOwner = !!(user && portfolio && portfolio.ownerId === user.uid);
+
+  // True for the brief window between page mount/nav-back and the key
+  // resolution settling. During this window `lots` is empty for an
+  // encrypted portfolio because subscribeHoldings hasn't been able to
+  // decrypt anything yet — without the skeleton the page renders with
+  // shares=0, avg cost=$0.00, market=…, gain=… ("0 lots in {portfolio}"),
+  // which looks like a real position but isn't.
+  const keyResolving =
+    !!portfolio?.encrypted &&
+    !portfolioKey &&
+    !keyAttempted &&
+    encryption.state.kind === "unlocked";
 
   const pooled = useMemo(
     () => poolPositions(lots).find((p) => p.symbol === symbol) ?? null,
@@ -328,9 +369,16 @@ export default function TickerPage({
               {symbol}
             </h1>
             <p className="text-sm text-fg-dim mt-2">
-              {isOwner
-                ? `${lots.length} lot${lots.length === 1 ? "" : "s"} in ${portfolio.name}`
-                : `in ${portfolio.name}`}
+              {keyResolving ? (
+                <span
+                  className="inline-block h-3.5 w-32 bg-bg-3 rounded align-middle animate-pulse"
+                  aria-hidden
+                />
+              ) : isOwner ? (
+                `${lots.length} lot${lots.length === 1 ? "" : "s"} in ${portfolio.name}`
+              ) : (
+                `in ${portfolio.name}`
+              )}
             </p>
           </div>
           {quote && (
@@ -353,7 +401,7 @@ export default function TickerPage({
           )}
         </section>
 
-        {isOwner && positionClosed ? (
+        {isOwner && positionClosed && !keyResolving ? (
           <section
             className="animate-fade-up card p-6 text-center"
             style={{ animationDelay: "60ms" }}
@@ -368,11 +416,20 @@ export default function TickerPage({
             className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-fade-up"
             style={{ animationDelay: "60ms" }}
           >
-            <StatCard label="Shares" value={fmtShares(totals.shares)} />
-            <StatCard label="Avg cost" value={fmtMoney(totals.avg)} />
+            <StatCard
+              label="Shares"
+              value={fmtShares(totals.shares)}
+              loading={keyResolving}
+            />
+            <StatCard
+              label="Avg cost"
+              value={fmtMoney(totals.avg)}
+              loading={keyResolving}
+            />
             <StatCard
               label="Market value"
               value={totals.market !== null ? fmtMoney(totals.market) : "…"}
+              loading={keyResolving}
             />
             <StatCard
               label="Gain"
@@ -389,6 +446,7 @@ export default function TickerPage({
                   ? "pos"
                   : "neg"
               }
+              loading={keyResolving}
             />
           </section>
         ) : (
@@ -406,6 +464,7 @@ export default function TickerPage({
                   ? "pos"
                   : "neg"
               }
+              loading={keyResolving}
             />
           </section>
         )}
@@ -665,21 +724,40 @@ function StatCard({
   value,
   sub,
   tone,
+  loading,
 }: {
   label: string;
   value: string;
   sub?: string;
   tone?: "pos" | "neg";
+  /** When true, swap the value (and sub) for pulse skeletons. Used while
+   *  the portfolio key is still resolving — without this, encrypted
+   *  portfolios briefly render with shares=0/cost=$0 during the window. */
+  loading?: boolean;
 }) {
   const color =
     tone === "pos" ? "text-pos" : tone === "neg" ? "text-neg" : "text-fg";
   return (
     <div className="card p-5">
       <div className="label mb-3">{label}</div>
-      <div className={`num text-2xl md:text-3xl font-medium ${color}`}>
-        {value}
-      </div>
-      {sub && <div className={`num text-sm mt-1 ${color}`}>{sub}</div>}
+      {loading ? (
+        <div
+          className="h-9 md:h-10 w-24 bg-bg-3 rounded animate-pulse"
+          aria-hidden
+        />
+      ) : (
+        <div className={`num text-2xl md:text-3xl font-medium ${color}`}>
+          {value}
+        </div>
+      )}
+      {loading && sub !== undefined ? (
+        <div
+          className="h-4 w-16 bg-bg-3 rounded animate-pulse mt-2"
+          aria-hidden
+        />
+      ) : sub ? (
+        <div className={`num text-sm mt-1 ${color}`}>{sub}</div>
+      ) : null}
     </div>
   );
 }

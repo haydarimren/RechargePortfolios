@@ -27,7 +27,10 @@ import {
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
 import { useEncryption } from "@/lib/use-encryption";
-import { getUnlocked } from "@/lib/key-store";
+import {
+  getAllCachedPortfolioKeys,
+  getUnlocked,
+} from "@/lib/key-store";
 import {
   loadPortfolioKeyWithRetry,
   reconcileSharedWrappedKeys,
@@ -63,9 +66,25 @@ export default function HomePage() {
   //      wrappedKey doc throws → entry stays absent), so the next render
   //      pass will retry. That's how the "owner ran reconcile after I
   //      enrolled" case auto-heals without an extra subscription.
+  // Seed from the module-level cache so an in-tab nav back to home
+  // doesn't re-resolve keys we already have in memory. Lazy initializer
+  // runs once at mount; the cache is the single source of truth across
+  // the tab's lifetime (cleared only on sign-out / user-switch).
   const [portfolioKeys, setPortfolioKeys] = useState<Map<string, CryptoKey>>(
-    new Map(),
+    () => getAllCachedPortfolioKeys(),
   );
+  // Tracks which encrypted portfolios have completed a key-resolution
+  // attempt — success OR final failure. Without this, the UI can't tell
+  // "still resolving" apart from "owner hasn't reconciled the wrappedKey
+  // yet" — both look like `!portfolioKeys.has(p.id)`. The card then
+  // flashes the misleading "Waiting for owner's next sign-in" message
+  // during every resolution window. Cards consult this set to decide
+  // between pulse-skeleton (resolving) vs. genuine waiting message
+  // (attempted-but-failed). Same cache-seed pattern as portfolioKeys —
+  // anything already cached is implicitly attempted-and-resolved.
+  const [keyResolutionAttempted, setKeyResolutionAttempted] = useState<
+    Set<string>
+  >(() => new Set(getAllCachedPortfolioKeys().keys()));
   // Read-only mirror of `portfolioKeys` so the resolution effect can check
   // what's already resolved without depending on the state itself (which
   // would either re-run on every key arrival or wedge into a stale
@@ -206,6 +225,14 @@ export default function HomePage() {
       }),
     ).then((results) => {
       if (cancelled) return;
+      // Mark every portfolio we *tried* to resolve as attempted, regardless
+      // of success. This is what the UI consults to know the resolution
+      // window has closed and it can stop rendering the pulse-skeleton.
+      setKeyResolutionAttempted((prev) => {
+        const next = new Set(prev);
+        for (const p of needsResolve) next.add(p.id);
+        return next;
+      });
       const successes = results.filter(
         (r): r is readonly [string, CryptoKey] => r !== null,
       );
@@ -225,9 +252,13 @@ export default function HomePage() {
   // Drop the key cache when the encryption session ends. CryptoKey
   // objects are tab-scoped JS handles — letting them survive a sign-out
   // is a footgun (next sign-in would briefly hold someone else's keys).
+  // Same goes for the attempted-set: a fresh sign-in should re-attempt
+  // resolution from scratch, not skip cards because a previous session
+  // marked them attempted.
   useEffect(() => {
     if (encryption.state.kind !== "unlocked") {
       setPortfolioKeys(new Map());
+      setKeyResolutionAttempted(new Set());
     }
   }, [encryption.state.kind]);
 
@@ -569,6 +600,16 @@ export default function HomePage() {
               {mine.map((p) => {
                 const g = gainByPortfolio[p.id];
                 const tint = tintForGain(g?.ready ? g.gain : null);
+                // True for the brief window between mount/nav-back and the
+                // resolution effect's Promise.all settling. Until that
+                // settles, "no holdings" / "…" both lie — we just don't
+                // know yet because the holdings can't decode without the
+                // key. Render a pulse-skeleton instead.
+                const keyResolving =
+                  !!p.encrypted &&
+                  encryption.state.kind === "unlocked" &&
+                  !portfolioKeys.has(p.id) &&
+                  !keyResolutionAttempted.has(p.id);
                 return (
                 <li key={p.id} className={`card p-5 group relative transition ${tint}`}>
                   <Link
@@ -589,7 +630,12 @@ export default function HomePage() {
                       : "Private"}
                   </div>
                   <div className="num text-sm mb-4 relative z-10 pointer-events-none min-h-[1.25rem]">
-                    {g?.ready ? (
+                    {keyResolving ? (
+                      <div
+                        className="h-3.5 w-36 bg-bg-3 rounded animate-pulse"
+                        aria-hidden
+                      />
+                    ) : g?.ready ? (
                       <span className={g.gain >= 0 ? "text-pos" : "text-neg"}>
                         {g.gain >= 0 ? "+" : ""}{fmtMoney(g.gain)} · {g.gain >= 0 ? "+" : ""}{g.gainPct.toFixed(2)}%
                         {g.partial && (
@@ -651,14 +697,25 @@ export default function HomePage() {
               {shared.map((p) => {
                 const g = gainByPortfolio[p.id];
                 const tint = tintForGain(g?.ready ? g.gain : null);
-                // Encrypted-but-no-key state: distinguish "owner hasn't
-                // shared K_portfolio with us yet" from "portfolio is
-                // genuinely empty." Without this hint the card looks the
-                // same in both cases, which is misleading.
+                // Three-way distinction for the gain area on encrypted
+                // cards. Without `keyResolutionAttempted`, the card can't
+                // tell "still resolving" apart from "owner hasn't
+                // reconciled the wrappedKey doc" — both render as
+                // !portfolioKeys.has(p.id), and the previous code mapped
+                // both to "Waiting for owner's next sign-in," which lies
+                // to the user during every resolution window (most
+                // visibly right after navigating back from a portfolio
+                // detail page).
+                const keyResolving =
+                  !!p.encrypted &&
+                  encryption.state.kind === "unlocked" &&
+                  !portfolioKeys.has(p.id) &&
+                  !keyResolutionAttempted.has(p.id);
                 const encryptionPending =
                   !!p.encrypted &&
                   encryption.state.kind === "unlocked" &&
-                  !portfolioKeys.has(p.id);
+                  !portfolioKeys.has(p.id) &&
+                  keyResolutionAttempted.has(p.id);
                 return (
                 <li key={p.id}>
                   <Link
@@ -679,7 +736,12 @@ export default function HomePage() {
                       ) : null}
                     </div>
                     <div className="num text-sm min-h-[1.25rem]">
-                      {encryptionPending ? (
+                      {keyResolving ? (
+                        <div
+                          className="h-3.5 w-28 bg-bg-3 rounded animate-pulse"
+                          aria-hidden
+                        />
+                      ) : encryptionPending ? (
                         <span className="text-fg-fade text-xs">
                           Waiting for owner&apos;s next sign-in to share
                           encryption
