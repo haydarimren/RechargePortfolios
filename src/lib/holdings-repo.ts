@@ -45,6 +45,10 @@ import {
   type QueryDocumentSnapshot,
 } from "firebase/firestore";
 import { db } from "./firebase";
+import {
+  getCachedPortfolioKey,
+  setCachedPortfolioKey,
+} from "./key-store";
 import type { Holding } from "./types";
 import {
   type Ciphertext,
@@ -139,24 +143,32 @@ export async function loadPortfolioKey(
 const KEY_RETRY_DELAYS_MS = [1000, 3000, 6000];
 
 /**
- * loadPortfolioKey with bounded retry-with-backoff. Plain loadPortfolioKey
- * is fine when the Firestore transport is healthy, but on cold opens the
- * first attempt sometimes loses a race against connection setup / App Check
- * token issuance and throws — leaving the calling page stuck in a "no key"
- * state until manual refresh.
+ * loadPortfolioKey with module-level caching plus bounded retry-with-
+ * backoff. Pages call this for every encrypted portfolio they render;
+ * without the cache, every in-tab navigation re-resolves keys we already
+ * have in memory (each page's React state was previously local, so it
+ * died on unmount). With the cache, the second-and-onward views render
+ * decrypted data immediately — no skeleton flash, no Firestore round-trip.
  *
- * Three retries with 1s/3s/6s delays catch the transient case without much
- * cost in the genuine "owner hasn't reconciled the wrappedKey yet"
- * scenario (~3 wasted Firestore reads, all permission-checked). Retries
- * keep running after caller unmount; that's harmless because the call is
- * read-only and callers already guard their setState with a `cancelled`
- * flag.
+ * Cache lifetime: tab. Cleared on sign-out and on user-switch via
+ * setUnlocked/clearUnlocked. See key-store.ts for the rotation caveat.
+ *
+ * Retries (initial + 1s/3s/6s) only fire on the first resolution per
+ * portfolio per session — once the key is cached, returns synchronously
+ * via the cache hit. The retry budget catches the cold-start race
+ * between Firestore connection setup and the wrappedKeys read; failures
+ * past that fall through to the calling page, which renders the
+ * "Waiting for owner's next sign-in" message for the genuine
+ * unreconciled-wrappedKey case.
  */
 export async function loadPortfolioKeyWithRetry(
   portfolioId: string,
   uid: string,
   userPrivateKey: CryptoKey,
 ): Promise<CryptoKey> {
+  const cached = getCachedPortfolioKey(portfolioId);
+  if (cached) return cached;
+
   let lastError: unknown;
   for (let attempt = 0; attempt <= KEY_RETRY_DELAYS_MS.length; attempt++) {
     if (attempt > 0) {
@@ -165,7 +177,9 @@ export async function loadPortfolioKeyWithRetry(
       );
     }
     try {
-      return await loadPortfolioKey(portfolioId, uid, userPrivateKey);
+      const key = await loadPortfolioKey(portfolioId, uid, userPrivateKey);
+      setCachedPortfolioKey(portfolioId, key);
+      return key;
     } catch (err) {
       lastError = err;
     }

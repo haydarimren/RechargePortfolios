@@ -158,6 +158,56 @@ export interface UnlockedState {
 let unlocked: UnlockedState | null = null;
 
 /**
+ * Tab-lifetime cache of resolved portfolio keys (K_portfolio).
+ *
+ * Why module-level: each page (home, portfolio detail, ticker drilldown)
+ * used to hold its own per-component Map, which was destroyed on every
+ * navigation. Coming back from a portfolio detail to home triggered a
+ * fresh round-trip to Firestore + ECDH unwrap for keys we already had in
+ * memory milliseconds earlier — and the resolution window was visible to
+ * users as a flash of skeleton or, worse, "Waiting for owner's next
+ * sign-in" before the dedup loaded.
+ *
+ * Lifetime mirrors `unlocked` exactly:
+ *   - Cleared on sign-out (clearUnlocked).
+ *   - Cleared on user-switch (setUnlocked with a different uid).
+ *   - Survives all in-tab navigation, route changes, HMR-friendly
+ *     (the module is loaded once per tab).
+ *
+ * Threat model unchanged: CryptoKey objects already live in tab memory
+ * once resolved. We just stop discarding them between page mounts.
+ *
+ * Rotation caveat: if an owner rotates K_portfolio mid-session (e.g.
+ * after revoking a sharer), recipients' caches will hold the old key
+ * until tab close. Decryption of holdings re-encrypted under the new key
+ * will silently return null. Tracked as a separate concern; refresh
+ * fixes it. Add wrappedKey-doc subscriptions or decode-failure
+ * invalidation if/when this surfaces in practice.
+ */
+const portfolioKeyCache = new Map<string, CryptoKey>();
+
+export function getCachedPortfolioKey(portfolioId: string): CryptoKey | null {
+  return portfolioKeyCache.get(portfolioId) ?? null;
+}
+
+export function setCachedPortfolioKey(
+  portfolioId: string,
+  key: CryptoKey,
+): void {
+  portfolioKeyCache.set(portfolioId, key);
+}
+
+/** Returns a fresh Map snapshot — callers can mutate without affecting
+ *  the cache. Used to seed React state on page mounts. */
+export function getAllCachedPortfolioKeys(): Map<string, CryptoKey> {
+  return new Map(portfolioKeyCache);
+}
+
+export function clearPortfolioKeyCache(): void {
+  portfolioKeyCache.clear();
+}
+
+/**
  * Listeners notified on any setUnlocked / clearUnlocked. Used by
  * useEncryption so React consumers (EnrollmentGate, home page, etc.)
  * immediately reflect lifecycle transitions — without this, the gate
@@ -191,12 +241,24 @@ export function getUnlocked(uid: string): UnlockedState | null {
 }
 
 export function setUnlocked(state: UnlockedState): void {
+  // User-switch on the same browser: drop the previous user's portfolio
+  // keys before we install the new identity. Same-user re-affirmation
+  // (e.g. enrollEncryption flipping unlocked while we already have one)
+  // keeps the cache so subsequent renders don't re-resolve unnecessarily.
+  if (unlocked && unlocked.uid !== state.uid) {
+    portfolioKeyCache.clear();
+  }
   unlocked = state;
   notifyListeners(state);
 }
 
 export function clearUnlocked(): void {
   unlocked = null;
+  // Sign-out: portfolio keys are derived from the now-cleared identity
+  // private key, so they have no value to a future signed-in user. Clear
+  // them so a different account on the same browser can't see them
+  // through any reflection / debug surface.
+  portfolioKeyCache.clear();
   notifyListeners(null);
 }
 
