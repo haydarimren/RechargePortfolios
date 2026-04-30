@@ -1311,15 +1311,24 @@ export default function PortfolioPage({
                           <span className="text-fg-fade ml-1">proceeds</span>
                         )}
                       </span>
-                      <span
-                        className={`num text-xs text-right md:text-sm ${tone}`}
-                      >
-                        {t.realizedGain === undefined
-                          ? "—"
-                          : `${t.realizedGain >= 0 ? "+" : ""}${fmtMoney(
-                              t.realizedGain
-                            )} · ${fmtPct((t.realizedPct ?? 0) * 100)}`}
-                      </span>
+                      <div className="flex flex-col items-end leading-tight">
+                        {t.realizedGain === undefined ? (
+                          <span className="num text-xs text-fg-dim md:text-sm">
+                            —
+                          </span>
+                        ) : (
+                          <>
+                            <span className={`num text-xs md:text-sm ${tone}`}>
+                              {`${t.realizedGain >= 0 ? "+" : ""}${fmtMoney(
+                                t.realizedGain
+                              )}`}
+                            </span>
+                            <span className="num text-[10px] text-fg-dim md:text-xs">
+                              {fmtPct((t.realizedPct ?? 0) * 100)}
+                            </span>
+                          </>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -1369,9 +1378,7 @@ export default function PortfolioPage({
                       >
                         {t.realizedPct === undefined
                           ? "—"
-                          : `${t.realizedPct >= 0 ? "+" : ""}${fmtPct(
-                              t.realizedPct * 100
-                            )}`}
+                          : fmtPct(t.realizedPct * 100)}
                       </span>
                     </div>
                   );
@@ -1496,16 +1503,37 @@ export default function PortfolioPage({
                         onClick={() =>
                           router.push(`/portfolios/${id}/${p.symbol}`)
                         }
-                        className={`w-full text-left grid grid-cols-[1fr_auto] md:grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] gap-4 px-5 py-4 hover:bg-bg-3 transition group ${
+                        className={`w-full text-left px-5 py-4 hover:bg-bg-3 transition group md:grid md:grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] md:gap-4 ${
                           i !== positions.length - 1 ? "border-b border-line" : ""
                         }`}
                       >
-                        <div className="flex items-baseline gap-2">
+                        {/* Mobile-only compact card. Two lines, two columns:
+                              symbol | market value
+                              shares | gain $ (gain %)
+                            Hidden ≥ md, where the desktop grid below renders. */}
+                        <div className="md:hidden flex items-center justify-between gap-4">
+                          <div className="flex flex-col leading-tight min-w-0">
+                            <span className="font-semibold text-base tracking-tight truncate">
+                              {p.symbol}
+                            </span>
+                            <span className="num text-xs text-fg-fade mt-0.5">
+                              {fmtShares(p.shares)} shares
+                            </span>
+                          </div>
+                          <div className="flex flex-col items-end leading-tight shrink-0">
+                            <span className="num text-base">
+                              {market !== null ? fmtMoney(market) : "…"}
+                            </span>
+                            <span className={`num text-xs mt-0.5 ${tone}`}>
+                              {gain === null
+                                ? "…"
+                                : `${gain >= 0 ? "+" : ""}${fmtMoney(gain)} (${fmtPct(gainPct!)})`}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="hidden md:flex items-baseline gap-2">
                           <span className="font-semibold text-base tracking-tight">
                             {p.symbol}
-                          </span>
-                          <span className="text-xs text-fg-fade md:hidden">
-                            · {p.lots.length} lot{p.lots.length === 1 ? "" : "s"}
                           </span>
                         </div>
                         <span className="num text-sm text-right text-fg-dim hidden md:block truncate">
@@ -1528,20 +1556,20 @@ export default function PortfolioPage({
                             ? `${allocationPct.toFixed(1)}%`
                             : "…"}
                         </span>
-                        <span className={`num text-sm text-right ${tone} md:hidden`}>
-                          {gain === null
-                            ? "…"
-                            : `${gain >= 0 ? "+" : ""}${fmtPct(gainPct!)}`}
-                        </span>
-                        <span
-                          className={`num text-sm text-right hidden md:inline-flex justify-end items-center gap-1 ${tone}`}
-                        >
-                          {gain === null
-                            ? "…"
-                            : `${gain >= 0 ? "+" : ""}${fmtMoney(gain)} · ${fmtPct(
-                                gainPct!
-                              )}`}
-                        </span>
+                        <div className="hidden md:flex flex-col items-end leading-tight">
+                          {gain === null ? (
+                            <span className="num text-sm text-fg-dim">…</span>
+                          ) : (
+                            <>
+                              <span className={`num text-sm ${tone}`}>
+                                {`${gain >= 0 ? "+" : ""}${fmtMoney(gain)}`}
+                              </span>
+                              <span className="num text-xs text-fg-dim">
+                                {fmtPct(gainPct!)}
+                              </span>
+                            </>
+                          )}
+                        </div>
                         <span className="hidden md:flex items-center justify-end gap-1 text-fg-fade group-hover:text-accent transition">
                           <span className="num text-xs">{p.lots.length}</span>
                           <ChevronRight className="w-3.5 h-3.5" />
