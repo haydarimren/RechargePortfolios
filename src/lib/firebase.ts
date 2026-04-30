@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { getFirestore, initializeFirestore } from "firebase/firestore";
 import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
 
 const firebaseConfig = {
@@ -15,6 +15,41 @@ const firebaseConfig = {
 
 // Initialize Firebase securely to avoid re-initialization
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+
+// Tell Firestore to *auto-detect* whether to use BiDi streaming or long-polling
+// rather than its default of always trying streaming first. On some networks /
+// proxies / browsers the streaming handshake fails on cold opens and the SDK
+// waits 30-60s before retrying — during which onSnapshot delivers no first
+// snapshot and the home page sits in a misleading "empty" state.
+//
+// Important: this is NOT a revert of 30904dd. That revert pulled out
+// `experimentalForceLongPolling`, which forced long-polling unconditionally and
+// produced a 20-req/s retry storm with no backoff on Orion/WebKit. Auto-detect
+// keeps streaming as the happy path and only falls back when the SDK detects
+// streaming is failing — which is the actual fix for the cold-open stall
+// without bringing back the retry-storm pathology.
+//
+// `experimentalLongPollingOptions.timeoutSeconds: 5` keeps individual long-poll
+// requests short once the SDK has fallen back, so a stuck poll can't add
+// another 30s on top.
+//
+// Must run before any getFirestore() call. The global flag prevents HMR
+// re-imports from double-initializing Firestore (which throws).
+if (
+  typeof window !== "undefined" &&
+  !(globalThis as { __recharge_firestore?: true }).__recharge_firestore
+) {
+  try {
+    initializeFirestore(app, {
+      experimentalAutoDetectLongPolling: true,
+      experimentalLongPollingOptions: { timeoutSeconds: 5 },
+    });
+    (globalThis as { __recharge_firestore?: true }).__recharge_firestore = true;
+  } catch {
+    // Already initialized (HMR, double-mount). getFirestore() below will
+    // return the existing instance.
+  }
+}
 
 // App Check — attaches a reCAPTCHA v3 attestation token to every Firebase
 // request so someone who copies our web config can't hit our quota from

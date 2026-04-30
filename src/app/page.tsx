@@ -39,8 +39,11 @@ import { ArrowUpRight, Plus, Trash2, UserPlus, X } from "lucide-react";
 export default function HomePage() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [mine, setMine] = useState<Portfolio[]>([]);
-  const [shared, setShared] = useState<Portfolio[]>([]);
+  // `undefined` means the first Firestore snapshot hasn't arrived yet, so the
+  // UI can render a loading skeleton instead of the empty-state card. Once a
+  // snapshot lands, the value is always a (possibly empty) array.
+  const [mine, setMine] = useState<Portfolio[] | undefined>(undefined);
+  const [shared, setShared] = useState<Portfolio[] | undefined>(undefined);
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
   const [shareTarget, setShareTarget] = useState<Portfolio | null>(null);
@@ -151,7 +154,7 @@ export default function HomePage() {
   // has no `portfolioViews` record yet, seed it with "now" so the user isn't
   // surprised by a dump of pre-existing trades marked unread.
   useEffect(() => {
-    if (!user || shared.length === 0) return;
+    if (!user || !shared || shared.length === 0) return;
     for (const p of shared) {
       if (!portfolioViews.has(p.id)) {
         seedPortfolioView(user.uid, p.id);
@@ -160,7 +163,7 @@ export default function HomePage() {
   }, [user, shared, portfolioViews]);
 
   const portfolioIds = useMemo(
-    () => [...mine, ...shared].map((p) => p.id).sort().join(","),
+    () => [...(mine ?? []), ...(shared ?? [])].map((p) => p.id).sort().join(","),
     [mine, shared]
   );
 
@@ -178,7 +181,7 @@ export default function HomePage() {
     const unlocked = getUnlocked(user.uid);
     if (!unlocked) return;
 
-    const all = [...mine, ...shared];
+    const all = [...(mine ?? []), ...(shared ?? [])];
     const needsResolve = all.filter(
       (p) => p.encrypted && !portfolioKeysRef.current.has(p.id),
     );
@@ -237,7 +240,7 @@ export default function HomePage() {
   useEffect(() => {
     if (!user || encryption.state.kind !== "unlocked") return;
     if (ranEagerMigrationsForUidRef.current === user.uid) return;
-    if (mine.length === 0) return; // wait for the portfolio list to land
+    if (!mine || mine.length === 0) return; // wait for the portfolio list to land
     const unlocked = getUnlocked(user.uid);
     if (!unlocked) return;
     ranEagerMigrationsForUidRef.current = user.uid;
@@ -269,7 +272,7 @@ export default function HomePage() {
     if (!unlocked) return;
     let cancelled = false;
     (async () => {
-      for (const p of mine) {
+      for (const p of mine ?? []) {
         if (cancelled) return;
         if (!p.encrypted || p.sharedWith.length === 0) continue;
         const key = portfolioKeys.get(p.id);
@@ -432,7 +435,7 @@ export default function HomePage() {
   // record (otherwise the baseline write is still in flight — skip).
   const unreadBySharedId = useMemo(() => {
     const out: Record<string, number> = {};
-    for (const p of shared) {
+    for (const p of shared ?? []) {
       const view = portfolioViews.get(p.id);
       if (!view) continue; // baseline not yet written — show nothing
       const holdings = holdingsByPortfolio[p.id] ?? [];
@@ -536,7 +539,9 @@ export default function HomePage() {
                 My portfolios
               </h1>
               <p className="text-sm text-fg-dim mt-1">
-                {mine.length === 0
+                {mine === undefined
+                  ? "Loading…"
+                  : mine.length === 0
                   ? "None yet. Create one below."
                   : `${mine.length} portfolio${mine.length === 1 ? "" : "s"}`}
               </p>
@@ -549,7 +554,9 @@ export default function HomePage() {
             </button>
           </div>
 
-          {mine.length === 0 ? (
+          {mine === undefined ? (
+            <PortfolioListSkeleton count={3} />
+          ) : mine.length === 0 ? (
             <div className="card p-10 text-center text-fg-dim text-sm">
               Nothing here yet.
             </div>
@@ -626,12 +633,16 @@ export default function HomePage() {
               Shared with me
             </h2>
             <p className="text-sm text-fg-dim mt-1">
-              {shared.length === 0
+              {shared === undefined
+                ? "Loading…"
+                : shared.length === 0
                 ? "Give friends your UID below to get access."
                 : `${shared.length} from friends`}
             </p>
           </div>
-          {shared.length === 0 ? null : (
+          {shared === undefined ? (
+            <PortfolioListSkeleton count={2} />
+          ) : shared.length === 0 ? null : (
             <ul className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
               {shared.map((p) => {
                 const g = gainByPortfolio[p.id];
@@ -783,6 +794,21 @@ function Modal({
         {children}
       </div>
     </div>
+  );
+}
+
+function PortfolioListSkeleton({ count }: { count: number }) {
+  return (
+    <ul className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {Array.from({ length: count }).map((_, i) => (
+        <li key={i} className="card p-5 animate-pulse" aria-hidden>
+          <div className="h-3 w-16 bg-bg-3 rounded mb-8" />
+          <div className="h-5 w-40 bg-bg-3 rounded mb-2" />
+          <div className="h-3 w-24 bg-bg-3 rounded mb-4" />
+          <div className="h-4 w-32 bg-bg-3 rounded" />
+        </li>
+      ))}
+    </ul>
   );
 }
 
