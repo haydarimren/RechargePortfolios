@@ -43,7 +43,7 @@ import { useEncryption } from "@/lib/use-encryption";
 import { getUnlocked } from "@/lib/key-store";
 import {
   addHolding,
-  loadPortfolioKey,
+  loadPortfolioKeyWithRetry,
   migratePortfolioToEncrypted,
   reconcileSharedWrappedKeys,
   subscribeHoldings,
@@ -238,7 +238,11 @@ export default function PortfolioPage({
       // Path 1: portfolio is already encrypted → just fetch + unwrap our key.
       if (portfolioEncrypted) {
         try {
-          const k = await loadPortfolioKey(id, user.uid, unlocked.privateKey);
+          const k = await loadPortfolioKeyWithRetry(
+            id,
+            user.uid,
+            unlocked.privateKey,
+          );
           if (!cancelled) setPortfolioKey(k);
           // Re-share reconnection: if any sharer enrolled after this
           // portfolio was migrated, they have a publicKey but no
@@ -258,7 +262,7 @@ export default function PortfolioPage({
                 : "This portfolio is encrypted but the owner hasn't shared the key with you yet.",
             );
           }
-          console.warn("loadPortfolioKey failed", err);
+          console.warn("loadPortfolioKeyWithRetry failed", err);
         }
         return;
       }

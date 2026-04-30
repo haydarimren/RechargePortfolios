@@ -29,7 +29,7 @@ import { UnlockModal } from "@/components/UnlockModal";
 import { useEncryption } from "@/lib/use-encryption";
 import { getUnlocked } from "@/lib/key-store";
 import {
-  loadPortfolioKey,
+  loadPortfolioKeyWithRetry,
   reconcileSharedWrappedKeys,
   runEagerMigrations,
   subscribeHoldings,
@@ -88,7 +88,7 @@ export default function HomePage() {
     const unlocked = getUnlocked(user.uid);
     if (!unlocked) return;
     let cancelled = false;
-    loadPortfolioKey(shareTarget.id, user.uid, unlocked.privateKey)
+    loadPortfolioKeyWithRetry(shareTarget.id, user.uid, unlocked.privateKey)
       .then((k) => {
         if (!cancelled) setShareTargetKey(k);
       })
@@ -191,7 +191,11 @@ export default function HomePage() {
     Promise.all(
       needsResolve.map(async (p) => {
         try {
-          const k = await loadPortfolioKey(p.id, user.uid, unlocked.privateKey);
+          const k = await loadPortfolioKeyWithRetry(
+            p.id,
+            user.uid,
+            unlocked.privateKey,
+          );
           return [p.id, k] as const;
         } catch {
           // Owner hasn't wrapped K_portfolio for this viewer yet (sharer

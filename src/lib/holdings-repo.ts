@@ -136,6 +136,43 @@ export async function loadPortfolioKey(
   );
 }
 
+const KEY_RETRY_DELAYS_MS = [1000, 3000, 6000];
+
+/**
+ * loadPortfolioKey with bounded retry-with-backoff. Plain loadPortfolioKey
+ * is fine when the Firestore transport is healthy, but on cold opens the
+ * first attempt sometimes loses a race against connection setup / App Check
+ * token issuance and throws — leaving the calling page stuck in a "no key"
+ * state until manual refresh.
+ *
+ * Three retries with 1s/3s/6s delays catch the transient case without much
+ * cost in the genuine "owner hasn't reconciled the wrappedKey yet"
+ * scenario (~3 wasted Firestore reads, all permission-checked). Retries
+ * keep running after caller unmount; that's harmless because the call is
+ * read-only and callers already guard their setState with a `cancelled`
+ * flag.
+ */
+export async function loadPortfolioKeyWithRetry(
+  portfolioId: string,
+  uid: string,
+  userPrivateKey: CryptoKey,
+): Promise<CryptoKey> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= KEY_RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) =>
+        setTimeout(r, KEY_RETRY_DELAYS_MS[attempt - 1]),
+      );
+    }
+    try {
+      return await loadPortfolioKey(portfolioId, uid, userPrivateKey);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError ?? new Error("loadPortfolioKey: exhausted retries");
+}
+
 /**
  * Generate a fresh K_portfolio, wrap it under the supplied user's public
  * key, and write the wrappedKey doc. Returns the in-memory key for
