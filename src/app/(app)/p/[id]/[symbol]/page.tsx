@@ -22,10 +22,11 @@ import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { useEncryption } from "@/lib/use-encryption";
 import { getCachedPortfolioKey, getUnlocked } from "@/lib/key-store";
 import {
+  addHolding,
   loadPortfolioKeyWithRetry,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
-import { Trash2 } from "lucide-react";
+import { Trash2, X } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -73,6 +74,22 @@ export default function TickerPage({
   const [keyAttempted, setKeyAttempted] = useState<boolean>(
     () => getCachedPortfolioKey(id) !== null,
   );
+  // Add-lot modal state. Symbol/exchange are implied by the URL, so the
+  // form is just side + shares + price + date. We reuse the parent
+  // detail page's `addHolding(...)` write path.
+  const [showAdd, setShowAdd] = useState(false);
+  const [addForm, setAddForm] = useState<{
+    side: "BUY" | "SELL";
+    shares: string;
+    purchasePrice: string;
+    purchaseDate: string;
+  }>({
+    side: "BUY",
+    shares: "",
+    purchasePrice: "",
+    purchaseDate: new Date().toISOString().split("T")[0],
+  });
+  const [addBusy, setAddBusy] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -244,6 +261,42 @@ export default function TickerPage({
     return { shares, cost, avg, market, gain, gainPct };
   }, [pooled, quote]);
 
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOwner) return;
+    const shares = parseFloat(addForm.shares);
+    const price = parseFloat(addForm.purchasePrice);
+    if (!(shares > 0) || !(price > 0)) return;
+    setAddBusy(true);
+    try {
+      // Carry forward the page's resolved Yahoo symbol so non-US tickers
+      // (e.g. VUAA.L) keep their suffix on the new lot too.
+      await addHolding(
+        id,
+        portfolioKey,
+        {
+          symbol,
+          shares,
+          purchasePrice: price,
+          purchaseDate: addForm.purchaseDate,
+          createdAt: Date.now(),
+          side: addForm.side,
+          yahooSymbol,
+        },
+        user?.uid,
+      );
+      setAddForm({
+        side: "BUY",
+        shares: "",
+        purchasePrice: "",
+        purchaseDate: new Date().toISOString().split("T")[0],
+      });
+      setShowAdd(false);
+    } finally {
+      setAddBusy(false);
+    }
+  };
+
   const handleDelete = async (l: Holding) => {
     if (!isOwner) return;
     if (
@@ -391,7 +444,11 @@ export default function TickerPage({
             </div>
             {isOwner && (
               <div className="flex gap-2 shrink-0">
-                <button className="bg-fg text-bg text-sm font-semibold px-3.5 py-2 rounded-btn">
+                <button
+                  type="button"
+                  onClick={() => setShowAdd(true)}
+                  className="bg-fg text-bg text-sm font-semibold px-3.5 py-2 rounded-btn hover:bg-accent hover:text-white transition-colors"
+                >
                   + Add lot
                 </button>
               </div>
@@ -727,6 +784,115 @@ export default function TickerPage({
           </div>
         </section>
       </main>
+
+      {showAdd && isOwner && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg/70 backdrop-blur-sm p-4">
+          <div className="bg-bg-2 border border-line rounded-card w-full max-w-md p-6 animate-fade-up">
+            <div className="flex justify-between items-start mb-5">
+              <div>
+                <h3 className="text-lg font-semibold text-fg">Add lot</h3>
+                <p className="text-xs text-fg-fade mt-0.5 tabular-nums">
+                  {symbol}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdd(false)}
+                className="text-fg-fade hover:text-fg transition"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleAdd} className="space-y-3">
+              <div className="inline-flex items-center gap-px rounded-full border border-line p-0.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setAddForm({ ...addForm, side: "BUY" })}
+                  className={`px-3 py-1 rounded-full transition ${
+                    addForm.side === "BUY"
+                      ? "bg-pos/20 text-pos"
+                      : "text-fg-fade hover:text-fg"
+                  }`}
+                  aria-pressed={addForm.side === "BUY"}
+                >
+                  Buy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAddForm({ ...addForm, side: "SELL" })}
+                  className={`px-3 py-1 rounded-full transition ${
+                    addForm.side === "SELL"
+                      ? "bg-neg/20 text-neg"
+                      : "text-fg-fade hover:text-fg"
+                  }`}
+                  aria-pressed={addForm.side === "SELL"}
+                >
+                  Sell
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block">
+                  <span className="block text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade mb-1.5">
+                    Shares
+                  </span>
+                  <input
+                    autoFocus
+                    type="number"
+                    step="0.0001"
+                    min="0"
+                    value={addForm.shares}
+                    onChange={(e) =>
+                      setAddForm({ ...addForm, shares: e.target.value })
+                    }
+                    placeholder="10"
+                    className="field"
+                    required
+                  />
+                </label>
+                <label className="block">
+                  <span className="block text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade mb-1.5">
+                    Price / share
+                  </span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={addForm.purchasePrice}
+                    onChange={(e) =>
+                      setAddForm({ ...addForm, purchasePrice: e.target.value })
+                    }
+                    placeholder="175.50"
+                    className="field"
+                    required
+                  />
+                </label>
+              </div>
+              <label className="block">
+                <span className="block text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade mb-1.5">
+                  {addForm.side === "SELL" ? "Sale date" : "Purchase date"}
+                </span>
+                <input
+                  type="date"
+                  value={addForm.purchaseDate}
+                  onChange={(e) =>
+                    setAddForm({ ...addForm, purchaseDate: e.target.value })
+                  }
+                  className="field"
+                  required
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={addBusy}
+                className="btn-primary w-full mt-1 disabled:opacity-60"
+              >
+                {addBusy ? "Saving…" : "Save lot"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
