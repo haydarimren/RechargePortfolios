@@ -60,7 +60,7 @@ import {
   touchLogbookView,
   touchPortfolioView,
 } from "@/lib/views";
-import { ChevronRight, X, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronRight, X, Trash2 } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -1278,14 +1278,9 @@ export default function PortfolioPage({
                           onClick={() =>
                             router.push(`/p/${id}/${t.symbol}`)
                           }
-                          className="text-fg font-semibold text-sm tracking-tight hover:text-accent transition text-left flex items-center gap-1.5"
+                          className="text-fg font-semibold text-sm tracking-tight hover:text-accent transition text-left"
                         >
                           {t.symbol}
-                          {t.importSource && (
-                            <span className="text-[10.5px] text-fg-fade px-1.5 py-px border border-line rounded-tag font-medium">
-                              {t.importSource === "trading212" ? "T212" : t.importSource}
-                            </span>
-                          )}
                         </button>
                       </div>
                       <span className="num text-xs text-right text-fg-dim tabular-nums hidden md:block">
@@ -1350,10 +1345,9 @@ export default function PortfolioPage({
                       {t.realizedPct === undefined ? (
                         <span className="num text-xs text-fg-fade tabular-nums">—</span>
                       ) : (
-                        <TwoLinePLCell
-                          amount={t.realizedGain ?? 0}
-                          pct={t.realizedPct * 100}
-                        />
+                        <span className={`num text-xs tabular-nums font-semibold ${t.realizedPct >= 0 ? "text-pos" : "text-neg"}`}>
+                          {t.realizedPct >= 0 ? "+" : ""}{(t.realizedPct * 100).toFixed(1)}%
+                        </span>
                       )}
                     </div>
                   </div>
