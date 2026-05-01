@@ -577,7 +577,7 @@ export default function TickerPage({
           </div>
         </section>
 
-        {/* Task 5.4 — Lot table restyle / Task 5.5 — shared-viewer variant */}
+        {/* Lot table: small-caps headers, BUY/SELL badges, source tags, TwoLinePLCell for P&L */}
         <section
           className="animate-fade-up"
           style={{ animationDelay: "200ms" }}
