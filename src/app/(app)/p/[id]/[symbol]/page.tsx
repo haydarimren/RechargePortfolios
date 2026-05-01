@@ -72,6 +72,11 @@ export default function TickerPage({
   const [keyAttempted, setKeyAttempted] = useState<boolean>(
     () => getCachedPortfolioKey(id) !== null,
   );
+  // Drilldown header ⋯ menu open state. Must live up here with the other
+  // useState calls — Phase 5 originally placed this further down where it
+  // sat after the `loading` / `notFound` early returns, which violates the
+  // rules-of-hooks invariant (hook count differs across render cycles).
+  const [showMenu, setShowMenu] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -339,7 +344,6 @@ export default function TickerPage({
     return date.toLocaleDateString("en-US", { year: "numeric" });
   };
 
-  const [showMenu, setShowMenu] = useState(false);
   const needsRecovery = encryption.state.kind === "needs-recovery";
 
   return (
