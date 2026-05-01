@@ -1385,10 +1385,10 @@ export default function PortfolioPage({
             <>
               {!isOwner ? (
                 <div className="card overflow-hidden">
-                  <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-3 label border-b border-line">
-                    <span>Symbol</span>
-                    <span className="text-right">Allocation</span>
-                    <span className="text-right">Gain</span>
+                  <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_auto] gap-4 px-3 py-2 border-b border-line">
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Symbol</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Allocation</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Gain</span>
                     <span />
                   </div>
                   {nonOwnerRows.map((row, i) => {
@@ -1404,19 +1404,17 @@ export default function PortfolioPage({
                         onClick={() =>
                           router.push(`/p/${id}/${row.symbol}`)
                         }
-                        className={`w-full text-left grid grid-cols-[1fr_auto_auto] md:grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-4 hover:bg-bg-3 transition group ${
-                          i !== nonOwnerRows.length - 1 ? "border-b border-line" : ""
-                        }`}
+                        className={`w-full text-left grid grid-cols-[1fr_auto_auto] md:grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-4 hover:bg-[rgba(91,141,239,0.04)] transition group border-b border-[#20242c] last:border-b-0`}
                       >
-                        <span className="font-semibold text-base tracking-tight">
+                        <span className="text-fg font-semibold tracking-tight">
                           {row.symbol}
                         </span>
-                        <span className="num text-sm text-right text-fg-dim">
+                        <span className="num text-sm text-right text-fg-dim tabular-nums">
                           {row.allocationPct !== null
                             ? `${row.allocationPct.toFixed(1)}%`
                             : "…"}
                         </span>
-                        <span className={`num text-sm text-right ${tone}`}>
+                        <span className={`num text-sm text-right tabular-nums ${tone}`}>
                           {row.gainPct === null ? "…" : fmtPct(row.gainPct)}
                         </span>
                         <span className="flex items-center justify-end text-fg-fade group-hover:text-accent transition">
@@ -1428,16 +1426,17 @@ export default function PortfolioPage({
                 </div>
               ) : (
                 <div className="card overflow-hidden">
-                  <div className="hidden md:grid grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] gap-4 px-5 py-3 label border-b border-line">
-                    <span>Symbol</span>
-                    <span className="text-right">Shares</span>
-                    <span className="text-right">Avg cost</span>
-                    <span className="text-right">Current</span>
-                    <span className="text-right">Cost</span>
-                    <span className="text-right">Market</span>
-                    <span className="text-right">Allocation</span>
-                    <span className="text-right">Gain</span>
-                    <span className="text-right">Lots</span>
+                  {/* Desktop table */}
+                  <div className="hidden md:grid grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.9fr_1.3fr_0.5fr] gap-4 px-5 py-2 border-b border-line">
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Symbol</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Shares</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Avg cost</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Current</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Cost</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Market</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Allocation</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Gain</span>
+                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Lots</span>
                   </div>
                   {positions.map((p, i) => {
                     const q = quotes[p.symbol];
@@ -1449,83 +1448,74 @@ export default function PortfolioPage({
                       market !== null && positionsTotalMarket > 0
                         ? (market / positionsTotalMarket) * 100
                         : null;
-                    const tone =
-                      gain === null
-                        ? ""
-                        : gain >= 0
-                        ? "text-pos"
-                        : "text-neg";
                     return (
                       <button
                         key={p.symbol}
                         onClick={() =>
                           router.push(`/p/${id}/${p.symbol}`)
                         }
-                        className={`w-full text-left px-5 py-4 hover:bg-bg-3 transition group md:grid md:grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] md:gap-4 ${
-                          i !== positions.length - 1 ? "border-b border-line" : ""
-                        }`}
+                        className="w-full text-left px-5 py-3.5 hover:bg-[rgba(91,141,239,0.04)] transition group md:grid md:grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.9fr_1.3fr_0.5fr] md:gap-4 border-b border-[#20242c] last:border-b-0"
                       >
-                        {/* Mobile-only compact card. Two lines, two columns:
-                              symbol | market value
-                              shares | gain $ (gain %)
-                            Hidden ≥ md, where the desktop grid below renders. */}
+                        {/* Mobile row */}
                         <div className="md:hidden flex items-center justify-between gap-4">
                           <div className="flex flex-col leading-tight min-w-0">
-                            <span className="font-semibold text-base tracking-tight truncate">
+                            <span className="text-fg font-semibold tracking-tight truncate">
                               {p.symbol}
                             </span>
-                            <span className="num text-xs text-fg-fade mt-0.5">
-                              {fmtShares(p.shares)} shares
+                            <span className="num text-[10px] text-fg-fade mt-0.5">
+                              {fmtShares(p.shares)} · {fmtMoney(p.avgPrice)}
                             </span>
                           </div>
                           <div className="flex flex-col items-end leading-tight shrink-0">
-                            <span className="num text-base">
+                            <span className="num text-fg font-semibold tabular-nums">
                               {market !== null ? fmtMoney(market) : "…"}
                             </span>
-                            <span className={`num text-xs mt-0.5 ${tone}`}>
-                              {gain === null
-                                ? "…"
-                                : `${gain >= 0 ? "+" : ""}${fmtMoney(gain)} (${fmtPct(gainPct!)})`}
-                            </span>
+                            {gain !== null && gainPct !== null ? (
+                              <TwoLinePLCell amount={gain} pct={gainPct} currency="USD" className="mt-0.5" />
+                            ) : (
+                              <span className="num text-[10px] text-fg-fade tabular-nums">…</span>
+                            )}
                           </div>
                         </div>
-                        <div className="hidden md:flex items-baseline gap-2">
-                          <span className="font-semibold text-base tracking-tight">
+                        {/* Desktop cells */}
+                        <div className="hidden md:flex items-center">
+                          <span className="text-fg font-semibold tracking-tight">
                             {p.symbol}
                           </span>
                         </div>
-                        <span className="num text-sm text-right text-fg-dim hidden md:block truncate">
+                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block truncate">
                           {fmtShares(p.shares)}
                         </span>
-                        <span className="num text-sm text-right text-fg-dim hidden md:block">
+                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
                           {fmtMoney(p.avgPrice)}
                         </span>
-                        <span className="num text-sm text-right text-fg-dim hidden md:block">
+                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
                           {q ? fmtMoney(q.c) : "…"}
                         </span>
-                        <span className="num text-sm text-right text-fg-dim hidden md:block">
+                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
                           {fmtMoney(p.cost)}
                         </span>
-                        <span className="num text-sm text-right hidden md:block">
+                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
                           {market !== null ? fmtMoney(market) : "…"}
                         </span>
-                        <span className="num text-sm text-right text-fg-dim hidden md:block">
-                          {allocationPct !== null
-                            ? `${allocationPct.toFixed(1)}%`
-                            : "…"}
-                        </span>
-                        <div className="hidden md:flex flex-col items-end leading-tight">
-                          {gain === null ? (
-                            <span className="num text-sm text-fg-dim">…</span>
-                          ) : (
+                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
+                          {allocationPct !== null ? (
                             <>
-                              <span className={`num text-sm ${tone}`}>
-                                {`${gain >= 0 ? "+" : ""}${fmtMoney(gain)}`}
+                              <span className="inline-block w-[80px] h-1 bg-[#242932] rounded overflow-hidden align-middle mr-1.5">
+                                <span
+                                  style={{ width: `${allocationPct}%` }}
+                                  className="block h-full bg-accent"
+                                />
                               </span>
-                              <span className="num text-xs text-fg-dim">
-                                {fmtPct(gainPct!)}
-                              </span>
+                              {allocationPct.toFixed(1)}%
                             </>
+                          ) : "…"}
+                        </span>
+                        <div className="hidden md:flex items-center justify-end">
+                          {gain !== null && gainPct !== null ? (
+                            <TwoLinePLCell amount={gain} pct={gainPct} currency="USD" />
+                          ) : (
+                            <span className="num text-sm text-fg-dim">…</span>
                           )}
                         </div>
                         <span className="hidden md:flex items-center justify-end gap-1 text-fg-fade group-hover:text-accent transition">
