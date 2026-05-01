@@ -1035,62 +1035,32 @@ export default function PortfolioPage({
           </div>
         </section>
 
-        {/* Top stats */}
-        {isOwner ? (
-          <section
-            className="grid grid-cols-1 md:grid-cols-3 gap-4 animate-fade-up"
-            style={{ animationDelay: "60ms" }}
-          >
-            <StatCard label="Cost basis" value={fmtMoney(totals.cost)} />
-            <StatCard
-              label="Market value"
-              value={totals.market > 0 ? fmtMoney(totals.market) : "—"}
-              hint={totals.market === 0 ? "Fetching quotes…" : undefined}
-            />
-            <StatCard
-              label="Total gain"
-              value={totals.market > 0 ? fmtMoney(totals.gain) : "—"}
-              sub={totals.market > 0 ? fmtPct(totals.gainPct) : undefined}
-              tone={totals.gain >= 0 ? "pos" : "neg"}
-            />
-          </section>
-        ) : (
-          <section
-            className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-fade-up"
-            style={{ animationDelay: "60ms" }}
-          >
-            <StatCard
-              label="Overall gain"
-              value={totals.market > 0 ? fmtPct(totals.gainPct) : "…"}
-              tone={
-                totals.market === 0
-                  ? undefined
-                  : totals.gain >= 0
-                  ? "pos"
-                  : "neg"
-              }
-            />
-            <StatCard label="Holdings" value={String(positions.length)} />
-            {BENCHMARKS.map((b) => {
-              if (!benchGain || benchGain.portfolio === 0) {
-                return <StatCard key={b} label={`vs ${b}`} value="…" />;
-              }
-              const v = benchGain.values[b] ?? 0;
-              const portPct = totals.cost > 0 ? (totals.gain / totals.cost) * 100 : 0;
-              const benchPct =
-                totals.cost > 0 ? ((v - totals.cost) / totals.cost) * 100 : 0;
-              const diff = portPct - benchPct;
-              return (
-                <StatCard
-                  key={b}
-                  label={`vs ${b}`}
-                  value={fmtPct(diff)}
-                  tone={diff >= 0 ? "pos" : "neg"}
-                />
-              );
-            })}
-          </section>
-        )}
+        {/* Hero strip */}
+        <div
+          className="flex items-baseline gap-[18px] flex-wrap py-5 border-b border-line mb-[18px] animate-fade-up"
+          style={{ animationDelay: "60ms" }}
+        >
+          <span className="text-[40px] font-semibold leading-none tracking-tight tabular-nums text-fg">
+            {totals.market > 0 ? `$${formatBig(totals.market)}` : "—"}
+          </span>
+          <PerformancePill pct={totals.gainPct} benchmark="vs cost" />
+          <div className="ml-auto flex gap-[14px] text-[13px] text-fg-mid tabular-nums flex-wrap">
+            <span>
+              <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">P/L</span>
+              {totals.market > 0 ? (
+                <span className={totals.gain >= 0 ? "text-pos font-semibold" : "text-neg font-semibold"}>
+                  {totals.gain >= 0 ? "+" : "−"}${formatBig(Math.abs(totals.gain))} ({totals.gainPct.toFixed(1)}%)
+                </span>
+              ) : (
+                <span className="text-fg-fade">—</span>
+              )}
+            </span>
+            <span>
+              <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">Positions</span>
+              {positions.length}
+            </span>
+          </div>
+        </div>
 
         {/* Benchmark */}
         {holdings.length > 0 && (
@@ -1964,6 +1934,10 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </div>
   );
+}
+
+function formatBig(n: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(n);
 }
 
 function fmtMoney(n: number): string {
