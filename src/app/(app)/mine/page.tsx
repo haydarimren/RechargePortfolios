@@ -12,7 +12,7 @@ import {
   updateDoc,
   where,
 } from "firebase/firestore";
-import { X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
 import { aggregateHoldings } from "@/lib/portfolio";
@@ -436,8 +436,11 @@ export default function MinePage() {
             </p>
           ) : null}
         </div>
-        <button onClick={() => setShowNew(true)} className="btn-primary">
-          + New portfolio
+        <button
+          onClick={() => setShowNew(true)}
+          className="btn-primary inline-flex items-center gap-1.5"
+        >
+          <Plus className="w-4 h-4" aria-hidden /> New portfolio
         </button>
       </header>
 

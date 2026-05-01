@@ -2,6 +2,7 @@
 "use client";
 
 import Link from "next/link";
+import { ArrowDown, ArrowUp } from "lucide-react";
 
 export interface FriendPortfolioCardSummary {
   id: string;
@@ -20,7 +21,7 @@ export function FriendPortfolioCard({
   href: string;
 }) {
   const positive = summary.pctVsBenchmark >= 0;
-  const arrow = positive ? "↑" : "↓";
+  const Arrow = positive ? ArrowUp : ArrowDown;
   const sign = positive ? "+" : "";
   return (
     <Link
@@ -30,8 +31,9 @@ export function FriendPortfolioCard({
       <div className="text-[13.5px] font-semibold text-fg mb-3.5 tracking-tight">
         {summary.name}
       </div>
-      <div className={`text-[28px] font-semibold leading-none tracking-tight tabular-nums ${positive ? "text-pos" : "text-neg"}`}>
-        {arrow} {Math.abs(summary.pctVsBenchmark).toFixed(1)}%
+      <div className={`text-[28px] font-semibold leading-none tracking-tight tabular-nums inline-flex items-center gap-1.5 ${positive ? "text-pos" : "text-neg"}`}>
+        <Arrow className="w-6 h-6" aria-hidden />
+        {Math.abs(summary.pctVsBenchmark).toFixed(1)}%
       </div>
       <div className="text-[11px] text-fg-fade font-medium mt-1.5">
         {summary.benchmarkLabel ?? "since first invested"}

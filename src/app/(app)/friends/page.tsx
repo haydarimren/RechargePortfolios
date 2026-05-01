@@ -17,6 +17,7 @@ import { FriendPortfolioCard, FriendPortfolioCardSummary } from "@/components/Fr
 import { InitialChip } from "@/components/InitialChip";
 import { InviteModal } from "@/components/InviteModal";
 import { useDisplayNamesForUids } from "@/lib/users";
+import { MoreHorizontal, Plus } from "lucide-react";
 
 export default function FriendsPage() {
   // 1. Auth state
@@ -288,7 +289,12 @@ export default function FriendsPage() {
             </p>
           )}
         </div>
-        <button onClick={() => setShowInvite(true)} className="btn-ghost">+ Invite</button>
+        <button
+          onClick={() => setShowInvite(true)}
+          className="btn-ghost inline-flex items-center gap-1.5"
+        >
+          <Plus className="w-4 h-4" aria-hidden /> Invite
+        </button>
       </header>
 
       {shared === undefined ? (
@@ -313,7 +319,7 @@ export default function FriendsPage() {
                 className="w-7 h-7 rounded-md flex items-center justify-center text-fg-fade hover:text-fg"
                 aria-label="More"
               >
-                ⋯
+                <MoreHorizontal className="w-4 h-4" aria-hidden />
               </button>
             </header>
             {/* Portfolio cards */}

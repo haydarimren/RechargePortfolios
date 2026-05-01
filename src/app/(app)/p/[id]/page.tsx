@@ -58,7 +58,7 @@ import {
   touchLogbookView,
   touchPortfolioView,
 } from "@/lib/views";
-import { ArrowUpRight, ChevronRight, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, ChevronRight, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -914,8 +914,11 @@ export default function PortfolioPage({
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3">
         <p className="text-lg">Portfolio not found.</p>
-        <Link href="/" className="text-sm text-accent hover:underline">
-          ← Back
+        <Link
+          href="/"
+          className="inline-flex items-center gap-1.5 text-sm text-accent hover:underline"
+        >
+          <ArrowLeft className="w-4 h-4" aria-hidden /> Back
         </Link>
       </div>
     );
@@ -949,7 +952,7 @@ export default function PortfolioPage({
             >
               {isOwner ? "Mine" : "Shared with me"}
             </Link>
-            <span className="text-line-strong">›</span>
+            <ChevronRight className="w-3.5 h-3.5 text-line-strong" aria-hidden />
             <span>{portfolio.name}</span>
           </div>
           {/* Title row */}

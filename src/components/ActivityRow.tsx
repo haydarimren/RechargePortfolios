@@ -2,6 +2,7 @@
 
 import {
   ArrowDown,
+  ArrowRight,
   ArrowUp,
   ArrowUpRight,
   Pencil,
@@ -98,6 +99,15 @@ function renderLine2(event: ActivityEvent, portfolioName: string): React.ReactNo
         ? <>+{event.positionGainPctSnapshot.toFixed(1)}% · {portfolioName}</>
         : <>{portfolioName}</>;
     case "allocation-change":
-      return <>was {event.beforeAllocationPct?.toFixed(0)}% → {event.afterAllocationPct?.toFixed(0)}%</>;
+      return (
+        <>
+          was {event.beforeAllocationPct?.toFixed(0)}%{" "}
+          <ArrowRight
+            className="inline w-3 h-3 align-middle text-fg-fade"
+            aria-hidden
+          />{" "}
+          {event.afterAllocationPct?.toFixed(0)}%
+        </>
+      );
   }
 }

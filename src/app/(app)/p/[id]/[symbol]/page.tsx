@@ -26,7 +26,7 @@ import {
   loadPortfolioKeyWithRetry,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
-import { Plus, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, ChevronRight, Plus, Trash2, X } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -321,8 +321,11 @@ export default function TickerPage({
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3">
         <p className="text-lg">Not found.</p>
-        <Link href="/" className="text-sm text-accent hover:underline">
-          ← Back
+        <Link
+          href="/"
+          className="inline-flex items-center gap-1.5 text-sm text-accent hover:underline"
+        >
+          <ArrowLeft className="w-4 h-4" aria-hidden /> Back
         </Link>
       </div>
     );
@@ -423,9 +426,9 @@ export default function TickerPage({
             >
               {isOwner ? "Mine" : "Shared with me"}
             </Link>
-            <span className="text-line-strong">›</span>
+            <ChevronRight className="w-3.5 h-3.5 text-line-strong" aria-hidden />
             <Link href={`/p/${id}`} className="hover:text-fg transition-colors">{portfolio.name}</Link>
-            <span className="text-line-strong">›</span>
+            <ChevronRight className="w-3.5 h-3.5 text-line-strong" aria-hidden />
             <span>{symbol}</span>
           </div>
           <div className="flex items-start justify-between gap-5 mb-4">
@@ -438,11 +441,14 @@ export default function TickerPage({
                   <span className="text-base text-fg font-semibold tabular-nums">{fmtMoney(quote.c)}</span>
                 )}
                 {quote && quote.dp != null && (
-                  <>
-                    <span className={quote.dp >= 0 ? "text-pos font-semibold" : "text-neg font-semibold"}>
-                      {quote.dp >= 0 ? "↑" : "↓"} {Math.abs(quote.dp).toFixed(2)}% today
-                    </span>
-                  </>
+                  <span className={`inline-flex items-center gap-1 font-semibold ${quote.dp >= 0 ? "text-pos" : "text-neg"}`}>
+                    {quote.dp >= 0 ? (
+                      <ArrowUp className="w-3.5 h-3.5" aria-hidden />
+                    ) : (
+                      <ArrowDown className="w-3.5 h-3.5" aria-hidden />
+                    )}
+                    {Math.abs(quote.dp).toFixed(2)}% today
+                  </span>
                 )}
               </div>
             </div>

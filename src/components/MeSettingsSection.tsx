@@ -1,6 +1,7 @@
 "use client";
 
 import { ReactNode } from "react";
+import { ChevronRight } from "lucide-react";
 
 export function MeSettingsSection({
   title,
@@ -49,7 +50,7 @@ export function MeSettingsRow({
       </div>
       <div className="flex items-center gap-2.5 shrink-0">
         {right}
-        <span className="text-fg-fade">›</span>
+        <ChevronRight className="w-4 h-4 text-fg-fade" aria-hidden />
       </div>
     </button>
   );
