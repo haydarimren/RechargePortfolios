@@ -991,10 +991,10 @@ export default function PortfolioPage({
                 </button>
                 <button
                   onClick={() => setShowImport(true)}
-                  className="w-9 h-9 inline-flex items-center justify-center bg-transparent text-fg-dim border border-line-strong rounded-btn hover:border-accent hover:text-accent transition"
-                  title="Sync T212"
+                  className="inline-flex items-center gap-1.5 bg-transparent text-fg-dim border border-line-strong rounded-btn px-3 py-2 text-sm font-medium hover:border-accent hover:text-accent transition"
+                  title="Sync from Trading 212"
                 >
-                  ↻
+                  ↻ Sync
                 </button>
                 <button
                   onClick={() => setShowAdd(true)}
