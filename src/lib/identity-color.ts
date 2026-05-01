@@ -18,7 +18,7 @@ export const IDENTITY_PALETTE = [
 
 /**
  * Returns the palette index for `uid`. Same UID → same index.
- * Uses a djb2/polynomial accumulator: small, deterministic, no deps.
+ * Uses a polynomial rolling hash (h = h * 31 + c), identical to Java String.hashCode.
  */
 export function identityColorIndex(uid: string): number {
   let h = 0;
