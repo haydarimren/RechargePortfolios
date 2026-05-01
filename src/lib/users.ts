@@ -115,3 +115,29 @@ export function useDisplayName(uid: string | null | undefined): string {
 
   return name;
 }
+
+export function useDisplayNamesForUids(uids: string[]): Record<string, string> {
+  const [names, setNames] = useState<Record<string, string>>({});
+  // Stable key so the effect doesn't re-run when array identity changes
+  // but contents don't.
+  const key = uids.slice().sort().join(",");
+
+  useEffect(() => {
+    if (uids.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      uids.map(async (uid) => {
+        const snap = await getDoc(doc(db, "users", uid));
+        return [uid, (snap.data() as { displayName?: string })?.displayName ?? ""] as const;
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      setNames(Object.fromEntries(entries));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return names;
+}
