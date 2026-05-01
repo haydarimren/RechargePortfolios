@@ -131,7 +131,6 @@ export default function PortfolioPage({
     () => getCachedPortfolioKey(id),
   );
   const [migrationError, setMigrationError] = useState("");
-  const [showMenu, setShowMenu] = useState(false);
 
   // Which brokers are currently connected on this portfolio. Derived from
   // the existence of `secrets/credentials` (= some broker connected); we
@@ -998,22 +997,11 @@ export default function PortfolioPage({
                   ↻
                 </button>
                 <button
-                  onClick={() => setShowMenu((v) => !v)}
-                  aria-label="More options"
-                  className="w-9 h-9 inline-flex items-center justify-center bg-transparent text-fg-dim border border-line-strong rounded-btn hover:border-accent hover:text-accent transition"
+                  onClick={() => setShowAdd(true)}
+                  className="inline-flex items-center gap-1.5 bg-transparent text-fg-dim border border-line-strong rounded-btn px-3 py-2 text-sm font-medium hover:border-accent hover:text-accent transition"
                 >
-                  ⋯
+                  + Add holding
                 </button>
-                {showMenu && (
-                  <div className="absolute right-0 top-10 z-30 bg-bg-2 border border-line rounded-card shadow-lg py-1 min-w-[140px]">
-                    <button
-                      onClick={() => { setShowAdd(true); setShowMenu(false); }}
-                      className="w-full text-left px-4 py-2 text-sm text-fg hover:bg-bg-3 transition"
-                    >
-                      Add holding
-                    </button>
-                  </div>
-                )}
               </div>
             )}
           </div>
