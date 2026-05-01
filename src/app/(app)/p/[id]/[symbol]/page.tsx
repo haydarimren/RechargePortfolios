@@ -358,9 +358,14 @@ export default function TickerPage({
         {/* Task 5.1 — Header strip */}
         <section className="animate-fade-up">
           <div className="text-[11.5px] text-fg-fade font-medium mb-3.5 flex items-center gap-1.5">
-            <span>Mine</span>
+            <Link
+              href={isOwner ? "/mine" : "/friends"}
+              className="hover:text-fg transition-colors"
+            >
+              {isOwner ? "Mine" : "Shared with me"}
+            </Link>
             <span className="text-line-strong">›</span>
-            <Link href={`/p/${id}`} className="hover:text-fg">{portfolio.name}</Link>
+            <Link href={`/p/${id}`} className="hover:text-fg transition-colors">{portfolio.name}</Link>
             <span className="text-line-strong">›</span>
             <span>{symbol}</span>
           </div>

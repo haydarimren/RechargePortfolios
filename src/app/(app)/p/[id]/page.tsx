@@ -946,7 +946,12 @@ export default function PortfolioPage({
         <section className="animate-fade-up">
           {/* Breadcrumb */}
           <div className="text-[11.5px] text-fg-fade font-medium mb-3.5 flex items-center gap-1.5">
-            <span>{isOwner ? "Mine" : "Shared with me"}</span>
+            <Link
+              href={isOwner ? "/mine" : "/friends"}
+              className="hover:text-fg transition-colors"
+            >
+              {isOwner ? "Mine" : "Shared with me"}
+            </Link>
             <span className="text-line-strong">›</span>
             <span>{portfolio.name}</span>
           </div>
