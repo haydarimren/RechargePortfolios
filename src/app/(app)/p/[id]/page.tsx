@@ -429,6 +429,8 @@ export default function PortfolioPage({
   }, [holdings, quotes]);
 
   const tradeLog = useMemo(() => buildTradeLog(holdings), [holdings]);
+  const positionsCount = positions.length;
+  const logbookCount = tradeLog.length;
   const [myView, setMyView] = useState<PortfolioView | null>(null);
 
   // Subscribe to this viewer's own `portfolioViews` record for this
@@ -456,8 +458,8 @@ export default function PortfolioPage({
     return false;
   }, [isOwner, myView, holdings]);
 
-  const [tab, setTabState] = useState<"positions" | "logbook">("positions");
-  const setTab = (next: "positions" | "logbook") => {
+  const [tab, setTabState] = useState<"positions" | "logbook" | "allocation">("positions");
+  const setTab = (next: "positions" | "logbook" | "allocation") => {
     setTabState(next);
     if (next === "logbook" && user && !isOwner) {
       touchLogbookView(user.uid, id);
@@ -1223,50 +1225,28 @@ export default function PortfolioPage({
 
         {/* Positions / Logbook */}
         <section className="animate-fade-up" style={{ animationDelay: "200ms" }}>
-          <div className="mb-4 flex items-end justify-between gap-4">
-            <div>
-              <h2 className="text-xl font-semibold tracking-tight">
-                {tab === "positions" ? "Positions" : "Logbook"}
-              </h2>
-              <p className="text-sm text-fg-dim mt-1">
-                {tab === "positions"
-                  ? `Click a ${posView === "map" ? "tile" : "row"} to see lot history and price chart.`
-                  : "Every buy and sell, newest first."}
-              </p>
-            </div>
-            <div className="flex gap-1 bg-bg-3 border border-line rounded-full p-1 shrink-0">
-              <button
-                onClick={() => setTab("positions")}
-                className={`px-3 py-1.5 rounded-full text-xs font-medium transition ${
-                  tab === "positions"
-                    ? "bg-bg text-fg shadow-sm"
-                    : "text-fg-dim hover:text-fg"
-                }`}
-                aria-pressed={tab === "positions"}
-              >
-                Positions
-              </button>
-              <button
-                onClick={() => setTab("logbook")}
-                className={`relative px-3 py-1.5 rounded-full text-xs font-medium transition ${
-                  tab === "logbook"
-                    ? "bg-bg text-fg shadow-sm"
-                    : "text-fg-dim hover:text-fg"
-                }`}
-                aria-pressed={tab === "logbook"}
-              >
-                Logbook
-                {hasUnreadTrades && (
-                  <span
-                    className="absolute top-1 right-1.5 w-1.5 h-1.5 rounded-full bg-accent"
-                    aria-label="unread trades"
-                  />
-                )}
-              </button>
-            </div>
-          </div>
+          <TabBar
+            items={[
+              { id: "positions", label: "Positions", count: positionsCount },
+              { id: "logbook", label: "Logbook", count: logbookCount },
+              { id: "allocation", label: "Allocation" },
+            ]}
+            active={tab}
+            onSelect={(id) => setTab(id as "positions" | "logbook" | "allocation")}
+            className="mb-4"
+          />
 
-          {tab === "logbook" ? (
+          {tab === "allocation" ? (
+            <div className="bg-bg-2 border border-line rounded-card p-4 md:p-5">
+              <AllocationTreemap
+                positions={positions}
+                quotes={quotes}
+                totalMarket={positionsTotalMarket}
+                isOwner={isOwner}
+                portfolioId={id}
+              />
+            </div>
+          ) : tab === "logbook" ? (
             tradeLog.length === 0 ? (
               <div className="card p-10 text-center text-fg-dim text-sm">
                 No trades yet.
@@ -1403,41 +1383,7 @@ export default function PortfolioPage({
             </div>
           ) : (
             <>
-              <div className="mb-3 flex justify-end">
-                <div className="flex gap-1 bg-bg-3 border border-line rounded-full p-1">
-                  <button
-                    onClick={() => setPosView("table")}
-                    className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition ${
-                      posView === "table"
-                        ? "bg-bg text-fg shadow-sm"
-                        : "text-fg-dim hover:text-fg"
-                    }`}
-                    aria-pressed={posView === "table"}
-                  >
-                    Table
-                  </button>
-                  <button
-                    onClick={() => setPosView("map")}
-                    className={`px-2.5 py-1 rounded-full text-[11px] font-medium transition ${
-                      posView === "map"
-                        ? "bg-bg text-fg shadow-sm"
-                        : "text-fg-dim hover:text-fg"
-                    }`}
-                    aria-pressed={posView === "map"}
-                  >
-                    Map
-                  </button>
-                </div>
-              </div>
-              {posView === "map" ? (
-                <AllocationTreemap
-                  positions={positions}
-                  quotes={quotes}
-                  totalMarket={positionsTotalMarket}
-                  isOwner={isOwner}
-                  portfolioId={id}
-                />
-              ) : !isOwner ? (
+              {!isOwner ? (
                 <div className="card overflow-hidden">
                   <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-3 label border-b border-line">
                     <span>Symbol</span>
