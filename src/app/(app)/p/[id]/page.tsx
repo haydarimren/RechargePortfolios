@@ -1253,32 +1253,24 @@ export default function PortfolioPage({
               </div>
             ) : isOwner ? (
               <div className="card overflow-hidden">
-                <div className="hidden md:grid grid-cols-[0.9fr_0.6fr_0.9fr_0.7fr_0.8fr_1fr_1.2fr] gap-4 px-5 py-3 label border-b border-line">
-                  <span>Date</span>
-                  <span>Side</span>
-                  <span>Symbol</span>
-                  <span className="text-right">Shares</span>
-                  <span className="text-right">Price</span>
-                  <span className="text-right">Value</span>
-                  <span className="text-right">Realized</span>
+                <div className="hidden md:grid grid-cols-[0.9fr_0.6fr_0.9fr_0.7fr_0.8fr_1fr_1.2fr] gap-4 px-5 py-2 border-b border-line">
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Date</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Side</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Symbol</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Shares</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Price</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Value</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Realized</span>
                 </div>
-                {tradeLog.map((t, i) => {
-                  const tone =
-                    t.realizedGain === undefined
-                      ? ""
-                      : t.realizedGain >= 0
-                      ? "text-pos"
-                      : "text-neg";
+                {tradeLog.map((t) => {
                   const isSell = t.side === "SELL";
                   return (
                     <div
                       key={t.id}
-                      className={`grid grid-cols-[1fr_auto] md:grid-cols-[0.9fr_0.6fr_0.9fr_0.7fr_0.8fr_1fr_1.2fr] gap-4 px-5 py-3 ${
-                        i !== tradeLog.length - 1 ? "border-b border-line" : ""
-                      }`}
+                      className="grid grid-cols-[1fr_auto] md:grid-cols-[0.9fr_0.6fr_0.9fr_0.7fr_0.8fr_1fr_1.2fr] gap-4 px-5 py-3 border-b border-[#20242c] last:border-b-0"
                     >
                       <div className="flex items-center gap-2 md:contents">
-                        <span className="num text-xs text-fg-dim md:text-sm">
+                        <span className="num text-xs text-fg-dim tabular-nums md:text-sm">
                           {t.date}
                         </span>
                         <SidePill side={t.side} />
@@ -1286,39 +1278,37 @@ export default function PortfolioPage({
                           onClick={() =>
                             router.push(`/p/${id}/${t.symbol}`)
                           }
-                          className="font-semibold text-sm tracking-tight hover:text-accent transition text-left"
+                          className="text-fg font-semibold text-sm tracking-tight hover:text-accent transition text-left flex items-center gap-1.5"
                         >
                           {t.symbol}
+                          {t.importSource && (
+                            <span className="text-[10.5px] text-fg-fade px-1.5 py-px border border-line rounded-tag font-medium">
+                              {t.importSource === "trading212" ? "T212" : t.importSource}
+                            </span>
+                          )}
                         </button>
                       </div>
-                      <span className="num text-xs text-right text-fg-dim hidden md:block">
+                      <span className="num text-xs text-right text-fg-dim tabular-nums hidden md:block">
                         {fmtShares(t.shares)}
                       </span>
-                      <span className="num text-xs text-right text-fg-dim hidden md:block">
+                      <span className="num text-xs text-right text-fg-dim tabular-nums hidden md:block">
                         {fmtMoney(t.price)}
                       </span>
-                      <span className="num text-xs text-right text-fg-dim hidden md:block">
+                      <span className="num text-xs text-right text-fg-dim tabular-nums hidden md:block">
                         {fmtMoney(t.value)}
                         {isSell && (
                           <span className="text-fg-fade ml-1">proceeds</span>
                         )}
                       </span>
-                      <div className="flex flex-col items-end leading-tight">
+                      <div className="flex items-center justify-end">
                         {t.realizedGain === undefined ? (
-                          <span className="num text-xs text-fg-dim md:text-sm">
-                            —
-                          </span>
+                          <span className="num text-xs text-fg-fade tabular-nums">—</span>
                         ) : (
-                          <>
-                            <span className={`num text-xs md:text-sm ${tone}`}>
-                              {`${t.realizedGain >= 0 ? "+" : ""}${fmtMoney(
-                                t.realizedGain
-                              )}`}
-                            </span>
-                            <span className="num text-[10px] text-fg-dim md:text-xs">
-                              {fmtPct((t.realizedPct ?? 0) * 100)}
-                            </span>
-                          </>
+                          <TwoLinePLCell
+                            amount={t.realizedGain}
+                            pct={(t.realizedPct ?? 0) * 100}
+                            currency="USD"
+                          />
                         )}
                       </div>
                     </div>
@@ -1327,54 +1317,47 @@ export default function PortfolioPage({
               </div>
             ) : (
               <div className="card overflow-hidden">
-                <div className="hidden md:grid grid-cols-[0.9fr_0.6fr_1fr_0.9fr_0.9fr] gap-4 px-5 py-3 label border-b border-line">
-                  <span>Date</span>
-                  <span>Side</span>
-                  <span>Symbol</span>
-                  <span className="text-right">Weight</span>
-                  <span className="text-right">Realized</span>
+                <div className="hidden md:grid grid-cols-[0.9fr_0.6fr_1fr_0.9fr_0.9fr] gap-4 px-5 py-2 border-b border-line">
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Date</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Side</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Symbol</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Weight</span>
+                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Realized</span>
                 </div>
-                {tradeLog.map((t, i) => {
-                  const tone =
-                    t.realizedPct === undefined
-                      ? ""
-                      : t.realizedPct >= 0
-                      ? "text-pos"
-                      : "text-neg";
-                  return (
-                    <div
-                      key={t.id}
-                      className={`grid grid-cols-[1fr_auto] md:grid-cols-[0.9fr_0.6fr_1fr_0.9fr_0.9fr] gap-4 px-5 py-3 items-center ${
-                        i !== tradeLog.length - 1 ? "border-b border-line" : ""
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 md:contents">
-                        <span className="num text-xs text-fg-dim md:text-sm">
-                          {t.date}
-                        </span>
-                        <SidePill side={t.side} />
-                        <button
-                          onClick={() =>
-                            router.push(`/p/${id}/${t.symbol}`)
-                          }
-                          className="font-semibold text-sm tracking-tight hover:text-accent transition text-left"
-                        >
-                          {t.symbol}
-                        </button>
-                      </div>
-                      <span className="num text-xs text-right text-fg-dim hidden md:block">
-                        {(t.symbolWeightAfter * 100).toFixed(1)}%
+                {tradeLog.map((t) => (
+                  <div
+                    key={t.id}
+                    className="grid grid-cols-[1fr_auto] md:grid-cols-[0.9fr_0.6fr_1fr_0.9fr_0.9fr] gap-4 px-5 py-3 items-center border-b border-[#20242c] last:border-b-0"
+                  >
+                    <div className="flex items-center gap-2 md:contents">
+                      <span className="num text-xs text-fg-dim tabular-nums md:text-sm">
+                        {t.date}
                       </span>
-                      <span
-                        className={`num text-xs text-right md:text-sm ${tone}`}
+                      <SidePill side={t.side} />
+                      <button
+                        onClick={() =>
+                          router.push(`/p/${id}/${t.symbol}`)
+                        }
+                        className="text-fg font-semibold text-sm tracking-tight hover:text-accent transition text-left"
                       >
-                        {t.realizedPct === undefined
-                          ? "—"
-                          : fmtPct(t.realizedPct * 100)}
-                      </span>
+                        {t.symbol}
+                      </button>
                     </div>
-                  );
-                })}
+                    <span className="num text-xs text-right text-fg-dim tabular-nums hidden md:block">
+                      {(t.symbolWeightAfter * 100).toFixed(1)}%
+                    </span>
+                    <div className="flex items-center justify-end">
+                      {t.realizedPct === undefined ? (
+                        <span className="num text-xs text-fg-fade tabular-nums">—</span>
+                      ) : (
+                        <TwoLinePLCell
+                          amount={t.realizedGain ?? 0}
+                          pct={t.realizedPct * 100}
+                        />
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             )
           ) : positions.length === 0 ? (
@@ -1888,15 +1871,13 @@ function fmtPct(n: number): string {
 
 function SidePill({ side }: { side: "BUY" | "SELL" }) {
   const isSell = side === "SELL";
-  return (
-    <span
-      className={`inline-block text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-        isSell
-          ? "text-neg border-neg/40 bg-neg/10"
-          : "text-pos border-pos/40 bg-pos/10"
-      }`}
-    >
-      {isSell ? "Sell" : "Buy"}
+  return isSell ? (
+    <span className="inline-flex items-center gap-0.5 text-[11px] font-semibold px-2 py-0.5 rounded-tag bg-neg-soft text-neg">
+      SELL
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-0.5 text-[11px] font-semibold px-2 py-0.5 rounded-tag bg-pos-soft text-pos">
+      BUY
     </span>
   );
 }
