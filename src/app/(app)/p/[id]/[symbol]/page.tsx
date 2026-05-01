@@ -349,12 +349,16 @@ export default function TickerPage({
   // Dynamic Y-axis precision so narrow price ranges don't collapse every tick
   // to the same integer dollar label.
   const priceValues = history.map((p) => p.close);
-  for (const m of lotMarkers) {
-    if (m.price !== null) priceValues.push(m.price);
+  // Owner-only: include lot marker prices and avg cost in the domain so
+  // private price values are never leaked to shared viewers.
+  if (isOwner) {
+    for (const m of lotMarkers) {
+      if (m.price !== null) priceValues.push(m.price);
+    }
   }
-  // Include the cost-basis line so it never renders off-chart.
+  // Include the cost-basis line so it never renders off-chart (owner only).
   const avgCost = pooled?.avgPrice ?? null;
-  if (avgCost !== null) priceValues.push(avgCost);
+  if (isOwner && avgCost !== null) priceValues.push(avgCost);
   const priceSpan =
     priceValues.length > 0
       ? Math.max(...priceValues) - Math.min(...priceValues)
@@ -580,7 +584,7 @@ export default function TickerPage({
                       strokeWidth={2}
                       fill="url(#tick)"
                     />
-                    {avgCost !== null && (
+                    {isOwner && avgCost !== null && (
                       <ReferenceLine
                         y={avgCost}
                         stroke={chartColors.axis}
@@ -594,7 +598,7 @@ export default function TickerPage({
                         }}
                       />
                     )}
-                    {lotMarkers.map((m, i) =>
+                    {isOwner && lotMarkers.map((m, i) =>
                       m.price !== null && m.date !== null ? (
                         <ReferenceDot
                           key={i}
