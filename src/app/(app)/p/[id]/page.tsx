@@ -967,7 +967,7 @@ export default function PortfolioPage({
         <section className="animate-fade-up">
           {/* Breadcrumb */}
           <div className="text-[11.5px] text-fg-fade font-medium mb-3.5 flex items-center gap-1.5">
-            <span>Mine</span>
+            <span>{isOwner ? "Mine" : "Shared with me"}</span>
             <span className="text-line-strong">›</span>
             <span>{portfolio.name}</span>
           </div>
@@ -1042,26 +1042,60 @@ export default function PortfolioPage({
           className="flex items-baseline gap-[18px] flex-wrap py-5 border-b border-line mb-[18px] animate-fade-up"
           style={{ animationDelay: "60ms" }}
         >
-          <span className="text-[40px] font-semibold leading-none tracking-tight tabular-nums text-fg">
-            {totals.market > 0 ? `$${formatBig(totals.market)}` : "—"}
-          </span>
-          <PerformancePill pct={totals.gainPct} benchmark="vs cost" />
-          <div className="ml-auto flex gap-[14px] text-[13px] text-fg-mid tabular-nums flex-wrap">
-            <span>
-              <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">P/L</span>
-              {totals.market > 0 ? (
-                <span className={totals.gain >= 0 ? "text-pos font-semibold" : "text-neg font-semibold"}>
-                  {totals.gain >= 0 ? "+" : "−"}${formatBig(Math.abs(totals.gain))} ({totals.gainPct.toFixed(1)}%)
+          {isOwner ? (
+            <>
+              <span className="text-[40px] font-semibold leading-none tracking-tight tabular-nums text-fg">
+                {totals.market > 0 ? `$${formatBig(totals.market)}` : "—"}
+              </span>
+              <PerformancePill pct={totals.gainPct} benchmark="vs cost" />
+              <div className="ml-auto flex gap-[14px] text-[13px] text-fg-mid tabular-nums flex-wrap">
+                <span>
+                  <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">P/L</span>
+                  {totals.market > 0 ? (
+                    <span className={totals.gain >= 0 ? "text-pos font-semibold" : "text-neg font-semibold"}>
+                      {totals.gain >= 0 ? "+" : "−"}${formatBig(Math.abs(totals.gain))} ({totals.gainPct.toFixed(1)}%)
+                    </span>
+                  ) : (
+                    <span className="text-fg-fade">—</span>
+                  )}
                 </span>
-              ) : (
-                <span className="text-fg-fade">—</span>
-              )}
-            </span>
-            <span>
-              <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">Positions</span>
-              {positions.length}
-            </span>
-          </div>
+                <span>
+                  <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">Positions</span>
+                  {positions.length}
+                </span>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Viewer hero: % gain vs cost as the headline; no $ amounts */}
+              <PerformancePill
+                pct={totals.gainPct}
+                benchmark="vs cost"
+                className="text-base px-3.5 py-1.5"
+              />
+              {/* vs SPY derived from normalizedSeries last point — all % relative, no $ */}
+              {normalizedSeries.length > 0 && (() => {
+                const last = normalizedSeries[normalizedSeries.length - 1];
+                const portPct = last.portfolio;
+                const spyPct = typeof last.SPY === "number" ? last.SPY : null;
+                if (spyPct !== null) {
+                  return (
+                    <PerformancePill
+                      pct={portPct - spyPct}
+                      benchmark="vs SPY"
+                    />
+                  );
+                }
+                return null;
+              })()}
+              <div className="ml-auto flex gap-[14px] text-[13px] text-fg-mid tabular-nums flex-wrap">
+                <span>
+                  <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">Positions</span>
+                  {positions.length}
+                </span>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Benchmark */}
