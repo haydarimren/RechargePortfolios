@@ -20,7 +20,11 @@ const themeInitScript = `
 (function(){
   try {
     var t = localStorage.getItem('theme');
-    if (t !== 'light' && t !== 'dark') t = 'dark';
+    if (t === 'system') {
+      t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    } else if (t !== 'light' && t !== 'dark') {
+      t = 'dark';
+    }
     document.documentElement.setAttribute('data-theme', t);
   } catch (e) {
     document.documentElement.setAttribute('data-theme', 'dark');
