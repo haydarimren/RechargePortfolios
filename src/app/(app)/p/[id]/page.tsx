@@ -547,11 +547,13 @@ export default function PortfolioPage({
 
   // Non-owner per-position stats: allocation % + gain %.
   const nonOwnerRows = useMemo(() => {
-    let totalMarket = 0;
+    const totalMarket = positions.reduce((sum, p) => {
+      const q = quotes[p.symbol];
+      return q ? sum + p.shares * q.c : sum;
+    }, 0);
     const rows = positions.map((p) => {
       const q = quotes[p.symbol];
       const market = q ? p.shares * q.c : null;
-      if (market !== null) totalMarket += market;
       const gainPct =
         q && p.avgPrice > 0 ? ((q.c - p.avgPrice) / p.avgPrice) * 100 : null;
       return { symbol: p.symbol, market, gainPct };
