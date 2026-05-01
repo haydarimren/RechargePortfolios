@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
-  collection,
   doc,
   onSnapshot,
   deleteDoc,

@@ -9,7 +9,6 @@ import {
   doc,
   onSnapshot,
   addDoc,
-  updateDoc,
   writeBatch,
   setDoc,
   getDoc,
@@ -55,8 +54,6 @@ import {
 } from "@/lib/holdings-repo";
 import { encryptHolding } from "@/lib/crypto-client";
 import {
-  PortfolioView,
-  subscribeToPortfolioViews,
   touchLogbookView,
   touchPortfolioView,
 } from "@/lib/views";
@@ -431,32 +428,12 @@ export default function PortfolioPage({
   const tradeLog = useMemo(() => buildTradeLog(holdings), [holdings]);
   const positionsCount = positions.length;
   const logbookCount = tradeLog.length;
-  const [myView, setMyView] = useState<PortfolioView | null>(null);
-
-  // Subscribe to this viewer's own `portfolioViews` record for this
-  // portfolio. Only used for the Logbook unread dot — shared viewers only.
-  useEffect(() => {
-    if (!user || isOwner) return;
-    const unsub = subscribeToPortfolioViews(user.uid, (map) => {
-      setMyView(map.get(id) ?? null);
-    });
-    return unsub;
-  }, [user, isOwner, id]);
-
   // Bump `lastPortfolioViewAt` once per page load for shared viewers. This
   // is what clears the home-page "N new" badge. Gated so owners never write.
   useEffect(() => {
     if (!user || isOwner || !portfolio) return;
     touchPortfolioView(user.uid, id);
   }, [user, isOwner, portfolio, id]);
-
-  const hasUnreadTrades = useMemo(() => {
-    if (isOwner || !myView) return false;
-    for (const h of holdings) {
-      if ((h.createdAt ?? 0) > myView.lastLogbookViewAt) return true;
-    }
-    return false;
-  }, [isOwner, myView, holdings]);
 
   const [tab, setTabState] = useState<"positions" | "logbook" | "allocation">("positions");
   const setTab = (next: "positions" | "logbook" | "allocation") => {
@@ -465,8 +442,6 @@ export default function PortfolioPage({
       touchLogbookView(user.uid, id);
     }
   };
-
-  const [posView, setPosView] = useState<"table" | "map">("table");
 
   // Total current market value across positions with resolved quotes. Used to
   // compute per-row allocation % in the owner positions table. Positions
@@ -1406,7 +1381,7 @@ export default function PortfolioPage({
                     <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Gain</span>
                     <span />
                   </div>
-                  {nonOwnerRows.map((row, i) => {
+                  {nonOwnerRows.map((row) => {
                     const tone =
                       row.gainPct === null
                         ? ""
@@ -1453,7 +1428,7 @@ export default function PortfolioPage({
                     <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Gain</span>
                     <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Lots</span>
                   </div>
-                  {positions.map((p, i) => {
+                  {positions.map((p) => {
                     const q = quotes[p.symbol];
                     const market = q ? p.shares * q.c : null;
                     const gain = market !== null ? market - p.cost : null;
@@ -1825,33 +1800,6 @@ export default function PortfolioPage({
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  sub,
-  hint,
-  tone,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  hint?: string;
-  tone?: "pos" | "neg";
-}) {
-  const color =
-    tone === "pos" ? "text-pos" : tone === "neg" ? "text-neg" : "text-fg";
-  return (
-    <div className="card p-5">
-      <div className="label mb-3">{label}</div>
-      <div className={`num text-2xl md:text-3xl font-medium ${color}`}>
-        {value}
-      </div>
-      {sub && <div className={`num text-sm mt-1 ${color}`}>{sub}</div>}
-      {hint && <div className="text-xs text-fg-fade mt-1">{hint}</div>}
     </div>
   );
 }

@@ -70,7 +70,7 @@ function renderLine2(event: ActivityEvent, portfolioName: string): React.ReactNo
         ? <>{portfolioName} · now <strong>{event.afterAllocationPct.toFixed(1)}%</strong> of port.</>
         : <>{portfolioName}</>;
     case "rename":
-      return <>"{event.newName}"</>;
+      return <>&ldquo;{event.newName}&rdquo;</>;
     case "share":
       return <>{portfolioName}</>;
     case "milestone":

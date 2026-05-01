@@ -50,9 +50,6 @@ export default function FriendsPage() {
   const [portfolioKeys, setPortfolioKeys] = useState<Map<string, CryptoKey>>(
     () => getAllCachedPortfolioKeys(),
   );
-  const [keyResolutionAttempted, setKeyResolutionAttempted] = useState<
-    Set<string>
-  >(() => new Set(getAllCachedPortfolioKeys().keys()));
   // Read-only ref mirror so the resolution effect can check resolved state
   // without closing over stale state.
   const portfolioKeysRef = useRef(portfolioKeys);
@@ -100,12 +97,6 @@ export default function FriendsPage() {
       }),
     ).then((results) => {
       if (cancelled) return;
-      // Mark every portfolio we tried as attempted, success or failure.
-      setKeyResolutionAttempted((prev) => {
-        const next = new Set(prev);
-        for (const p of needsResolve) next.add(p.id);
-        return next;
-      });
       const successes = results.filter(
         (r): r is readonly [string, CryptoKey] => r !== null,
       );
@@ -126,7 +117,6 @@ export default function FriendsPage() {
   useEffect(() => {
     if (encryption.state.kind !== "unlocked") {
       setPortfolioKeys(new Map());
-      setKeyResolutionAttempted(new Set());
     }
   }, [encryption.state.kind]);
 
