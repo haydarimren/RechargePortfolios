@@ -577,7 +577,7 @@ export default function TickerPage({
           </div>
         </section>
 
-        {/* Lot table: small-caps headers, BUY/SELL badges, source tags, TwoLinePLCell for P&L */}
+        {/* Lot table: owner sees all $ columns; viewer sees side + date + % gain only */}
         <section
           className="animate-fade-up"
           style={{ animationDelay: "200ms" }}
