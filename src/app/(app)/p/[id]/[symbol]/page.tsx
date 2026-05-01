@@ -72,11 +72,6 @@ export default function TickerPage({
   const [keyAttempted, setKeyAttempted] = useState<boolean>(
     () => getCachedPortfolioKey(id) !== null,
   );
-  // Drilldown header ⋯ menu open state. Must live up here with the other
-  // useState calls — Phase 5 originally placed this further down where it
-  // sat after the `loading` / `notFound` early returns, which violates the
-  // rules-of-hooks invariant (hook count differs across render cycles).
-  const [showMenu, setShowMenu] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -388,28 +383,10 @@ export default function TickerPage({
               </div>
             </div>
             {isOwner && (
-              <div className="flex gap-2 shrink-0 relative">
+              <div className="flex gap-2 shrink-0">
                 <button className="bg-fg text-bg text-sm font-semibold px-3.5 py-2 rounded-btn">
                   + Add lot
                 </button>
-                <button
-                  onClick={() => setShowMenu((v) => !v)}
-                  aria-label="More options"
-                  className="w-9 h-9 inline-flex items-center justify-center bg-transparent text-fg-dim border border-line-strong rounded-btn hover:border-accent hover:text-accent transition"
-                >
-                  ⋯
-                </button>
-                {showMenu && (
-                  <div className="absolute right-0 top-10 z-30 bg-bg-2 border border-line rounded-card shadow-lg py-1 min-w-[160px]">
-                    <Link
-                      href={`/p/${id}`}
-                      className="block w-full text-left px-4 py-2 text-sm text-fg hover:bg-bg-3 transition"
-                      onClick={() => setShowMenu(false)}
-                    >
-                      ← Back to portfolio
-                    </Link>
-                  </div>
-                )}
               </div>
             )}
           </div>

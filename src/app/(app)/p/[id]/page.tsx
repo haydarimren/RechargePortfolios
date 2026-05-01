@@ -57,7 +57,7 @@ import {
   touchLogbookView,
   touchPortfolioView,
 } from "@/lib/views";
-import { ArrowLeft, ChevronRight, X, Trash2 } from "lucide-react";
+import { ChevronRight, X, Trash2 } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -931,17 +931,6 @@ export default function PortfolioPage({
           {migrationError}
         </div>
       )}
-      <header className="px-6 lg:px-10 pt-6 pb-4 border-b border-line">
-        <div className="max-w-6xl mx-auto flex items-center gap-4">
-          <Link
-            href="/"
-            className="text-sm text-fg-dim hover:text-accent transition flex items-center gap-2"
-          >
-            <ArrowLeft className="w-4 h-4" /> Back
-          </Link>
-        </div>
-      </header>
-
       <main className="max-w-6xl mx-auto px-6 lg:px-10 py-10 space-y-10">
         <section className="animate-fade-up">
           {/* Breadcrumb */}
