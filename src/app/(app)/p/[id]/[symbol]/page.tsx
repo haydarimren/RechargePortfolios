@@ -18,13 +18,14 @@ import { getCachedHistoricalCloses } from "@/lib/historical-cache";
 import { closeOnOrBefore, fmtShares, poolPositions } from "@/lib/portfolio";
 import { ThemeToggle, useChartColors } from "@/lib/theme";
 import { UnlockModal } from "@/components/UnlockModal";
+import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { useEncryption } from "@/lib/use-encryption";
 import { getCachedPortfolioKey, getUnlocked } from "@/lib/key-store";
 import {
   loadPortfolioKeyWithRetry,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
-import { ArrowLeft, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -339,6 +340,7 @@ export default function TickerPage({
     return date.toLocaleDateString("en-US", { year: "numeric" });
   };
 
+  const [showMenu, setShowMenu] = useState(false);
   const needsRecovery = encryption.state.kind === "needs-recovery";
 
   return (
@@ -349,141 +351,123 @@ export default function TickerPage({
           onRestore={encryption.restore}
         />
       )}
-      <header className="px-6 lg:px-10 pt-6 pb-4 border-b border-line">
+      <header className="px-6 lg:px-10 pt-5 pb-4 border-b border-line">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
-          <Link
-            href={`/p/${id}`}
-            className="text-sm text-fg-dim hover:text-accent transition flex items-center gap-2"
-          >
-            <ArrowLeft className="w-4 h-4" /> {portfolio.name}
-          </Link>
-          <ThemeToggle />
+          <span className="text-[11.5px] text-fg-dim font-medium">
+            <ThemeToggle />
+          </span>
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-6 lg:px-10 py-10 space-y-10">
-        <section className="animate-fade-up flex items-end justify-between flex-wrap gap-4">
-          <div>
-            <div className="label mb-2">Ticker</div>
-            <h1 className="text-5xl md:text-6xl font-semibold tracking-tight">
-              {symbol}
-            </h1>
-            <p className="text-sm text-fg-dim mt-2">
-              {keyResolving ? (
-                <span
-                  className="inline-block h-3.5 w-32 bg-bg-3 rounded align-middle animate-pulse"
-                  aria-hidden
-                />
-              ) : isOwner ? (
-                `${lots.length} lot${lots.length === 1 ? "" : "s"} in ${portfolio.name}`
-              ) : (
-                `in ${portfolio.name}`
-              )}
-            </p>
+      <main className="max-w-6xl mx-auto px-6 lg:px-10 py-8 space-y-8">
+        {/* Task 5.1 — Header strip */}
+        <section className="animate-fade-up">
+          <div className="text-[11.5px] text-fg-fade font-medium mb-3.5 flex items-center gap-1.5">
+            <span>Mine</span>
+            <span className="text-line-strong">›</span>
+            <Link href={`/p/${id}`} className="hover:text-fg">{portfolio.name}</Link>
+            <span className="text-line-strong">›</span>
+            <span>{symbol}</span>
           </div>
-          {quote && (
-            <div className="text-right">
-              <div className="label mb-1">Last quote</div>
-              <div className="num text-3xl md:text-4xl font-medium">
-                {quote.c === 0 ? "—" : fmtMoney(quote.c)}
+          <div className="flex items-start justify-between gap-5 mb-4">
+            <div className="flex-1">
+              <div className="flex items-baseline gap-3">
+                <span className="text-[30px] font-bold text-fg tracking-tight leading-none tabular-nums">{symbol}</span>
               </div>
-              {quote.dp != null && (
-                <div
-                  className={`num text-sm mt-1 ${
-                    quote.dp >= 0 ? "text-pos" : "text-neg"
-                  }`}
-                >
-                  {quote.dp >= 0 ? "+" : ""}
-                  {quote.dp.toFixed(2)}% today
-                </div>
-              )}
+              <div className="mt-2 text-[12.5px] text-fg-fade font-medium flex items-center gap-2 flex-wrap">
+                {quote && quote.c > 0 && (
+                  <span className="text-base text-fg font-semibold tabular-nums">{fmtMoney(quote.c)}</span>
+                )}
+                {quote && quote.dp != null && (
+                  <>
+                    <span className={quote.dp >= 0 ? "text-pos font-semibold" : "text-neg font-semibold"}>
+                      {quote.dp >= 0 ? "↑" : "↓"} {Math.abs(quote.dp).toFixed(2)}% today
+                    </span>
+                  </>
+                )}
+              </div>
             </div>
-          )}
+            {isOwner && (
+              <div className="flex gap-2 shrink-0 relative">
+                <button className="bg-fg text-bg text-sm font-semibold px-3.5 py-2 rounded-btn">
+                  + Add lot
+                </button>
+                <button
+                  onClick={() => setShowMenu((v) => !v)}
+                  aria-label="More options"
+                  className="w-9 h-9 inline-flex items-center justify-center bg-transparent text-fg-dim border border-line-strong rounded-btn hover:border-accent hover:text-accent transition"
+                >
+                  ⋯
+                </button>
+                {showMenu && (
+                  <div className="absolute right-0 top-10 z-30 bg-bg-2 border border-line rounded-card shadow-lg py-1 min-w-[160px]">
+                    <Link
+                      href={`/p/${id}`}
+                      className="block w-full text-left px-4 py-2 text-sm text-fg hover:bg-bg-3 transition"
+                      onClick={() => setShowMenu(false)}
+                    >
+                      ← Back to portfolio
+                    </Link>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </section>
 
+        {/* Task 5.2 — Position summary strip (owner only) */}
         {isOwner && positionClosed && !keyResolving ? (
-          <section
-            className="animate-fade-up card p-6 text-center"
-            style={{ animationDelay: "60ms" }}
-          >
-            <div className="label mb-2">Position closed</div>
-            <p className="text-sm text-fg-dim">
-              All shares of {symbol} have been sold. Transaction history below.
-            </p>
-          </section>
+          <div className="py-4 border-b border-line mb-[18px] text-sm text-fg-dim animate-fade-up" style={{ animationDelay: "60ms" }}>
+            <span className="text-[11px] uppercase tracking-[0.06em] font-medium text-fg-fade mr-2">Position closed</span>
+            All shares of {symbol} have been sold. Transaction history below.
+          </div>
         ) : isOwner ? (
-          <section
-            className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-fade-up"
+          <div
+            className="flex items-baseline gap-[22px] flex-wrap py-4 border-b border-line mb-[18px] text-sm animate-fade-up"
             style={{ animationDelay: "60ms" }}
           >
-            <StatCard
-              label="Shares"
-              value={fmtShares(totals.shares)}
-              loading={keyResolving}
-            />
-            <StatCard
-              label="Avg cost"
-              value={fmtMoney(totals.avg)}
-              loading={keyResolving}
-            />
-            <StatCard
-              label="Market value"
-              value={totals.market !== null ? fmtMoney(totals.market) : "…"}
-              loading={keyResolving}
-            />
-            <StatCard
-              label="Gain"
-              value={
-                totals.gain === null
-                  ? "…"
-                  : `${totals.gain >= 0 ? "+" : ""}${fmtMoney(totals.gain)}`
-              }
-              sub={totals.gainPct !== null ? fmtPct(totals.gainPct) : undefined}
-              tone={
-                totals.gain === null
-                  ? undefined
-                  : totals.gain >= 0
-                  ? "pos"
-                  : "neg"
-              }
-              loading={keyResolving}
-            />
-          </section>
-        ) : (
-          <section
-            className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-fade-up"
-            style={{ animationDelay: "60ms" }}
-          >
-            <StatCard
-              label="Gain"
-              value={totals.gainPct !== null ? fmtPct(totals.gainPct) : "…"}
-              tone={
-                totals.gainPct === null
-                  ? undefined
-                  : totals.gainPct >= 0
-                  ? "pos"
-                  : "neg"
-              }
-              loading={keyResolving}
-            />
-          </section>
-        )}
+            {keyResolving ? (
+              <div className="h-5 w-48 bg-bg-3 rounded animate-pulse" aria-hidden />
+            ) : (
+              <>
+                <Stat label="Your position" value={`${fmtShares(totals.shares)} shares`} big />
+                <Stat label="Avg cost" value={fmtMoney(totals.avg)} />
+                <Stat label="Mkt value" value={totals.market !== null ? fmtMoney(totals.market) : "—"} />
+                <Stat
+                  label="Unrealized"
+                  value={
+                    totals.gain === null
+                      ? "—"
+                      : `${totals.gain >= 0 ? "+" : "−"}${fmtMoney(Math.abs(totals.gain))} (${totals.gainPct !== null ? totals.gainPct.toFixed(1) : "0"}%)`
+                  }
+                  tone={totals.gain === null ? undefined : totals.gain >= 0 ? "pos" : "neg"}
+                />
+              </>
+            )}
+          </div>
+        ) : null}
 
+        {/* Task 5.3 — Chart restyle */}
         <section
           className="animate-fade-up"
           style={{ animationDelay: "120ms" }}
         >
-          <div className="flex items-end justify-between flex-wrap gap-3 mb-4">
-            <div>
-              <h2 className="text-xl font-semibold tracking-tight">
-                Price since first purchase
-              </h2>
-              <p className="text-sm text-fg-dim mt-1">
-                Yellow dots mark buys; red dots mark sells.
-              </p>
+          <div className="bg-bg-2 border border-line rounded-card p-4 md:p-[16px_18px_14px]">
+            {/* Legend row */}
+            <div className="flex items-center gap-3.5 text-[11.5px] text-fg-mid mb-2.5">
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-2 h-[2px] bg-accent" />
+                price
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-2 h-2 rounded-full bg-pos" />
+                buys
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="inline-block w-2 h-2 rounded-full bg-neg" />
+                sells
+              </span>
             </div>
-          </div>
-          <div className="card p-4 sm:p-5">
             <div className="h-[340px]">
               {history.length === 0 ? (
                 <div className="h-full flex items-center justify-center text-sm text-fg-dim">
@@ -593,25 +577,27 @@ export default function TickerPage({
           </div>
         </section>
 
+        {/* Task 5.4 — Lot table restyle */}
         {isOwner && (
         <section
           className="animate-fade-up"
           style={{ animationDelay: "200ms" }}
         >
-          <div className="mb-4">
-            <h2 className="text-xl font-semibold tracking-tight">
+          <div className="mb-3">
+            <h2 className="text-[13px] font-semibold tracking-[0.04em] uppercase text-fg-dim">
               Transaction history
             </h2>
           </div>
-          <div className="card overflow-hidden">
-            <div className="hidden md:grid grid-cols-[0.5fr_1fr_1fr_1fr_1fr_1.3fr_1.5fr_0.3fr] gap-4 px-5 py-3 label border-b border-line">
+          <div className="bg-bg-2 border border-line rounded-card overflow-hidden">
+            {/* Table header */}
+            <div className="hidden md:grid grid-cols-[0.6fr_1.1fr_0.9fr_0.9fr_0.9fr_1.1fr_1.3fr_0.3fr] gap-4 px-5 py-2.5 text-[10.5px] uppercase tracking-[0.07em] font-semibold text-fg-fade border-b border-line">
               <span>Side</span>
               <span>Date</span>
               <span className="text-right">Shares</span>
               <span className="text-right">Price</span>
-              <span className="text-right">Cost</span>
+              <span className="text-right">Total</span>
               <span className="text-right">Market</span>
-              <span className="text-right">Gain</span>
+              <span className="text-right">Realized / Gain</span>
               <span />
             </div>
             {lots.map((l, i) => {
@@ -621,23 +607,45 @@ export default function TickerPage({
               const gain = market !== null ? market - cost : null;
               const gainPct =
                 gain !== null && cost > 0 ? (gain / cost) * 100 : null;
-              const tone =
-                gain === null ? "" : gain >= 0 ? "text-pos" : "text-neg";
-              const rowNumTone = isSell ? "text-neg" : "text-fg-dim";
+              // Approximate realized gain for sells using portfolio avg cost
+              const sellAvgCost = pooled?.avgPrice ?? l.purchasePrice;
+              const realizedGain = isSell ? (l.purchasePrice - sellAvgCost) * l.shares : null;
+              const realizedPct =
+                realizedGain !== null && sellAvgCost > 0
+                  ? (realizedGain / (sellAvgCost * l.shares)) * 100
+                  : null;
+              const sourceLabel = l.importSource === "trading212" ? "T212" : "manual";
               return (
                 <div
                   key={l.id}
-                  className={`grid grid-cols-[1fr_auto] md:grid-cols-[0.5fr_1fr_1fr_1fr_1fr_1.3fr_1.5fr_0.3fr] gap-4 px-5 py-4 hover:bg-bg-3 transition ${
+                  className={`grid grid-cols-[1fr_auto] md:grid-cols-[0.6fr_1.1fr_0.9fr_0.9fr_0.9fr_1.1fr_1.3fr_0.3fr] gap-4 px-5 py-3.5 hover:bg-bg-3 transition ${
                     i !== lots.length - 1 ? "border-b border-line" : ""
                   }`}
                 >
-                  <span className="hidden md:inline-flex items-center">
-                    <SidePill side={isSell ? "SELL" : "BUY"} />
+                  {/* Side badge — desktop */}
+                  <span className="hidden md:inline-flex items-center gap-1.5">
+                    <span
+                      className={`inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-tag ${
+                        isSell ? "bg-neg-soft text-neg" : "bg-pos-soft text-pos"
+                      }`}
+                    >
+                      {isSell ? "SELL" : "BUY"}
+                    </span>
+                    <span className="ml-0.5 text-[10.5px] text-fg-fade px-1.5 py-px border border-line rounded-tag font-medium">
+                      {sourceLabel}
+                    </span>
                   </span>
+                  {/* Date + mobile summary */}
                   <div className="flex flex-col">
                     <span className="num text-sm flex items-center gap-2">
                       <span className="md:hidden">
-                        <SidePill side={isSell ? "SELL" : "BUY"} />
+                        <span
+                          className={`inline-flex items-center text-[11px] font-semibold px-2 py-0.5 rounded-tag ${
+                            isSell ? "bg-neg-soft text-neg" : "bg-pos-soft text-pos"
+                          }`}
+                        >
+                          {isSell ? "SELL" : "BUY"}
+                        </span>
                       </span>
                       {new Date(l.purchaseDate).toLocaleDateString("en-GB", {
                         day: "2-digit",
@@ -649,49 +657,56 @@ export default function TickerPage({
                       {fmtShares(l.shares)} @ {fmtMoney(l.purchasePrice)}
                     </span>
                   </div>
-                  <span className={`num text-sm text-right hidden md:block truncate ${rowNumTone}`}>
+                  {/* Shares */}
+                  <span className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums">
                     {fmtShares(l.shares)}
                   </span>
-                  <span className={`num text-sm text-right hidden md:block truncate ${rowNumTone}`}>
+                  {/* Price */}
+                  <span className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums">
                     {fmtMoney(l.purchasePrice)}
                   </span>
+                  {/* Total (cost or proceeds) */}
                   <span
-                    className={`num text-sm text-right hidden md:block truncate ${rowNumTone}`}
+                    className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums"
                     title={isSell ? "Proceeds" : "Cost"}
                   >
                     {fmtMoney(cost)}
                   </span>
-                  <span className="num text-sm text-right hidden md:block truncate">
+                  {/* Market value (buys only) */}
+                  <span className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums">
                     {isSell ? "—" : market !== null ? fmtMoney(market) : "…"}
                   </span>
-                  <span className={`num text-sm text-right ${tone} md:hidden truncate`}>
-                    {isSell
-                      ? "—"
-                      : gain === null
-                      ? "…"
-                      : `${gain >= 0 ? "+" : ""}${fmtPct(gainPct!)}`}
-                  </span>
-                  <span
-                    className={`num text-sm text-right ${tone} hidden md:block truncate`}
-                  >
-                    {isSell
-                      ? "—"
-                      : gain === null
-                      ? "…"
-                      : `${gain >= 0 ? "+" : ""}${fmtMoney(gain)} · ${fmtPct(
-                          gainPct!
-                        )}`}
-                  </span>
-                  <span className="text-right">
-                    {isOwner && (
-                      <button
-                        onClick={() => handleDelete(l)}
-                        className="text-fg-fade hover:text-neg transition"
-                        title="Delete"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                  {/* Realized / Gain */}
+                  <span className="text-right hidden md:flex justify-end items-center">
+                    {isSell ? (
+                      realizedGain !== null && realizedPct !== null ? (
+                        <TwoLinePLCell amount={realizedGain} pct={realizedPct} />
+                      ) : (
+                        <span className="text-fg-fade text-sm">—</span>
+                      )
+                    ) : gain !== null && gainPct !== null ? (
+                      <TwoLinePLCell amount={gain} pct={gainPct} />
+                    ) : (
+                      <span className="text-fg-fade text-sm">…</span>
                     )}
+                  </span>
+                  {/* Mobile: gain pct only */}
+                  <span className={`num text-sm text-right md:hidden truncate ${gain !== null && gain >= 0 ? "text-pos" : gain !== null ? "text-neg" : ""}`}>
+                    {isSell
+                      ? "—"
+                      : gain === null
+                      ? "…"
+                      : fmtPct(gainPct!)}
+                  </span>
+                  {/* Delete */}
+                  <span className="text-right hidden md:flex items-center justify-end">
+                    <button
+                      onClick={() => handleDelete(l)}
+                      className="text-fg-fade hover:text-neg transition"
+                      title="Delete"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </span>
                 </div>
               );
@@ -704,60 +719,30 @@ export default function TickerPage({
   );
 }
 
-function SidePill({ side }: { side: "BUY" | "SELL" }) {
-  const isSell = side === "SELL";
-  return (
-    <span
-      className={`inline-block text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-        isSell
-          ? "text-neg border-neg/40 bg-neg/10"
-          : "text-pos border-pos/40 bg-pos/10"
-      }`}
-    >
-      {isSell ? "Sell" : "Buy"}
-    </span>
-  );
-}
-
-function StatCard({
+function Stat({
   label,
   value,
-  sub,
+  big,
   tone,
-  loading,
+  className = "",
 }: {
   label: string;
   value: string;
-  sub?: string;
+  big?: boolean;
   tone?: "pos" | "neg";
-  /** When true, swap the value (and sub) for pulse skeletons. Used while
-   *  the portfolio key is still resolving — without this, encrypted
-   *  portfolios briefly render with shares=0/cost=$0 during the window. */
-  loading?: boolean;
+  className?: string;
 }) {
-  const color =
+  const valueClass = big
+    ? "text-[18px] font-semibold tabular-nums"
+    : "font-medium tabular-nums";
+  const toneClass =
     tone === "pos" ? "text-pos" : tone === "neg" ? "text-neg" : "text-fg";
   return (
-    <div className="card p-5">
-      <div className="label mb-3">{label}</div>
-      {loading ? (
-        <div
-          className="h-9 md:h-10 w-24 bg-bg-3 rounded animate-pulse"
-          aria-hidden
-        />
-      ) : (
-        <div className={`num text-2xl md:text-3xl font-medium ${color}`}>
-          {value}
-        </div>
-      )}
-      {loading && sub !== undefined ? (
-        <div
-          className="h-4 w-16 bg-bg-3 rounded animate-pulse mt-2"
-          aria-hidden
-        />
-      ) : sub ? (
-        <div className={`num text-sm mt-1 ${color}`}>{sub}</div>
-      ) : null}
+    <div className={`flex items-baseline gap-1.5 ${className}`}>
+      <span className="text-fg-fade text-[11px] uppercase tracking-[0.06em] font-medium">
+        {label}
+      </span>
+      <span className={`${valueClass} ${toneClass}`}>{value}</span>
     </div>
   );
 }
