@@ -22,9 +22,11 @@ export interface PortfolioCardSummary {
 export function PortfolioCard({
   summary,
   href,
+  resolving,
 }: {
   summary: PortfolioCardSummary;
   href: string;
+  resolving?: boolean;
 }) {
   return (
     <Link
@@ -36,21 +38,43 @@ export function PortfolioCard({
         <div className="text-[14.5px] font-semibold text-fg tracking-tight">{summary.name}</div>
       </div>
 
-      <div className="text-[32px] font-semibold leading-none tracking-tight tabular-nums text-fg mb-3">
-        ${formatBig(summary.totalValue)}
-      </div>
-      <PerformancePill pct={summary.pctVsBenchmark} benchmark={summary.benchmarkLabel ?? "vs SPY"} />
+      {resolving ? (
+        <>
+          <div className="h-9 w-40 bg-bg-3 rounded animate-pulse mb-3" />
+          <div className="h-6 w-32 bg-bg-3 rounded-pill animate-pulse self-start" />
 
-      <div className="border-t border-line mt-5 pt-3" />
+          <div className="border-t border-line mt-5 pt-3" />
 
-      <div className="flex gap-7 mb-4">
-        <Stat label="Positions" value={String(summary.positionsCount)} />
-        <Stat
-          label="P/L"
-          value={`${summary.pl.amount >= 0 ? "+" : "−"}$${formatBig(Math.abs(summary.pl.amount))}`}
-          tone={summary.pl.amount >= 0 ? "pos" : "neg"}
-        />
-      </div>
+          <div className="flex gap-7 mb-4">
+            <div className="flex flex-col gap-1">
+              <div className="h-4 w-12 bg-bg-3 rounded animate-pulse" />
+              <div className="h-3 w-16 bg-bg-3 rounded animate-pulse" />
+            </div>
+            <div className="flex flex-col gap-1">
+              <div className="h-4 w-12 bg-bg-3 rounded animate-pulse" />
+              <div className="h-3 w-16 bg-bg-3 rounded animate-pulse" />
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="text-[32px] font-semibold leading-none tracking-tight tabular-nums text-fg mb-3">
+            ${formatBig(summary.totalValue)}
+          </div>
+          <PerformancePill pct={summary.pctVsBenchmark} benchmark={summary.benchmarkLabel ?? "vs SPY"} />
+
+          <div className="border-t border-line mt-5 pt-3" />
+
+          <div className="flex gap-7 mb-4">
+            <Stat label="Positions" value={String(summary.positionsCount)} />
+            <Stat
+              label="P/L"
+              value={`${summary.pl.amount >= 0 ? "+" : "−"}$${formatBig(Math.abs(summary.pl.amount))}`}
+              tone={summary.pl.amount >= 0 ? "pos" : "neg"}
+            />
+          </div>
+        </>
+      )}
 
       <FriendStack people={summary.followers} label={`${summary.followers.length} friends following`} emptyLabel="Not shared yet" />
     </Link>

@@ -421,6 +421,11 @@ export default function MinePage() {
                 <PortfolioCard
                   summary={enrichWithNames(s, displayNames)}
                   href={`/portfolios/${s.id}`}
+                  resolving={
+                    p.encrypted &&
+                    !portfolioKeys.has(p.id) &&
+                    !keyResolutionAttempted.has(p.id)
+                  }
                 />
                 {/* action buttons — visible on hover, positioned inside the card area */}
                 <div className="absolute bottom-4 right-4 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
