@@ -12,6 +12,7 @@ import { UnlockModal } from "@/components/UnlockModal";
 import { AppShell } from "@/components/AppShell";
 import { Portfolio } from "@/lib/types";
 import { runEagerMigrations } from "@/lib/holdings-repo";
+import { PortfolioRouteProvider } from "@/lib/portfolio-route";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -79,5 +80,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     );
   }
 
-  return <AppShell user={user!}>{children}</AppShell>;
+  return (
+    <PortfolioRouteProvider>
+      <AppShell user={user!}>{children}</AppShell>
+    </PortfolioRouteProvider>
+  );
 }

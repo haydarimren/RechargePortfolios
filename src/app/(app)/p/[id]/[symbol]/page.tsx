@@ -16,6 +16,7 @@ import { HistoricalPoint } from "@/lib/yahoo";
 import { getCachedHistoricalCloses } from "@/lib/historical-cache";
 import { closeOnOrBefore, fmtShares, poolPositions } from "@/lib/portfolio";
 import { useChartColors } from "@/lib/theme";
+import { usePublishPortfolioOwnership } from "@/lib/portfolio-route";
 import { UnlockModal } from "@/components/UnlockModal";
 import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { useEncryption } from "@/lib/use-encryption";
@@ -208,6 +209,12 @@ export default function TickerPage({
   }, [lots, yahooSymbol]);
 
   const isOwner = !!(user && portfolio && portfolio.ownerId === user.uid);
+  // Publish ownership to the AppShell so the right tab (Mine vs Friends)
+  // highlights while we're on this route. Pass `null` until the portfolio
+  // doc has loaded so we don't flash the wrong tab.
+  usePublishPortfolioOwnership(
+    !user || !portfolio ? null : portfolio.ownerId === user.uid,
+  );
 
   // True for the brief window between page mount/nav-back and the key
   // resolution settling. During this window `lots` is empty for an

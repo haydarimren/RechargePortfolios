@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { User } from "firebase/auth";
 import { InitialChip } from "./InitialChip";
 import { useDisplayName } from "@/lib/users";
+import { usePortfolioRoute } from "@/lib/portfolio-route";
 
 const NAV = [
   { href: "/mine", label: "Mine" },
@@ -14,10 +15,29 @@ const NAV = [
   { href: "/me", label: "Me" },
 ] as const;
 
-function isActive(pathname: string, href: string): boolean {
+function isActive(
+  pathname: string,
+  href: string,
+  ownership: "owner" | "viewer" | null,
+): boolean {
+  // On a portfolio detail / drilldown route, ownership decides which tab
+  // gets the highlight. /p/... with `ownership === "viewer"` lights up
+  // Friends; with `ownership === "owner"` (or unknown — pre-load) it lights
+  // up Mine.
+  const onPortfolio = pathname.startsWith("/p/");
   if (href === "/mine") {
-    // /mine is also the implicit home — portfolio detail pages count as Mine.
-    return pathname === "/mine" || pathname === "/" || pathname.startsWith("/p/");
+    return (
+      pathname === "/mine" ||
+      pathname === "/" ||
+      (onPortfolio && ownership !== "viewer")
+    );
+  }
+  if (href === "/friends") {
+    return (
+      pathname === "/friends" ||
+      pathname.startsWith("/friends/") ||
+      (onPortfolio && ownership === "viewer")
+    );
   }
   return pathname === href || pathname.startsWith(`${href}/`);
 }
@@ -30,6 +50,7 @@ export function AppShell({
   children: React.ReactNode;
 }) {
   const pathname = usePathname() ?? "/mine";
+  const { ownership } = usePortfolioRoute();
   const displayName = useDisplayName(user.uid) || user.displayName || "Me";
 
   return (
@@ -38,7 +59,7 @@ export function AppShell({
       <aside className="hidden md:flex flex-col w-[180px] shrink-0 bg-bg-3 border-r border-line px-3 py-5 gap-1">
         <div className="text-sm font-semibold text-fg px-2.5 pt-1 pb-5">Recharge</div>
         {NAV.map((item) => {
-          const active = isActive(pathname, item.href);
+          const active = isActive(pathname, item.href, ownership);
           return (
             <Link
               key={item.href}
@@ -71,7 +92,7 @@ export function AppShell({
         aria-label="Primary"
       >
         {NAV.map((item) => {
-          const active = isActive(pathname, item.href);
+          const active = isActive(pathname, item.href, ownership);
           return (
             <Link
               key={item.href}

@@ -29,6 +29,7 @@ import {
 } from "@/lib/portfolio";
 import { useChartColors } from "@/lib/theme";
 import { useDisplayName, useDisplayNamesForUids } from "@/lib/users";
+import { usePublishPortfolioOwnership } from "@/lib/portfolio-route";
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
 import { AllocationTreemap } from "@/components/AllocationTreemap";
@@ -412,6 +413,12 @@ export default function PortfolioPage({
   }, [holdings]);
 
   const isOwner = !!(user && portfolio && portfolio.ownerId === user.uid);
+  // Publish ownership to the AppShell so the right tab (Mine vs Friends)
+  // highlights while we're on this route. Pass `null` until the portfolio
+  // doc has loaded so we don't wrongly flash the owner state.
+  usePublishPortfolioOwnership(
+    !user || !portfolio ? null : portfolio.ownerId === user.uid,
+  );
   const ownerName = useDisplayName(portfolio?.ownerId ?? null);
   const followerNames = useDisplayNamesForUids(portfolio?.sharedWith ?? []);
   const positions = useMemo(() => {
