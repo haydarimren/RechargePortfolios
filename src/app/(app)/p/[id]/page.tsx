@@ -602,15 +602,20 @@ export default function PortfolioPage({
     // Encryption-aware add: passes through addHolding which writes the
     // encrypted shape if a portfolioKey is in hand, else falls back to the
     // legacy plaintext shape (pre-migration portfolios).
-    await addHolding(id, portfolioKey, {
-      symbol: bareSymbol,
-      shares,
-      purchasePrice: price,
-      purchaseDate: form.purchaseDate,
-      createdAt: Date.now(),
-      side: form.side,
-      yahooSymbol,
-    });
+    await addHolding(
+      id,
+      portfolioKey,
+      {
+        symbol: bareSymbol,
+        shares,
+        purchasePrice: price,
+        purchaseDate: form.purchaseDate,
+        createdAt: Date.now(),
+        side: form.side,
+        yahooSymbol,
+      },
+      user?.uid,
+    );
     setForm({
       symbol: "",
       exchange: "",

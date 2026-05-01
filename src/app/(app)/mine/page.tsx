@@ -9,6 +9,7 @@ import {
   doc,
   onSnapshot,
   query,
+  updateDoc,
   where,
 } from "firebase/firestore";
 import { X } from "lucide-react";
@@ -26,6 +27,7 @@ import {
   reconcileSharedWrappedKeys,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
+import { appendActivity } from "@/lib/activity-repo";
 import { seedPortfolioView } from "@/lib/views";
 import { PortfolioCard, PortfolioCardSummary } from "@/components/PortfolioCard";
 import { EmptyCardSlot } from "@/components/EmptyCardSlot";
@@ -374,7 +376,39 @@ export default function MinePage() {
     };
   }, [shareTarget, user, encryption.state.kind]);
 
-  // 9. Build PortfolioCardSummary array
+  // 9. Rename modal
+  const [renameTarget, setRenameTarget] = useState<Portfolio | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+
+  const handleRename = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !renameTarget || !renameValue.trim()) return;
+    const newName = renameValue.trim();
+    const portfolioRef = doc(db, "portfolios", renameTarget.id);
+    await updateDoc(portfolioRef, { name: newName });
+    // Best-effort activity event for the rename.
+    try {
+      const key = portfolioKeys.get(renameTarget.id);
+      if (key) {
+        await appendActivity(
+          renameTarget.id,
+          {
+            kind: "rename",
+            occurredAt: Date.now(),
+            actorUid: user.uid,
+            newName,
+          },
+          key,
+        );
+      }
+    } catch {
+      // Activity is metadata. Swallow silently.
+    }
+    setRenameTarget(null);
+    setRenameValue("");
+  };
+
+  // 10. Build PortfolioCardSummary array
   const summaries: PortfolioCardSummary[] = useMemo(() => {
     if (!mine) return [];
     return mine.map((p) =>
@@ -432,6 +466,17 @@ export default function MinePage() {
                   <button
                     onClick={(e) => {
                       e.preventDefault();
+                      setRenameTarget(p);
+                      setRenameValue(p.name);
+                    }}
+                    className="px-2.5 py-1 rounded-md text-xs font-medium bg-bg-3 border border-line text-fg-dim hover:text-accent hover:border-accent transition"
+                    title="Rename"
+                  >
+                    Rename
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.preventDefault();
                       setShareTarget(p);
                     }}
                     className="px-2.5 py-1 rounded-md text-xs font-medium bg-bg-3 border border-line text-fg-dim hover:text-accent hover:border-accent transition"
@@ -478,6 +523,30 @@ export default function MinePage() {
             </div>
             <button type="submit" className="btn-primary w-full">
               Create portfolio
+            </button>
+          </form>
+        </Modal>
+      )}
+
+      {renameTarget && (
+        <Modal
+          onClose={() => { setRenameTarget(null); setRenameValue(""); }}
+          title="Rename portfolio"
+        >
+          <form onSubmit={(e) => { void handleRename(e); }} className="space-y-4">
+            <div>
+              <label className="label block mb-1.5">New name</label>
+              <input
+                autoFocus
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                placeholder="Portfolio name"
+                className="field"
+                required
+              />
+            </div>
+            <button type="submit" className="btn-primary w-full">
+              Save
             </button>
           </form>
         </Modal>
