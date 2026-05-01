@@ -58,7 +58,7 @@ import {
   touchLogbookView,
   touchPortfolioView,
 } from "@/lib/views";
-import { ChevronRight, X, Trash2 } from "lucide-react";
+import { ArrowUpRight, ChevronRight, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -987,20 +987,20 @@ export default function PortfolioPage({
                   onClick={() => setShowShare(true)}
                   className="inline-flex items-center gap-1.5 bg-accent text-white text-sm font-semibold px-3.5 py-2 rounded-btn hover:bg-[#4a7ddc] transition"
                 >
-                  ↗ Share
+                  <ArrowUpRight className="w-4 h-4" aria-hidden /> Share
                 </button>
                 <button
                   onClick={() => setShowImport(true)}
                   className="inline-flex items-center gap-1.5 bg-transparent text-fg-dim border border-line-strong rounded-btn px-3 py-2 text-sm font-medium hover:border-accent hover:text-accent transition"
                   title="Sync from Trading 212"
                 >
-                  ↻ Sync
+                  <RefreshCw className="w-4 h-4" aria-hidden /> Sync
                 </button>
                 <button
                   onClick={() => setShowAdd(true)}
                   className="inline-flex items-center gap-1.5 bg-transparent text-fg-dim border border-line-strong rounded-btn px-3 py-2 text-sm font-medium hover:border-accent hover:text-accent transition"
                 >
-                  + Add holding
+                  <Plus className="w-4 h-4" aria-hidden /> Add holding
                 </button>
               </div>
             )}

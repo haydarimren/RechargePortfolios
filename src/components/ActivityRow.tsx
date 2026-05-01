@@ -1,15 +1,30 @@
 "use client";
 
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpRight,
+  Pencil,
+  Percent,
+  Star,
+} from "lucide-react";
 import { InitialChip } from "./InitialChip";
 import type { ActivityEvent } from "@/lib/activity-types";
 
-const VERB: Record<ActivityEvent["kind"], { glyph: string; bg: string }> = {
-  "buy":               { glyph: "↑", bg: "bg-pos" },
-  "sell":              { glyph: "↓", bg: "bg-neg" },
-  "share":             { glyph: "↗", bg: "bg-accent" },
-  "rename":            { glyph: "✎", bg: "bg-[#a855f7]" },
-  "milestone":         { glyph: "★", bg: "bg-[#f59e0b]" },
-  "allocation-change": { glyph: "%", bg: "bg-[#06b6d4]" },
+type VerbDescriptor = {
+  Icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean; fill?: string; strokeWidth?: number }>;
+  bg: string;
+  /** Whether the icon should render filled (e.g. milestone star). */
+  filled?: boolean;
+};
+
+const VERB: Record<ActivityEvent["kind"], VerbDescriptor> = {
+  "buy":               { Icon: ArrowUp,       bg: "bg-pos" },
+  "sell":              { Icon: ArrowDown,     bg: "bg-neg" },
+  "share":             { Icon: ArrowUpRight,  bg: "bg-accent" },
+  "rename":            { Icon: Pencil,        bg: "bg-[#a855f7]" },
+  "milestone":         { Icon: Star,          bg: "bg-[#f59e0b]", filled: true },
+  "allocation-change": { Icon: Percent,       bg: "bg-[#06b6d4]" },
 };
 
 export function ActivityRow({
@@ -24,15 +39,20 @@ export function ActivityRow({
   relativeTime: string;
 }) {
   const verb = VERB[event.kind];
+  const VerbIcon = verb.Icon;
   return (
     <div className="flex items-start gap-3 py-3 border-b border-line last:border-b-0">
       <div className="relative shrink-0">
         <InitialChip uid={event.actorUid} displayName={actorDisplayName} size={30} />
         <span
-          className={`absolute -right-0.5 -bottom-0.5 w-4 h-4 rounded-full inline-flex items-center justify-center text-[9px] font-bold text-white border-2 border-bg ${verb.bg}`}
+          className={`absolute -right-0.5 -bottom-0.5 w-4 h-4 rounded-full inline-flex items-center justify-center text-white border-2 border-bg ${verb.bg}`}
           aria-hidden
         >
-          {verb.glyph}
+          <VerbIcon
+            className="w-2.5 h-2.5"
+            strokeWidth={3}
+            fill={verb.filled ? "currentColor" : "none"}
+          />
         </span>
       </div>
       <div className="flex-1 min-w-0">

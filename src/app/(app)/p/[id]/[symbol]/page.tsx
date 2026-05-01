@@ -26,7 +26,7 @@ import {
   loadPortfolioKeyWithRetry,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
-import { Trash2, X } from "lucide-react";
+import { Plus, Trash2, X } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -451,9 +451,9 @@ export default function TickerPage({
                 <button
                   type="button"
                   onClick={() => setShowAdd(true)}
-                  className="bg-fg text-bg text-sm font-semibold px-3.5 py-2 rounded-btn hover:bg-accent hover:text-white transition-colors"
+                  className="inline-flex items-center gap-1.5 bg-fg text-bg text-sm font-semibold px-3.5 py-2 rounded-btn hover:bg-accent hover:text-white transition-colors"
                 >
-                  + Add lot
+                  <Plus className="w-4 h-4" aria-hidden /> Add lot
                 </button>
               </div>
             )}
