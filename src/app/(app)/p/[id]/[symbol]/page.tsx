@@ -577,8 +577,7 @@ export default function TickerPage({
           </div>
         </section>
 
-        {/* Task 5.4 — Lot table restyle */}
-        {isOwner && (
+        {/* Task 5.4 — Lot table restyle / Task 5.5 — shared-viewer variant */}
         <section
           className="animate-fade-up"
           style={{ animationDelay: "200ms" }}
@@ -589,17 +588,25 @@ export default function TickerPage({
             </h2>
           </div>
           <div className="bg-bg-2 border border-line rounded-card overflow-hidden">
-            {/* Table header */}
-            <div className="hidden md:grid grid-cols-[0.6fr_1.1fr_0.9fr_0.9fr_0.9fr_1.1fr_1.3fr_0.3fr] gap-4 px-5 py-2.5 text-[10.5px] uppercase tracking-[0.07em] font-semibold text-fg-fade border-b border-line">
-              <span>Side</span>
-              <span>Date</span>
-              <span className="text-right">Shares</span>
-              <span className="text-right">Price</span>
-              <span className="text-right">Total</span>
-              <span className="text-right">Market</span>
-              <span className="text-right">Realized / Gain</span>
-              <span />
-            </div>
+            {/* Table header — owner sees all columns; viewer sees side + date + % gain only */}
+            {isOwner ? (
+              <div className="hidden md:grid grid-cols-[0.6fr_1.1fr_0.9fr_0.9fr_0.9fr_1.1fr_1.3fr_0.3fr] gap-4 px-5 py-2.5 text-[10.5px] uppercase tracking-[0.07em] font-semibold text-fg-fade border-b border-line">
+                <span>Side</span>
+                <span>Date</span>
+                <span className="text-right">Shares</span>
+                <span className="text-right">Price</span>
+                <span className="text-right">Total</span>
+                <span className="text-right">Market</span>
+                <span className="text-right">Realized / Gain</span>
+                <span />
+              </div>
+            ) : (
+              <div className="hidden md:grid grid-cols-[0.6fr_1.4fr_1.4fr] gap-4 px-5 py-2.5 text-[10.5px] uppercase tracking-[0.07em] font-semibold text-fg-fade border-b border-line">
+                <span>Side</span>
+                <span>Date</span>
+                <span className="text-right">Gain %</span>
+              </div>
+            )}
             {lots.map((l, i) => {
               const isSell = l.side === "SELL";
               const cost = l.shares * l.purchasePrice;
@@ -615,11 +622,17 @@ export default function TickerPage({
                   ? (realizedGain / (sellAvgCost * l.shares)) * 100
                   : null;
               const sourceLabel = l.importSource === "trading212" ? "T212" : "manual";
+              const displayPct = isSell ? realizedPct : gainPct;
+              const displayGain = isSell ? realizedGain : gain;
               return (
                 <div
                   key={l.id}
-                  className={`grid grid-cols-[1fr_auto] md:grid-cols-[0.6fr_1.1fr_0.9fr_0.9fr_0.9fr_1.1fr_1.3fr_0.3fr] gap-4 px-5 py-3.5 hover:bg-bg-3 transition ${
+                  className={`grid gap-4 px-5 py-3.5 hover:bg-bg-3 transition ${
                     i !== lots.length - 1 ? "border-b border-line" : ""
+                  } ${
+                    isOwner
+                      ? "grid-cols-[1fr_auto] md:grid-cols-[0.6fr_1.1fr_0.9fr_0.9fr_0.9fr_1.1fr_1.3fr_0.3fr]"
+                      : "grid-cols-[1fr_auto] md:grid-cols-[0.6fr_1.4fr_1.4fr]"
                   }`}
                 >
                   {/* Side badge — desktop */}
@@ -631,9 +644,11 @@ export default function TickerPage({
                     >
                       {isSell ? "SELL" : "BUY"}
                     </span>
-                    <span className="ml-0.5 text-[10.5px] text-fg-fade px-1.5 py-px border border-line rounded-tag font-medium">
-                      {sourceLabel}
-                    </span>
+                    {isOwner && (
+                      <span className="ml-0.5 text-[10.5px] text-fg-fade px-1.5 py-px border border-line rounded-tag font-medium">
+                        {sourceLabel}
+                      </span>
+                    )}
                   </span>
                   {/* Date + mobile summary */}
                   <div className="flex flex-col">
@@ -653,67 +668,80 @@ export default function TickerPage({
                         year: "numeric",
                       })}
                     </span>
-                    <span className={`text-xs text-fg-fade md:hidden mt-0.5 ${isSell ? "text-neg" : ""}`}>
-                      {fmtShares(l.shares)} @ {fmtMoney(l.purchasePrice)}
-                    </span>
-                  </div>
-                  {/* Shares */}
-                  <span className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums">
-                    {fmtShares(l.shares)}
-                  </span>
-                  {/* Price */}
-                  <span className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums">
-                    {fmtMoney(l.purchasePrice)}
-                  </span>
-                  {/* Total (cost or proceeds) */}
-                  <span
-                    className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums"
-                    title={isSell ? "Proceeds" : "Cost"}
-                  >
-                    {fmtMoney(cost)}
-                  </span>
-                  {/* Market value (buys only) */}
-                  <span className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums">
-                    {isSell ? "—" : market !== null ? fmtMoney(market) : "…"}
-                  </span>
-                  {/* Realized / Gain */}
-                  <span className="text-right hidden md:flex justify-end items-center">
-                    {isSell ? (
-                      realizedGain !== null && realizedPct !== null ? (
-                        <TwoLinePLCell amount={realizedGain} pct={realizedPct} />
-                      ) : (
-                        <span className="text-fg-fade text-sm">—</span>
-                      )
-                    ) : gain !== null && gainPct !== null ? (
-                      <TwoLinePLCell amount={gain} pct={gainPct} />
-                    ) : (
-                      <span className="text-fg-fade text-sm">…</span>
+                    {isOwner && (
+                      <span className={`text-xs text-fg-fade md:hidden mt-0.5 ${isSell ? "text-neg" : ""}`}>
+                        {fmtShares(l.shares)} @ {fmtMoney(l.purchasePrice)}
+                      </span>
                     )}
-                  </span>
-                  {/* Mobile: gain pct only */}
-                  <span className={`num text-sm text-right md:hidden truncate ${gain !== null && gain >= 0 ? "text-pos" : gain !== null ? "text-neg" : ""}`}>
-                    {isSell
-                      ? "—"
-                      : gain === null
-                      ? "…"
-                      : fmtPct(gainPct!)}
-                  </span>
-                  {/* Delete */}
-                  <span className="text-right hidden md:flex items-center justify-end">
-                    <button
-                      onClick={() => handleDelete(l)}
-                      className="text-fg-fade hover:text-neg transition"
-                      title="Delete"
+                  </div>
+
+                  {/* Owner-only columns */}
+                  {isOwner && (
+                    <>
+                      {/* Shares */}
+                      <span className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums">
+                        {fmtShares(l.shares)}
+                      </span>
+                      {/* Price */}
+                      <span className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums">
+                        {fmtMoney(l.purchasePrice)}
+                      </span>
+                      {/* Total (cost or proceeds) */}
+                      <span
+                        className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums"
+                        title={isSell ? "Proceeds" : "Cost"}
+                      >
+                        {fmtMoney(cost)}
+                      </span>
+                      {/* Market value (buys only) */}
+                      <span className="num text-sm text-right hidden md:block truncate text-fg-dim tabular-nums">
+                        {isSell ? "—" : market !== null ? fmtMoney(market) : "…"}
+                      </span>
+                      {/* Realized / Gain — two-line cell */}
+                      <span className="text-right hidden md:flex justify-end items-center">
+                        {displayGain !== null && displayPct !== null ? (
+                          <TwoLinePLCell amount={displayGain} pct={displayPct} />
+                        ) : (
+                          <span className="text-fg-fade text-sm">{isSell ? "—" : "…"}</span>
+                        )}
+                      </span>
+                      {/* Delete */}
+                      <span className="text-right hidden md:flex items-center justify-end">
+                        <button
+                          onClick={() => handleDelete(l)}
+                          className="text-fg-fade hover:text-neg transition"
+                          title="Delete"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </span>
+                    </>
+                  )}
+
+                  {/* Viewer: gain % only (desktop), mobile same */}
+                  {!isOwner && (
+                    <span
+                      className={`num text-sm text-right truncate tabular-nums ${
+                        displayPct !== null && displayPct >= 0 ? "text-pos" : displayPct !== null ? "text-neg" : "text-fg-fade"
+                      }`}
                     >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </span>
+                      {displayPct !== null
+                        ? fmtPct(displayPct)
+                        : "…"}
+                    </span>
+                  )}
+
+                  {/* Mobile: gain pct only (owner) */}
+                  {isOwner && (
+                    <span className={`num text-sm text-right md:hidden truncate ${displayGain !== null && displayGain >= 0 ? "text-pos" : displayGain !== null ? "text-neg" : ""}`}>
+                      {displayPct !== null ? fmtPct(displayPct) : "…"}
+                    </span>
+                  )}
                 </div>
               );
             })}
           </div>
         </section>
-        )}
       </main>
     </div>
   );
