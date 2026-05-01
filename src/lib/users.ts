@@ -126,10 +126,7 @@ export function useDisplayNamesForUids(uids: string[]): Record<string, string> {
     if (uids.length === 0) return;
     let cancelled = false;
     Promise.all(
-      uids.map(async (uid) => {
-        const snap = await getDoc(doc(db, "users", uid));
-        return [uid, (snap.data() as { displayName?: string })?.displayName ?? ""] as const;
-      }),
+      uids.map(async (uid) => [uid, await fetchDisplayName(uid)] as const),
     ).then((entries) => {
       if (cancelled) return;
       setNames(Object.fromEntries(entries));
