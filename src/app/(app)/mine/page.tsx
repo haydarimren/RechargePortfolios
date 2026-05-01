@@ -159,7 +159,7 @@ export default function MinePage() {
     return () => {
       cancelled = true;
     };
-  }, [user, mine, encryption.state.kind]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [user, mine, encryption.state.kind]);
 
   // Drop the key cache when the encryption session ends.
   // CryptoKey objects are tab-scoped JS handles — letting them survive a
