@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { identityColorIndex, IDENTITY_PALETTE } from "./identity-color";
+import { identityColorIndex, IDENTITY_PALETTE, initialsFor } from "./identity-color";
 
 describe("identityColorIndex", () => {
   it("is deterministic for the same uid", () => {
@@ -24,5 +24,31 @@ describe("identityColorIndex", () => {
 
   it("treats empty string as a valid input (returns index 0)", () => {
     expect(identityColorIndex("")).toBe(0);
+  });
+});
+
+describe("initialsFor", () => {
+  it("returns first + last initial for a multi-word name, uppercased", () => {
+    expect(initialsFor("Alice Chen", "uid1")).toBe("AC");
+  });
+
+  it("returns the first letter (uppercased) for a single-word name", () => {
+    expect(initialsFor("alice", "uid1")).toBe("A");
+  });
+
+  it("falls back to first uid char (uppercased) when displayName is undefined", () => {
+    expect(initialsFor(undefined, "abc")).toBe("A");
+  });
+
+  it("falls back to first uid char (uppercased) when displayName is empty", () => {
+    expect(initialsFor("", "abc")).toBe("A");
+  });
+
+  it("returns '?' when both displayName is undefined and uid is empty", () => {
+    expect(initialsFor(undefined, "")).toBe("?");
+  });
+
+  it("handles emoji-prefixed multi-word names without surrogate splitting", () => {
+    expect(initialsFor("😀 Smith", "uid1")).toBe("😀S");
   });
 });

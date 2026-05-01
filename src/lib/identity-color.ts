@@ -18,7 +18,7 @@ export const IDENTITY_PALETTE = [
 
 /**
  * Returns the palette index for `uid`. Same UID → same index.
- * Uses the FNV-1a-style accumulator: small, deterministic, no deps.
+ * Uses a djb2/polynomial accumulator: small, deterministic, no deps.
  */
 export function identityColorIndex(uid: string): number {
   let h = 0;
@@ -43,8 +43,12 @@ export function initialsFor(displayName: string | undefined, uid: string): strin
   const trimmed = (displayName ?? "").trim();
   if (!trimmed) return (uid[0] ?? "?").toUpperCase();
   const parts = trimmed.split(/\s+/);
+  // Index by code point, not code unit — a leading emoji is two UTF-16 code
+  // units (a surrogate pair), and `parts[0][0]` would return a lone half.
+  const firstChar = [...parts[0]][0];
   if (parts.length >= 2) {
-    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    const lastChar = [...parts[parts.length - 1]][0];
+    return (firstChar + lastChar).toUpperCase();
   }
-  return parts[0][0].toUpperCase();
+  return firstChar.toUpperCase();
 }
