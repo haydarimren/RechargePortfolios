@@ -262,13 +262,13 @@ export default function FriendsPage() {
         const q = quotes[pos.symbol];
         if (q) totalValue += pos.shares * q.c;
       }
-      const ytdPct = totalCost > 0 ? ((totalValue - totalCost) / totalCost) * 100 : 0;
+      const lifetimeGainPct = totalCost > 0 ? ((totalValue - totalCost) / totalCost) * 100 : 0;
       out[p.id] = {
         id: p.id,
         name: p.name,
-        pctVsBenchmark: ytdPct,
+        pctVsBenchmark: lifetimeGainPct,
         positionsCount: positions.length,
-        ytdPct,
+        lifetimeGainPct,
       };
     }
     return out;
@@ -332,7 +332,7 @@ export default function FriendsPage() {
                         name: p.name,
                         pctVsBenchmark: 0,
                         positionsCount: 0,
-                        ytdPct: 0,
+                        lifetimeGainPct: 0,
                       }
                     }
                     href={`/p/${p.id}`}
