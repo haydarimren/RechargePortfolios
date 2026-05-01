@@ -28,7 +28,7 @@ import {
   poolPositions,
   SeriesPoint,
 } from "@/lib/portfolio";
-import { ThemeToggle, useChartColors } from "@/lib/theme";
+import { useChartColors } from "@/lib/theme";
 import { useDisplayName, useDisplayNamesForUids } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
@@ -957,14 +957,13 @@ export default function PortfolioPage({
         </div>
       )}
       <header className="px-6 lg:px-10 pt-6 pb-4 border-b border-line">
-        <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
+        <div className="max-w-6xl mx-auto flex items-center gap-4">
           <Link
             href="/"
             className="text-sm text-fg-dim hover:text-accent transition flex items-center gap-2"
           >
             <ArrowLeft className="w-4 h-4" /> Back
           </Link>
-          <ThemeToggle />
         </div>
       </header>
 

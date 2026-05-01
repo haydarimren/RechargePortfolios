@@ -16,7 +16,7 @@ import { getQuote, StockQuote } from "@/lib/finnhub";
 import { HistoricalPoint } from "@/lib/yahoo";
 import { getCachedHistoricalCloses } from "@/lib/historical-cache";
 import { closeOnOrBefore, fmtShares, poolPositions } from "@/lib/portfolio";
-import { ThemeToggle, useChartColors } from "@/lib/theme";
+import { useChartColors } from "@/lib/theme";
 import { UnlockModal } from "@/components/UnlockModal";
 import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { useEncryption } from "@/lib/use-encryption";
@@ -351,14 +351,6 @@ export default function TickerPage({
           onRestore={encryption.restore}
         />
       )}
-      <header className="px-6 lg:px-10 pt-5 pb-4 border-b border-line">
-        <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
-          <span className="text-[11.5px] text-fg-dim font-medium">
-            <ThemeToggle />
-          </span>
-        </div>
-      </header>
-
       <main className="max-w-6xl mx-auto px-6 lg:px-10 py-8 space-y-8">
         {/* Task 5.1 — Header strip */}
         <section className="animate-fade-up">
