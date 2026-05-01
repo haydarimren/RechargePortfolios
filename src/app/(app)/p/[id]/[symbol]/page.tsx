@@ -447,7 +447,7 @@ export default function TickerPage({
           </div>
         ) : null}
 
-        {/* Task 5.3 — Chart restyle */}
+        {/* Chart: bg-bg-2 card + legend strip with buy/sell color dots */}
         <section
           className="animate-fade-up"
           style={{ animationDelay: "120ms" }}
