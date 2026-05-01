@@ -3,10 +3,12 @@
 /* ---------- Theme variables ---------- */
 :root,
 [data-theme="dark"] {
-  /* surfaces */
+  /* surfaces — note: --bg-3 is *chrome* (sidebar, fixed containers), not
+     a third step on a bg → bg-2 → bg-3 lightness scale. In dark mode it
+     is the darkest of the three; in light mode it is the brightest. */
   --bg: #111418;
   --bg-2: #161a1f;
-  --bg-3: #0c0e12;
+  --bg-3: #0c0e12; /* chrome — darkest in dark mode */
   /* text */
   --fg: #e6e8eb;
   --fg-dim: #c4c8cf;
@@ -29,9 +31,10 @@
 }
 
 [data-theme="light"] {
+  /* surfaces — see dark block: --bg-3 is chrome, not a lightness step. */
   --bg: #f7f5f1;
   --bg-2: #efece6;
-  --bg-3: #ffffff;
+  --bg-3: #ffffff; /* chrome — brightest in light mode */
   --fg: #1a1a1a;
   --fg-dim: #2c2c2a;
   --fg-mid: #4a4a48;
