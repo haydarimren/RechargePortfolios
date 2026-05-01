@@ -150,7 +150,7 @@ export function AllocationTreemap({
     return (
       <g
         style={{ cursor: "pointer" }}
-        onClick={() => router.push(`/portfolios/${portfolioId}/${symbol}`)}
+        onClick={() => router.push(`/p/${portfolioId}/${symbol}`)}
       >
         <rect
           x={x}

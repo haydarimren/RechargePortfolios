@@ -352,7 +352,7 @@ export default function TickerPage({
       <header className="px-6 lg:px-10 pt-6 pb-4 border-b border-line">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
           <Link
-            href={`/portfolios/${id}`}
+            href={`/p/${id}`}
             className="text-sm text-fg-dim hover:text-accent transition flex items-center gap-2"
           >
             <ArrowLeft className="w-4 h-4" /> {portfolio.name}

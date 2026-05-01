@@ -1300,7 +1300,7 @@ export default function PortfolioPage({
                         <SidePill side={t.side} />
                         <button
                           onClick={() =>
-                            router.push(`/portfolios/${id}/${t.symbol}`)
+                            router.push(`/p/${id}/${t.symbol}`)
                           }
                           className="font-semibold text-sm tracking-tight hover:text-accent transition text-left"
                         >
@@ -1371,7 +1371,7 @@ export default function PortfolioPage({
                         <SidePill side={t.side} />
                         <button
                           onClick={() =>
-                            router.push(`/portfolios/${id}/${t.symbol}`)
+                            router.push(`/p/${id}/${t.symbol}`)
                           }
                           className="font-semibold text-sm tracking-tight hover:text-accent transition text-left"
                         >
@@ -1452,7 +1452,7 @@ export default function PortfolioPage({
                       <button
                         key={row.symbol}
                         onClick={() =>
-                          router.push(`/portfolios/${id}/${row.symbol}`)
+                          router.push(`/p/${id}/${row.symbol}`)
                         }
                         className={`w-full text-left grid grid-cols-[1fr_auto_auto] md:grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-4 hover:bg-bg-3 transition group ${
                           i !== nonOwnerRows.length - 1 ? "border-b border-line" : ""
@@ -1509,7 +1509,7 @@ export default function PortfolioPage({
                       <button
                         key={p.symbol}
                         onClick={() =>
-                          router.push(`/portfolios/${id}/${p.symbol}`)
+                          router.push(`/p/${id}/${p.symbol}`)
                         }
                         className={`w-full text-left px-5 py-4 hover:bg-bg-3 transition group md:grid md:grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.7fr_1.3fr_0.5fr] md:gap-4 ${
                           i !== positions.length - 1 ? "border-b border-line" : ""

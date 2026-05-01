@@ -17,14 +17,7 @@ const NAV = [
 function isActive(pathname: string, href: string): boolean {
   if (href === "/mine") {
     // /mine is also the implicit home — portfolio detail pages count as Mine.
-    // /p/... is the post-Phase-4 path; /portfolios/... is the legacy path that
-    // still exists during the transition. Both highlight Mine.
-    return (
-      pathname === "/mine" ||
-      pathname === "/" ||
-      pathname.startsWith("/p/") ||
-      pathname.startsWith("/portfolios/")
-    );
+    return pathname === "/mine" || pathname === "/" || pathname.startsWith("/p/");
   }
   return pathname === href || pathname.startsWith(`${href}/`);
 }

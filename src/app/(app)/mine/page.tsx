@@ -420,7 +420,7 @@ export default function MinePage() {
               <div key={s.id} className="relative group">
                 <PortfolioCard
                   summary={enrichWithNames(s, displayNames)}
-                  href={`/portfolios/${s.id}`}
+                  href={`/p/${s.id}`}
                   resolving={
                     p.encrypted &&
                     !portfolioKeys.has(p.id) &&

@@ -7,7 +7,7 @@ import { db } from "@/lib/firebase";
  * Per-user-per-portfolio read state. Lives at
  * `users/{uid}/portfolioViews/{portfolioId}`.
  *
- * - `lastPortfolioViewAt` — bumped when the viewer loads `/portfolios/{id}`.
+ * - `lastPortfolioViewAt` — bumped when the viewer loads `/p/{id}`.
  * - `lastLogbookViewAt` — bumped when the viewer clicks the Logbook tab.
  *
  * Holdings with `createdAt` greater than the relevant timestamp count as

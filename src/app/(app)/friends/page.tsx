@@ -345,7 +345,7 @@ export default function FriendsPage() {
                         ytdPct: 0,
                       }
                     }
-                    href={`/portfolios/${p.id}`}
+                    href={`/p/${p.id}`}
                   />
                 ))}
               </div>
