@@ -29,10 +29,14 @@ import {
   SeriesPoint,
 } from "@/lib/portfolio";
 import { ThemeToggle, useChartColors } from "@/lib/theme";
-import { useDisplayName } from "@/lib/users";
+import { useDisplayName, useDisplayNamesForUids } from "@/lib/users";
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
 import { AllocationTreemap } from "@/components/AllocationTreemap";
+import { FriendStack } from "@/components/FriendStack";
+import { PerformancePill } from "@/components/PerformancePill";
+import { TwoLinePLCell } from "@/components/TwoLinePLCell";
+import { TabBar } from "@/components/TabBar";
 import { fetchTrading212OrdersClient } from "@/lib/trading212-client";
 import { cleanT212Symbol } from "@/lib/trading212-utils";
 import {
@@ -56,7 +60,7 @@ import {
   touchLogbookView,
   touchPortfolioView,
 } from "@/lib/views";
-import { ArrowLeft, Download, Plus, ChevronRight, X, Trash2, UserPlus } from "lucide-react";
+import { ChevronRight, X, Trash2 } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -129,6 +133,7 @@ export default function PortfolioPage({
     () => getCachedPortfolioKey(id),
   );
   const [migrationError, setMigrationError] = useState("");
+  const [showMenu, setShowMenu] = useState(false);
 
   // Which brokers are currently connected on this portfolio. Derived from
   // the existence of `secrets/credentials` (= some broker connected); we
@@ -411,6 +416,7 @@ export default function PortfolioPage({
 
   const isOwner = !!(user && portfolio && portfolio.ownerId === user.uid);
   const ownerName = useDisplayName(portfolio?.ownerId ?? null);
+  const followerNames = useDisplayNamesForUids(portfolio?.sharedWith ?? []);
   const positions = useMemo(() => {
     const rows = aggregateHoldings(holdings);
     return rows.slice().sort((a, b) => {
@@ -956,49 +962,77 @@ export default function PortfolioPage({
       </header>
 
       <main className="max-w-6xl mx-auto px-6 lg:px-10 py-10 space-y-10">
-        <section className="animate-fade-up flex items-end justify-between flex-wrap gap-4">
-          <div>
-            <div className="label mb-2">
-              {isOwner
-                ? "Your portfolio"
-                : `by ${ownerName || `user ${portfolio.ownerId.slice(0, 4)}…${portfolio.ownerId.slice(-3)}`}`}
+        <section className="animate-fade-up">
+          {/* Breadcrumb */}
+          <div className="text-[11.5px] text-fg-fade font-medium mb-3.5 flex items-center gap-1.5">
+            <span>Mine</span>
+            <span className="text-line-strong">›</span>
+            <span>{portfolio.name}</span>
+          </div>
+          {/* Title row */}
+          <div className="flex items-start justify-between gap-5 mb-4">
+            <div className="flex-1 min-w-0">
+              <h1 className="text-[26px] font-semibold tracking-tight text-fg leading-tight">
+                {portfolio.name}
+              </h1>
+              <div className="flex items-center gap-2.5 mt-2 text-[12.5px] text-fg-mid flex-wrap">
+                <span className="text-fg-dim">
+                  {isOwner
+                    ? "by you"
+                    : `by ${ownerName || `user ${portfolio.ownerId.slice(0, 4)}…${portfolio.ownerId.slice(-3)}`}`}
+                </span>
+                <span className="text-line-strong">·</span>
+                <FriendStack
+                  people={(portfolio.sharedWith ?? []).map((uid) => ({
+                    uid,
+                    displayName: followerNames[uid],
+                  }))}
+                  size={22}
+                  max={3}
+                  label={
+                    (portfolio.sharedWith ?? []).length > 0
+                      ? `${portfolio.sharedWith.length} friend${portfolio.sharedWith.length !== 1 ? "s" : ""} following`
+                      : null
+                  }
+                  emptyLabel="Not shared yet"
+                />
+              </div>
             </div>
-            <h1 className="text-4xl md:text-5xl font-semibold tracking-tight">
-              {portfolio.name}
-            </h1>
-            {totals.firstDate && (
-              <p className="text-sm text-fg-dim mt-2">
-                First investment{" "}
-                {new Date(totals.firstDate).toLocaleDateString("en-GB", {
-                  day: "2-digit",
-                  month: "short",
-                  year: "numeric",
-                })}
-              </p>
+            {isOwner && (
+              <div className="flex gap-2 shrink-0 relative">
+                <button
+                  onClick={() => setShowShare(true)}
+                  className="inline-flex items-center gap-1.5 bg-accent text-white text-sm font-semibold px-3.5 py-2 rounded-btn hover:bg-[#4a7ddc] transition"
+                >
+                  ↗ Share
+                </button>
+                <button
+                  onClick={() => setShowImport(true)}
+                  className="w-9 h-9 inline-flex items-center justify-center bg-transparent text-fg-dim border border-line-strong rounded-btn hover:border-accent hover:text-accent transition"
+                  title="Sync T212"
+                >
+                  ↻
+                </button>
+                <button
+                  onClick={() => setShowMenu((v) => !v)}
+                  aria-label="More options"
+                  className="w-9 h-9 inline-flex items-center justify-center bg-transparent text-fg-dim border border-line-strong rounded-btn hover:border-accent hover:text-accent transition"
+                >
+                  ⋯
+                </button>
+                {showMenu && (
+                  <div className="absolute right-0 top-10 z-30 bg-bg-2 border border-line rounded-card shadow-lg py-1 min-w-[140px]">
+                    <button
+                      onClick={() => { setShowAdd(true); setShowMenu(false); }}
+                      className="w-full text-left px-4 py-2 text-sm text-fg hover:bg-bg-3 transition"
+                    >
+                      Add holding
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
           </div>
-          {isOwner && (
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowShare(true)}
-                className="btn-ghost flex items-center gap-2"
-              >
-                <UserPlus className="w-4 h-4" /> Share
-              </button>
-              <button
-                onClick={() => setShowImport(true)}
-                className="btn-ghost flex items-center gap-2"
-              >
-                <Download className="w-4 h-4" /> Import
-              </button>
-              <button
-                onClick={() => setShowAdd(true)}
-                className="btn-primary flex items-center gap-2"
-              >
-                <Plus className="w-4 h-4" /> Add holding
-              </button>
-            </div>
-          )}
         </section>
 
         {/* Top stats */}
