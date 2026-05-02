@@ -3,39 +3,66 @@
 /* ---------- Theme variables ---------- */
 :root,
 [data-theme="dark"] {
+  /* surfaces — note: --bg-3 is *chrome* (sidebar, fixed containers), not
+     a third step on a bg → bg-2 → bg-3 lightness scale. In dark mode it
+     is the darkest of the three; in light mode it is the brightest. */
   --bg: #111418;
   --bg-2: #161a1f;
-  --bg-3: #1d2128;
+  --bg-3: #0c0e12; /* chrome — darkest in dark mode */
+  /* text */
   --fg: #e6e8eb;
-  --fg-dim: #a4abb5;
+  --fg-dim: #c4c8cf;
+  --fg-mid: #9da4af;
   --fg-fade: #6c7380;
+  /* borders */
   --line: #242932;
   --line-strong: #2f3642;
+  /* accent + state */
   --accent: #5b8def;
-  --accent-soft: #7ea4f2;
+  --accent-soft: rgba(91, 141, 239, 0.14);
   --pos: #56c69c;
+  --pos-soft: rgba(86, 198, 156, 0.12);
   --neg: #e87e83;
-  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
+  --neg-soft: rgba(232, 126, 131, 0.12);
+  /* fonts */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Roboto Mono", monospace;
   color-scheme: dark;
 }
 
 [data-theme="light"] {
+  /* surfaces — see dark block: --bg-3 is chrome, not a lightness step. */
   --bg: #f7f5f1;
   --bg-2: #efece6;
-  --bg-3: #e4e0d7;
+  --bg-3: #ffffff; /* chrome — brightest in light mode */
   --fg: #1a1a1a;
-  --fg-dim: #4a4a48;
+  --fg-dim: #2c2c2a;
+  --fg-mid: #4a4a48;
   --fg-fade: #8a867e;
   --line: #d8d3c8;
   --line-strong: #c4bfb3;
   --accent: #2f4f7d;
-  --accent-soft: #4a6fa0;
+  --accent-soft: rgba(47, 79, 125, 0.10);
   --pos: #3d7a4f;
+  --pos-soft: rgba(61, 122, 79, 0.12);
   --neg: #a84a3e;
-  --font-sans: var(--font-plex), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-plex-mono), ui-monospace, "SF Mono", monospace;
+  --neg-soft: rgba(168, 74, 62, 0.12);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Roboto Mono", monospace;
   color-scheme: light;
+}
+
+/* Person palette — 8-color rotation, indexed by hash(uid) % 8.
+   Used by InitialChip / FriendStack / ActivityRow author chip. */
+:root {
+  --person-0: #6366f1;
+  --person-1: #f59e0b;
+  --person-2: #ec4899;
+  --person-3: #10b981;
+  --person-4: #06b6d4;
+  --person-5: #a855f7;
+  --person-6: #ef4444;
+  --person-7: #84cc16;
 }
 
 /* ---------- Tailwind tokens backed by CSS vars ---------- */
@@ -45,16 +72,24 @@
   --color-bg-3: var(--bg-3);
   --color-fg: var(--fg);
   --color-fg-dim: var(--fg-dim);
+  --color-fg-mid: var(--fg-mid);
   --color-fg-fade: var(--fg-fade);
   --color-line: var(--line);
   --color-line-strong: var(--line-strong);
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
   --color-pos: var(--pos);
+  --color-pos-soft: var(--pos-soft);
   --color-neg: var(--neg);
+  --color-neg-soft: var(--neg-soft);
 
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+
+  --radius-card: 14px;
+  --radius-btn: 8px;
+  --radius-tag: 6px;
+  --radius-pill: 9999px;
 }
 
 /* ---------- Base ---------- */
@@ -105,7 +140,7 @@
   .card {
     background: var(--bg-2);
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: var(--radius-card);
   }
 
   .btn-primary {

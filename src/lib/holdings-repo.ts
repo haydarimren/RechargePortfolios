@@ -56,7 +56,6 @@ import {
   encryptHolding,
   exportPortfolioKey,
   generatePortfolioKey,
-  importPortfolioKey,
   importPublicKey,
   unwrapPortfolioKeyFromSender,
   wrapPortfolioKeyForRecipient,
@@ -107,8 +106,6 @@ interface EncryptedHoldingDoc {
   importSource?: string;
   t212OrderId?: string;
 }
-
-type RawHoldingDoc = EncryptedHoldingDoc | (Omit<Holding, "id">);
 
 function isEncryptedDoc(d: DocumentData): d is EncryptedHoldingDoc {
   return typeof d.payload === "string" && typeof d.iv === "string";

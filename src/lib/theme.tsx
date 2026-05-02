@@ -8,7 +8,7 @@ import {
   useCallback,
 } from "react";
 
-export type Theme = "dark" | "light";
+export type Theme = "dark" | "light" | "system";
 
 interface ThemeContextValue {
   theme: Theme;
@@ -18,22 +18,67 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
+/** Resolve "system" to the actual OS preference ("dark" | "light"). */
+function resolveSystemTheme(): "dark" | "light" {
+  if (typeof window === "undefined") return "dark";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
+function applyTheme(theme: Theme): void {
+  const resolved = theme === "system" ? resolveSystemTheme() : theme;
+  document.documentElement.setAttribute("data-theme", resolved);
+}
+
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>("dark");
 
   useEffect(() => {
-    const attr = document.documentElement.getAttribute("data-theme");
-    if (attr === "light" || attr === "dark") setThemeState(attr);
+    // Read the localStorage preference on mount; fall back to the
+    // data-theme attribute the inline script already applied.
+    let stored: Theme | null = null;
+    try {
+      const raw = localStorage.getItem("theme");
+      if (raw === "dark" || raw === "light" || raw === "system") {
+        stored = raw;
+      }
+    } catch {}
+
+    if (stored) {
+      setThemeState(stored);
+      applyTheme(stored);
+    } else {
+      const attr = document.documentElement.getAttribute("data-theme");
+      if (attr === "light" || attr === "dark") setThemeState(attr);
+    }
   }, []);
 
+  // When theme is "system", listen for OS preference changes and
+  // re-apply the resolved value to data-theme.
+  useEffect(() => {
+    if (theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => {
+      document.documentElement.setAttribute(
+        "data-theme",
+        mq.matches ? "dark" : "light",
+      );
+    };
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [theme]);
+
   const setTheme = useCallback((t: Theme) => {
-    document.documentElement.setAttribute("data-theme", t);
+    applyTheme(t);
     try {
       localStorage.setItem("theme", t);
     } catch {}
     setThemeState(t);
   }, []);
 
+  // toggle cycles dark → light → dark (ignores system; for callers that
+  // only want two states). Existing consumers are unaffected.
   const toggle = useCallback(() => {
     setTheme(theme === "dark" ? "light" : "dark");
   }, [theme, setTheme]);
@@ -53,34 +98,25 @@ export function useTheme(): ThemeContextValue {
 
 export function ThemeToggle({ className = "" }: { className?: string }) {
   const { theme, setTheme } = useTheme();
+  const opts: Theme[] = ["dark", "light", "system"];
   return (
     <div
-      className={`inline-flex items-center gap-px rounded-full border border-line p-0.5 text-xs ${className}`}
+      className={`inline-flex gap-0 bg-bg-3 border border-line rounded-btn p-0.5 ${className}`}
       role="group"
       aria-label="Theme"
     >
-      <button
-        onClick={() => setTheme("dark")}
-        className={`px-2.5 py-1 rounded-full transition ${
-          theme === "dark"
-            ? "bg-fg text-bg"
-            : "text-fg-fade hover:text-fg"
-        }`}
-        aria-pressed={theme === "dark"}
-      >
-        Dark
-      </button>
-      <button
-        onClick={() => setTheme("light")}
-        className={`px-2.5 py-1 rounded-full transition ${
-          theme === "light"
-            ? "bg-fg text-bg"
-            : "text-fg-fade hover:text-fg"
-        }`}
-        aria-pressed={theme === "light"}
-      >
-        Light
-      </button>
+      {opts.map((t) => (
+        <button
+          key={t}
+          onClick={() => setTheme(t)}
+          className={`text-[11.5px] px-2.5 py-1 rounded-[5px] font-medium transition-colors ${
+            theme === t ? "bg-accent text-white" : "text-fg-mid hover:text-fg"
+          }`}
+          aria-pressed={theme === t}
+        >
+          {t === "dark" ? "Dark" : t === "light" ? "Light" : "System"}
+        </button>
+      ))}
     </div>
   );
 }
@@ -91,7 +127,11 @@ export function ThemeToggle({ className = "" }: { className?: string }) {
  */
 export function useChartColors() {
   const { theme } = useTheme();
-  if (theme === "light") {
+  // For "system", resolve to the OS preference so charts get a concrete palette.
+  const resolved =
+    theme === "system" ? resolveSystemTheme() : theme;
+
+  if (resolved === "light") {
     return {
       portfolio: "#2f4f7d",
       benchmark: "#7a8a9c",

@@ -19,6 +19,7 @@ import { X } from "lucide-react";
 import { db } from "@/lib/firebase";
 import { useDisplayName } from "@/lib/users";
 import { revokeFromUser, shareWithUser } from "@/lib/holdings-repo";
+import { InitialChip } from "@/components/InitialChip";
 
 interface SharePanelProps {
   portfolioId: string;
@@ -179,18 +180,17 @@ function SharedUserRow({
 }) {
   const name = useDisplayName(uid);
   return (
-    <li className="flex items-center justify-between gap-2 bg-bg-3 border border-line rounded-md p-2">
-      <div className="min-w-0 flex-1">
-        <div className="text-sm text-fg truncate">
-          {name || <span className="text-fg-dim">Loading…</span>}
-        </div>
-        <div className="num text-[10px] text-fg-fade truncate">{uid}</div>
-      </div>
+    <li className="flex items-center gap-3 bg-bg-3 border border-line rounded-md p-2 pr-1.5">
+      <InitialChip uid={uid} displayName={name || undefined} size={28} />
+      <span className="flex-1 min-w-0 text-sm text-fg truncate">
+        {name || <span className="text-fg-fade">Loading…</span>}
+      </span>
       <button
         onClick={onRemove}
         disabled={disabled}
-        className="text-fg-fade hover:text-neg transition shrink-0 disabled:opacity-50"
+        className="w-7 h-7 inline-flex items-center justify-center text-fg-fade hover:text-neg transition shrink-0 disabled:opacity-50"
         aria-label={`Remove ${name || uid}`}
+        title={`Remove ${name || uid}`}
       >
         <X className="w-4 h-4" />
       </button>
