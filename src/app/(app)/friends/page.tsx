@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { onAuthStateChanged, User } from "firebase/auth";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
@@ -13,11 +14,17 @@ import {
   loadPortfolioKeyWithRetry,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
+import { subscribeActivity } from "@/lib/activity-repo";
+import type { ActivityEvent } from "@/lib/activity-types";
+import { ActivityRow } from "@/components/ActivityRow";
 import { FriendPortfolioCard, FriendPortfolioCardSummary } from "@/components/FriendPortfolioCard";
 import { InitialChip } from "@/components/InitialChip";
 import { InviteModal } from "@/components/InviteModal";
+import { TabBar } from "@/components/TabBar";
 import { useDisplayNamesForUids } from "@/lib/users";
 import { MoreHorizontal, Plus } from "lucide-react";
+
+type FriendsView = "portfolios" | "activity";
 
 export default function FriendsPage() {
   // 1. Auth state
@@ -275,7 +282,63 @@ export default function FriendsPage() {
     return out;
   }, [shared, holdingsByPortfolio, quotes]);
 
-  // 9. Invite modal
+  // 9. Subtab state — driven by ?view=activity in the URL so deep-links and
+  // back-button navigation preserve the user's place. Defaults to "portfolios".
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const view: FriendsView =
+    searchParams?.get("view") === "activity" ? "activity" : "portfolios";
+  const setView = useCallback(
+    (next: FriendsView) => {
+      router.replace(next === "activity" ? "/friends?view=activity" : "/friends");
+    },
+    [router],
+  );
+
+  // 10. Activity events per shared portfolio. Subscribed only when the
+  // Activity subtab is active so the Portfolios subtab pays nothing.
+  const [eventsByPortfolio, setEventsByPortfolio] = useState<
+    Record<string, ActivityEvent[]>
+  >({});
+  useEffect(() => {
+    if (view !== "activity") return;
+    if (!shared) return;
+    const subs = shared
+      .filter((p) => portfolioKeys.has(p.id))
+      .map((p) =>
+        subscribeActivity(p.id, portfolioKeys.get(p.id)!, (events) => {
+          setEventsByPortfolio((prev) => ({ ...prev, [p.id]: events }));
+        }),
+      );
+    return () => subs.forEach((u) => u());
+  }, [view, shared, portfolioKeys]);
+
+  // Merge events across portfolios, newest-first.
+  const mergedEvents = useMemo(() => {
+    const all: ActivityEvent[] = [];
+    for (const list of Object.values(eventsByPortfolio)) all.push(...list);
+    all.sort((a, b) => b.occurredAt - a.occurredAt);
+    return all;
+  }, [eventsByPortfolio]);
+
+  // Actor display-name lookups for activity rows. Owner names are already
+  // resolved above for the friend section headers.
+  const actorUids = useMemo(
+    () => Array.from(new Set(mergedEvents.map((e) => e.actorUid))),
+    [mergedEvents],
+  );
+  const actorNames = useDisplayNamesForUids(actorUids);
+  const portfolioNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of shared ?? []) m.set(p.id, p.name);
+    return m;
+  }, [shared]);
+
+  // Group events by relative day for the section headers ("Today",
+  // "Yesterday", etc.). Empty buckets are dropped.
+  const dayGroups = useMemo(() => groupByDay(mergedEvents), [mergedEvents]);
+
+  // 11. Invite modal
   const [showInvite, setShowInvite] = useState(false);
 
   return (
@@ -285,7 +348,9 @@ export default function FriendsPage() {
           <h1 className="text-[22px] font-semibold tracking-tight text-fg">Friends</h1>
           {shared !== undefined && (
             <p className="mt-1 text-xs text-fg-mid tabular-nums">
-              {grouped.length} {grouped.length === 1 ? "friend" : "friends"} · {shared.length} {shared.length === 1 ? "portfolio" : "portfolios"} shared with you
+              {view === "activity"
+                ? "Recent moves from your network"
+                : `${grouped.length} ${grouped.length === 1 ? "friend" : "friends"} · ${shared.length} ${shared.length === 1 ? "portfolio" : "portfolios"} shared with you`}
             </p>
           )}
         </div>
@@ -297,7 +362,53 @@ export default function FriendsPage() {
         </button>
       </header>
 
-      {shared === undefined ? (
+      <TabBar
+        items={[
+          { id: "portfolios", label: "Portfolios" },
+          { id: "activity", label: "Activity" },
+        ]}
+        active={view}
+        onSelect={(id) => setView(id as FriendsView)}
+        className="mb-5"
+      />
+
+      {view === "activity" ? (
+        // Activity subtab — chronological feed, day-grouped
+        shared === undefined ? (
+          <div className="space-y-2">
+            {[0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="h-12 bg-bg-2 border border-line rounded-md animate-pulse"
+              />
+            ))}
+          </div>
+        ) : mergedEvents.length === 0 ? (
+          <p className="text-fg-mid">
+            No activity yet. As your friends buy, sell, or rebalance, their
+            moves will show up here.
+          </p>
+        ) : (
+          <div className="max-w-[640px]">
+            {dayGroups.map(({ day, events }) => (
+              <section key={day}>
+                <h2 className="text-[11px] tracking-[0.06em] uppercase font-semibold text-fg-fade mt-[18px] mb-2 first:mt-0">
+                  {day}
+                </h2>
+                {events.map((e) => (
+                  <ActivityRow
+                    key={e.id}
+                    event={e}
+                    actorDisplayName={actorNames[e.actorUid]}
+                    portfolioName={portfolioNameById.get(e.portfolioId) ?? ""}
+                    relativeTime={relTime(e.occurredAt)}
+                  />
+                ))}
+              </section>
+            ))}
+          </div>
+        )
+      ) : shared === undefined ? (
         <div className="bg-bg-2 border border-line rounded-card min-h-[140px] animate-pulse" />
       ) : grouped.length === 0 ? (
         <p className="text-fg-mid">No friends yet. Use the Invite button to get started.</p>
@@ -353,4 +464,50 @@ export default function FriendsPage() {
       {showInvite && <InviteModal onClose={() => setShowInvite(false)} />}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Activity-feed helpers (day grouping + relative time labels). Inline here
+// since this page is the only consumer; if a second page ever needs them
+// they'll get pulled into src/lib/activity-format.ts.
+// ---------------------------------------------------------------------------
+
+function relTime(ms: number): string {
+  const diff = Date.now() - ms;
+  const m = Math.floor(diff / 60_000);
+  if (m < 1) return "now";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d`;
+  if (d < 30) return `${Math.floor(d / 7)}w`;
+  return `${Math.floor(d / 30)}mo`;
+}
+
+function groupByDay(
+  events: ActivityEvent[],
+): { day: string; events: ActivityEvent[] }[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const weekAgo = new Date(today);
+  weekAgo.setDate(today.getDate() - 7);
+  const groups: Record<string, ActivityEvent[]> = {
+    Today: [],
+    Yesterday: [],
+    "This week": [],
+    Earlier: [],
+  };
+  for (const e of events) {
+    const d = new Date(e.occurredAt);
+    if (d >= today) groups.Today.push(e);
+    else if (d >= yesterday) groups.Yesterday.push(e);
+    else if (d >= weekAgo) groups["This week"].push(e);
+    else groups.Earlier.push(e);
+  }
+  return Object.entries(groups)
+    .filter(([, list]) => list.length > 0)
+    .map(([day, list]) => ({ day, events: list }));
 }

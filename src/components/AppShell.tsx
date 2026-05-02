@@ -10,7 +10,6 @@ import { usePortfolioRoute } from "@/lib/portfolio-route";
 
 const NAV = [
   { href: "/mine", label: "Mine" },
-  { href: "/activity", label: "Activity" },
   { href: "/friends", label: "Friends" },
   { href: "/me", label: "Me" },
 ] as const;
@@ -88,7 +87,7 @@ export function AppShell({
 
       {/* Bottom tab bar — below md */}
       <nav
-        className="md:hidden fixed bottom-0 inset-x-0 z-30 border-t border-line bg-bg-3 grid grid-cols-4 px-1 pt-1.5 pb-[max(env(safe-area-inset-bottom),6px)]"
+        className="md:hidden fixed bottom-0 inset-x-0 z-30 border-t border-line bg-bg-3 grid grid-cols-3 px-1 pt-1.5 pb-[max(env(safe-area-inset-bottom),6px)]"
         aria-label="Primary"
       >
         {NAV.map((item) => {
