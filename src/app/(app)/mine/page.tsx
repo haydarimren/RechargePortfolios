@@ -27,7 +27,6 @@ import {
   reconcileSharedWrappedKeys,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
-import { appendActivity } from "@/lib/activity-repo";
 import { seedPortfolioView } from "@/lib/views";
 import { PortfolioCard, PortfolioCardSummary } from "@/components/PortfolioCard";
 import { EmptyCardSlot } from "@/components/EmptyCardSlot";
@@ -386,24 +385,6 @@ export default function MinePage() {
     const newName = renameValue.trim();
     const portfolioRef = doc(db, "portfolios", renameTarget.id);
     await updateDoc(portfolioRef, { name: newName });
-    // Best-effort activity event for the rename.
-    try {
-      const key = portfolioKeys.get(renameTarget.id);
-      if (key) {
-        await appendActivity(
-          renameTarget.id,
-          {
-            kind: "rename",
-            occurredAt: Date.now(),
-            actorUid: user.uid,
-            newName,
-          },
-          key,
-        );
-      }
-    } catch {
-      // Activity is metadata. Swallow silently.
-    }
     setRenameTarget(null);
     setRenameValue("");
   };

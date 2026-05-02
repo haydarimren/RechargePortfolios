@@ -271,20 +271,15 @@ export default function TickerPage({
     try {
       // Carry forward the page's resolved Yahoo symbol so non-US tickers
       // (e.g. VUAA.L) keep their suffix on the new lot too.
-      await addHolding(
-        id,
-        portfolioKey,
-        {
-          symbol,
-          shares,
-          purchasePrice: price,
-          purchaseDate: addForm.purchaseDate,
-          createdAt: Date.now(),
-          side: addForm.side,
-          yahooSymbol,
-        },
-        user?.uid,
-      );
+      await addHolding(id, portfolioKey, {
+        symbol,
+        shares,
+        purchasePrice: price,
+        purchaseDate: addForm.purchaseDate,
+        createdAt: Date.now(),
+        side: addForm.side,
+        yahooSymbol,
+      });
       setAddForm({
         side: "BUY",
         shares: "",

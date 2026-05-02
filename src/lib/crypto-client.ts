@@ -421,26 +421,6 @@ export async function decryptHolding(
   return JSON.parse(new TextDecoder().decode(bytes)) as HoldingPlaintext;
 }
 
-// ---------- Activity event (encrypted under K_portfolio) -----------------
-
-import type { ActivityEventPayload } from "./activity-types";
-
-export async function encryptActivity(
-  event: ActivityEventPayload,
-  key: CryptoKey,
-): Promise<Ciphertext> {
-  const json = new TextEncoder().encode(JSON.stringify(event));
-  return aesGcmEncrypt(key, json as Uint8Array);
-}
-
-export async function decryptActivity(
-  cipher: Ciphertext,
-  key: CryptoKey,
-): Promise<ActivityEventPayload> {
-  const bytes = await aesGcmDecrypt(key, cipher);
-  return JSON.parse(new TextDecoder().decode(bytes)) as ActivityEventPayload;
-}
-
 // ---------- T212 secret (encrypted under master secret) ------------------
 
 export async function encryptT212Secret(

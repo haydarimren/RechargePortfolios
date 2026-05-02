@@ -61,7 +61,6 @@ import {
   wrapPortfolioKeyForRecipient,
   type HoldingPlaintext,
 } from "./crypto-client";
-import { appendActivity } from "./activity-repo";
 
 /** What we store inside `portfolios/{id}/wrappedKeys/{uid}`. */
 interface WrappedKeyDoc {
@@ -342,16 +341,11 @@ export function subscribeHoldings(
  * (everything except `createdAt` lives inside the encrypted payload).
  * Otherwise writes the legacy plaintext shape — only used for pre-Phase-2
  * portfolios that haven't been migrated yet.
- *
- * `actorUid` is optional — when supplied, a best-effort activity event is
- * appended after the holding write. Failures are silently dropped; they
- * must never block the primary write.
  */
 export async function addHolding(
   portfolioId: string,
   key: CryptoKey | null,
   plain: HoldingPlaintext & { createdAt: number },
-  actorUid?: string,
 ): Promise<void> {
   if (key) {
     // v2: importSource and t212OrderId go inside the encrypted payload
@@ -369,23 +363,6 @@ export async function addHolding(
       collection(db, "portfolios", portfolioId, "holdings"),
       docPayload,
     );
-    // Best-effort activity event — never blocks the holding write.
-    if (actorUid) {
-      try {
-        await appendActivity(
-          portfolioId,
-          {
-            kind: plain.side === "SELL" ? "sell" : "buy",
-            occurredAt: Date.now(),
-            actorUid,
-            symbol: plain.symbol,
-          },
-          key,
-        );
-      } catch {
-        // Activity is metadata. Swallow silently.
-      }
-    }
     return;
   }
   // Legacy path — pre-migration plaintext portfolios.

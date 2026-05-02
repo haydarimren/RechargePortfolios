@@ -6,7 +6,7 @@ import { onAuthStateChanged, User } from "firebase/auth";
 import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
-import { aggregateHoldings } from "@/lib/portfolio";
+import { aggregateHoldings, buildTradeLog } from "@/lib/portfolio";
 import { getQuotes, StockQuote } from "@/lib/finnhub";
 import { useEncryption } from "@/lib/use-encryption";
 import { getAllCachedPortfolioKeys, getUnlocked } from "@/lib/key-store";
@@ -14,7 +14,6 @@ import {
   loadPortfolioKeyWithRetry,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
-import { subscribeActivity } from "@/lib/activity-repo";
 import type { ActivityEvent } from "@/lib/activity-types";
 import { ActivityRow } from "@/components/ActivityRow";
 import { FriendPortfolioCard, FriendPortfolioCardSummary } from "@/components/FriendPortfolioCard";
@@ -295,31 +294,72 @@ export default function FriendsPage() {
     [router],
   );
 
-  // 10. Activity events per shared portfolio. Subscribed only when the
-  // Activity subtab is active so the Portfolios subtab pays nothing.
-  const [eventsByPortfolio, setEventsByPortfolio] = useState<
-    Record<string, ActivityEvent[]>
-  >({});
-  useEffect(() => {
-    if (view !== "activity") return;
-    if (!shared) return;
-    const subs = shared
-      .filter((p) => portfolioKeys.has(p.id))
-      .map((p) =>
-        subscribeActivity(p.id, portfolioKeys.get(p.id)!, (events) => {
-          setEventsByPortfolio((prev) => ({ ...prev, [p.id]: events }));
-        }),
-      );
-    return () => subs.forEach((u) => u());
-  }, [view, shared, portfolioKeys]);
+  // 10. Synthesize activity events from each shared portfolio's holdings.
+  // We replay the same buildTradeLog used by the Logbook tab and map each
+  // entry to an ActivityEvent. Nothing is persisted — the source of truth
+  // is the live holdings subscription, so the feed stays current as
+  // friends add/remove lots. Filtered to the last 30 days.
+  //
+  // Three event kinds emerge from synthesis:
+  //   buy               → side: BUY
+  //   sell              → side: SELL with full exit (afterWeight === 0)
+  //   allocation-change → side: SELL with partial exit (afterWeight > 0)
+  //
+  // For allocation-change we want the "was X% → Y%" framing, which needs
+  // each entry's BEFORE weight. We track per-symbol state by walking the
+  // log oldest-first, then re-sort newest-first at the end.
+  const ACTIVITY_WINDOW_DAYS = 30;
+  const mergedEvents = useMemo<ActivityEvent[]>(() => {
+    if (!shared) return [];
+    const cutoff = Date.now() - ACTIVITY_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const events: ActivityEvent[] = [];
+    for (const p of shared) {
+      const holdings = holdingsByPortfolio[p.id];
+      if (!holdings || holdings.length === 0) continue;
+      const log = buildTradeLog(holdings);
+      // buildTradeLog returns newest-first; reverse so we can track
+      // per-symbol BEFORE weights as we walk forward in time. Pre-cutoff
+      // entries still update the map so post-cutoff entries get correct
+      // before-values.
+      const oldestFirst = [...log].reverse();
+      const weightBefore = new Map<string, number>();
+      for (const entry of oldestFirst) {
+        const occurredAt = new Date(entry.date).getTime();
+        const before = weightBefore.get(entry.symbol) ?? 0;
+        const after = entry.symbolWeightAfter;
+        weightBefore.set(entry.symbol, after);
 
-  // Merge events across portfolios, newest-first.
-  const mergedEvents = useMemo(() => {
-    const all: ActivityEvent[] = [];
-    for (const list of Object.values(eventsByPortfolio)) all.push(...list);
-    all.sort((a, b) => b.occurredAt - a.occurredAt);
-    return all;
-  }, [eventsByPortfolio]);
+        if (occurredAt < cutoff) continue;
+
+        let kind: ActivityEvent["kind"];
+        if (entry.side === "BUY") {
+          kind = "buy";
+        } else if (after === 0) {
+          kind = "sell"; // full exit
+        } else {
+          kind = "allocation-change"; // partial sell
+        }
+
+        events.push({
+          id: `${p.id}:${entry.id}`,
+          portfolioId: p.id,
+          kind,
+          occurredAt,
+          actorUid: p.ownerId,
+          symbol: entry.symbol,
+          afterAllocationPct: after * 100,
+          ...(kind === "allocation-change"
+            ? { beforeAllocationPct: before * 100 }
+            : {}),
+          ...(entry.side === "SELL" && entry.realizedPct != null
+            ? { realizedPct: entry.realizedPct }
+            : {}),
+        });
+      }
+    }
+    events.sort((a, b) => b.occurredAt - a.occurredAt);
+    return events;
+  }, [shared, holdingsByPortfolio]);
 
   // Actor display-name lookups for activity rows. Owner names are already
   // resolved above for the friend section headers.

@@ -1,31 +1,22 @@
 "use client";
 
-import {
-  ArrowDown,
-  ArrowRight,
-  ArrowUp,
-  ArrowUpRight,
-  Pencil,
-  Percent,
-  Star,
-} from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp, Percent } from "lucide-react";
 import { InitialChip } from "./InitialChip";
 import type { ActivityEvent } from "@/lib/activity-types";
 
 type VerbDescriptor = {
-  Icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean; fill?: string; strokeWidth?: number }>;
+  Icon: React.ComponentType<{
+    className?: string;
+    "aria-hidden"?: boolean;
+    strokeWidth?: number;
+  }>;
   bg: string;
-  /** Whether the icon should render filled (e.g. milestone star). */
-  filled?: boolean;
 };
 
 const VERB: Record<ActivityEvent["kind"], VerbDescriptor> = {
-  "buy":               { Icon: ArrowUp,       bg: "bg-pos" },
-  "sell":              { Icon: ArrowDown,     bg: "bg-neg" },
-  "share":             { Icon: ArrowUpRight,  bg: "bg-accent" },
-  "rename":            { Icon: Pencil,        bg: "bg-[#a855f7]" },
-  "milestone":         { Icon: Star,          bg: "bg-[#f59e0b]", filled: true },
-  "allocation-change": { Icon: Percent,       bg: "bg-[#06b6d4]" },
+  buy: { Icon: ArrowUp, bg: "bg-pos" },
+  sell: { Icon: ArrowDown, bg: "bg-neg" },
+  "allocation-change": { Icon: Percent, bg: "bg-[#06b6d4]" },
 };
 
 export function ActivityRow({
@@ -44,16 +35,16 @@ export function ActivityRow({
   return (
     <div className="flex items-start gap-3 py-3 border-b border-line last:border-b-0">
       <div className="relative shrink-0">
-        <InitialChip uid={event.actorUid} displayName={actorDisplayName} size={30} />
+        <InitialChip
+          uid={event.actorUid}
+          displayName={actorDisplayName}
+          size={30}
+        />
         <span
           className={`absolute -right-0.5 -bottom-0.5 w-4 h-4 rounded-full inline-flex items-center justify-center text-white border-2 border-bg ${verb.bg}`}
           aria-hidden
         >
-          <VerbIcon
-            className="w-2.5 h-2.5"
-            strokeWidth={3}
-            fill={verb.filled ? "currentColor" : "none"}
-          />
+          <VerbIcon className="w-2.5 h-2.5" strokeWidth={3} />
         </span>
       </div>
       <div className="flex-1 min-w-0">
@@ -71,34 +62,86 @@ export function ActivityRow({
   );
 }
 
-function renderLine1(event: ActivityEvent, name: string | undefined): React.ReactNode {
+function renderLine1(
+  event: ActivityEvent,
+  name: string | undefined,
+): React.ReactNode {
   const actor = name ?? "Someone";
   switch (event.kind) {
-    case "buy":  return <><strong>{actor}</strong> bought <strong>{event.symbol}</strong></>;
-    case "sell": return <><strong>{actor}</strong> sold <strong>{event.symbol}</strong></>;
-    case "share":return <><strong>{actor}</strong> shared a portfolio</>;
-    case "rename":return <><strong>{actor}</strong> renamed a portfolio</>;
-    case "milestone": return <><strong>{actor}</strong> hit a milestone</>;
-    case "allocation-change": return <><strong>{actor}</strong> rebalanced <strong>{event.symbol}</strong></>;
+    case "buy":
+      return (
+        <>
+          <strong>{actor}</strong> bought <strong>{event.symbol}</strong>
+        </>
+      );
+    case "sell":
+      return (
+        <>
+          <strong>{actor}</strong> sold <strong>{event.symbol}</strong>
+        </>
+      );
+    case "allocation-change":
+      return (
+        <>
+          <strong>{actor}</strong> trimmed <strong>{event.symbol}</strong>
+        </>
+      );
   }
 }
 
-function renderLine2(event: ActivityEvent, portfolioName: string): React.ReactNode {
+function renderLine2(
+  event: ActivityEvent,
+  portfolioName: string,
+): React.ReactNode {
   switch (event.kind) {
     case "buy":
-    case "sell":
-      return event.afterAllocationPct != null
-        ? <>{portfolioName} · now <strong>{event.afterAllocationPct.toFixed(1)}%</strong> of port.</>
-        : <>{portfolioName}</>;
-    case "rename":
-      return <>&ldquo;{event.newName}&rdquo;</>;
-    case "share":
-      return <>{portfolioName}</>;
-    case "milestone":
-      return event.positionGainPctSnapshot != null
-        ? <>+{event.positionGainPctSnapshot.toFixed(1)}% · {portfolioName}</>
-        : <>{portfolioName}</>;
-    case "allocation-change":
+      return event.afterAllocationPct != null ? (
+        <>
+          {portfolioName} · now{" "}
+          <strong>{event.afterAllocationPct.toFixed(1)}%</strong> of port.
+        </>
+      ) : (
+        <>{portfolioName}</>
+      );
+    case "sell": {
+      // Full exit. Realized % shown when present.
+      const realized =
+        event.realizedPct != null ? (
+          <>
+            {" · "}
+            <span
+              className={
+                event.realizedPct >= 0 ? "text-pos" : "text-neg"
+              }
+            >
+              {event.realizedPct >= 0 ? "+" : ""}
+              {event.realizedPct.toFixed(1)}% realized
+            </span>
+          </>
+        ) : null;
+      return (
+        <>
+          {portfolioName} · full exit
+          {realized}
+        </>
+      );
+    }
+    case "allocation-change": {
+      // Partial sell — render "was X% → Y%". Realized % shown when present.
+      const realized =
+        event.realizedPct != null ? (
+          <>
+            {" · "}
+            <span
+              className={
+                event.realizedPct >= 0 ? "text-pos" : "text-neg"
+              }
+            >
+              {event.realizedPct >= 0 ? "+" : ""}
+              {event.realizedPct.toFixed(1)}% realized
+            </span>
+          </>
+        ) : null;
       return (
         <>
           was {event.beforeAllocationPct?.toFixed(0)}%{" "}
@@ -107,7 +150,9 @@ function renderLine2(event: ActivityEvent, portfolioName: string): React.ReactNo
             aria-hidden
           />{" "}
           {event.afterAllocationPct?.toFixed(0)}%
+          {realized}
         </>
       );
+    }
   }
 }

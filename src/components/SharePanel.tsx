@@ -19,7 +19,6 @@ import { X } from "lucide-react";
 import { db } from "@/lib/firebase";
 import { useDisplayName } from "@/lib/users";
 import { revokeFromUser, shareWithUser } from "@/lib/holdings-repo";
-import { appendActivity } from "@/lib/activity-repo";
 import { InitialChip } from "@/components/InitialChip";
 
 interface SharePanelProps {
@@ -74,21 +73,6 @@ export function SharePanel({
           ownerPrivateKey: encryption.ownerPrivateKey,
           ownerPublicKeyHex: encryption.ownerPublicKeyHex,
         });
-        // Best-effort activity event — never blocks the share write.
-        try {
-          await appendActivity(
-            portfolioId,
-            {
-              kind: "share",
-              occurredAt: Date.now(),
-              actorUid: ownerUid,
-              shareTargetUid: trimmed,
-            },
-            encryption.portfolioKey,
-          );
-        } catch {
-          // Activity is metadata. Swallow silently.
-        }
       } else {
         await updateDoc(doc(db, "portfolios", portfolioId), {
           sharedWith: arrayUnion(trimmed),
