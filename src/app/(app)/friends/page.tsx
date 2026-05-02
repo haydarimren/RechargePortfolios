@@ -20,7 +20,11 @@ import { FriendPortfolioCard, FriendPortfolioCardSummary } from "@/components/Fr
 import { InitialChip } from "@/components/InitialChip";
 import { InviteModal } from "@/components/InviteModal";
 import { TabBar } from "@/components/TabBar";
-import { useDisplayNamesForUids } from "@/lib/users";
+import {
+  bumpLastActivityViewAt,
+  fetchLastActivityViewAt,
+  useDisplayNamesForUids,
+} from "@/lib/users";
 import { MoreHorizontal, Plus } from "lucide-react";
 
 type FriendsView = "portfolios" | "activity";
@@ -294,6 +298,32 @@ export default function FriendsPage() {
     [router],
   );
 
+  // 9b. "Since you last looked" cutoff. Read on mount; the local value
+  // is intentionally frozen for the duration of the session so the
+  // divider position doesn't shift while the user is reading. We bump
+  // the persisted value (DB write) when they first open the Activity
+  // subtab — next session the cutoff moves forward.
+  const [lastVisit, setLastVisit] = useState<number>(0);
+  const bumpedRef = useRef(false);
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    fetchLastActivityViewAt(user.uid).then((v) => {
+      if (cancelled) return;
+      setLastVisit(v);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+  useEffect(() => {
+    if (view !== "activity") return;
+    if (!user) return;
+    if (bumpedRef.current) return;
+    bumpedRef.current = true;
+    void bumpLastActivityViewAt(user.uid);
+  }, [view, user]);
+
   // 10. Synthesize activity events from each shared portfolio's holdings.
   // We replay the same buildTradeLog used by the Logbook tab and map each
   // entry to an ActivityEvent. Nothing is persisted — the source of truth
@@ -378,6 +408,14 @@ export default function FriendsPage() {
   // "Yesterday", etc.). Empty buckets are dropped.
   const dayGroups = useMemo(() => groupByDay(mergedEvents), [mergedEvents]);
 
+  // Count events newer than the user's last activity-tab visit. Used for
+  // the subtab badge ("Activity (3)"); only meaningful when the user is
+  // NOT currently looking at the Activity subtab.
+  const unreadCount = useMemo(
+    () => mergedEvents.filter((e) => e.occurredAt > lastVisit).length,
+    [mergedEvents, lastVisit],
+  );
+
   // 11. Invite modal
   const [showInvite, setShowInvite] = useState(false);
 
@@ -405,7 +443,15 @@ export default function FriendsPage() {
       <TabBar
         items={[
           { id: "portfolios", label: "Portfolios" },
-          { id: "activity", label: "Activity" },
+          {
+            id: "activity",
+            label: "Activity",
+            // Only show count when the user hasn't entered the subtab yet
+            // — once they're on it, the divider does the new-vs-seen work.
+            ...(view !== "activity" && unreadCount > 0
+              ? { count: unreadCount }
+              : {}),
+          },
         ]}
         active={view}
         onSelect={(id) => setView(id as FriendsView)}
@@ -430,22 +476,45 @@ export default function FriendsPage() {
           </p>
         ) : (
           <div className="max-w-[640px]">
-            {dayGroups.map(({ day, events }) => (
-              <section key={day}>
-                <h2 className="text-[11px] tracking-[0.06em] uppercase font-semibold text-fg-fade mt-[18px] mb-2 first:mt-0">
-                  {day}
-                </h2>
-                {events.map((e) => (
-                  <ActivityRow
-                    key={e.id}
-                    event={e}
-                    actorDisplayName={actorNames[e.actorUid]}
-                    portfolioName={portfolioNameById.get(e.portfolioId) ?? ""}
-                    relativeTime={relTime(e.occurredAt)}
-                  />
-                ))}
-              </section>
-            ))}
+            {(() => {
+              // Walk events newest-first and emit a single "Since you last
+              // looked" divider before the first event with occurredAt
+              // older than the user's last activity-tab visit. If every
+              // event is new (or none are), the divider is suppressed.
+              let dividerRendered = false;
+              const showDivider = unreadCount > 0 && unreadCount < mergedEvents.length;
+              return dayGroups.map(({ day, events }) => (
+                <section key={day}>
+                  <h2 className="text-[11px] tracking-[0.06em] uppercase font-semibold text-fg-fade mt-[18px] mb-2 first:mt-0">
+                    {day}
+                  </h2>
+                  {events.map((e) => {
+                    const placeDivider =
+                      showDivider &&
+                      !dividerRendered &&
+                      e.occurredAt <= lastVisit;
+                    if (placeDivider) dividerRendered = true;
+                    return (
+                      <div key={e.id}>
+                        {placeDivider && (
+                          <div className="flex items-center gap-3 my-3 text-[11px] text-fg-fade font-medium uppercase tracking-[0.06em]">
+                            <span className="h-px flex-1 bg-line" aria-hidden />
+                            <span>Since you last looked</span>
+                            <span className="h-px flex-1 bg-line" aria-hidden />
+                          </div>
+                        )}
+                        <ActivityRow
+                          event={e}
+                          actorDisplayName={actorNames[e.actorUid]}
+                          portfolioName={portfolioNameById.get(e.portfolioId) ?? ""}
+                          relativeTime={relTime(e.occurredAt)}
+                        />
+                      </div>
+                    );
+                  })}
+                </section>
+              ));
+            })()}
           </div>
         )
       ) : shared === undefined ? (

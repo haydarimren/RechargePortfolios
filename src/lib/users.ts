@@ -116,6 +116,39 @@ export function useDisplayName(uid: string | null | undefined): string {
   return name;
 }
 
+/**
+ * Read the user's last "Activity tab opened at" timestamp. Used by the
+ * Friends page to compute the "since you last looked" divider and the
+ * unread-count badge on the Activity subtab. Returns 0 when missing
+ * (first ever visit) or when the doc isn't readable.
+ */
+export async function fetchLastActivityViewAt(uid: string): Promise<number> {
+  try {
+    const snap = await getDoc(doc(db, "users", uid));
+    if (!snap.exists()) return 0;
+    const data = snap.data() as { lastActivityViewAt?: number };
+    return typeof data.lastActivityViewAt === "number"
+      ? data.lastActivityViewAt
+      : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Bump `users/{uid}.lastActivityViewAt` to now. Best-effort — silently
+ * dropped on failure since it's a UX hint, not load-bearing.
+ */
+export async function bumpLastActivityViewAt(uid: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, "users", uid), {
+      lastActivityViewAt: Date.now(),
+    });
+  } catch {
+    // Ignore — divider/badge will eventually catch up on next reload.
+  }
+}
+
 export function useDisplayNamesForUids(uids: string[]): Record<string, string> {
   const [names, setNames] = useState<Record<string, string>>({});
   // Stable key so the effect doesn't re-run when array identity changes
