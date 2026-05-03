@@ -54,7 +54,7 @@ import {
   subscribeHoldings,
   updateHoldingFields,
 } from "@/lib/holdings-repo";
-import { encryptHolding } from "@/lib/crypto-client";
+import { encryptHolding, encryptJson } from "@/lib/crypto-client";
 import {
   touchLogbookView,
   touchPortfolioView,
@@ -700,11 +700,11 @@ export default function PortfolioPage({
         // critical for staying under T212's per-minute rate limit on
         // history/orders.
         //
-        // We match BOTH on `t212OrderId` (preferred — exact identity)
+        // We match BOTH on `brokerOrderId` (preferred — exact identity)
         // AND on shape (symbol + purchaseDate + shares — the
         // fallback used by the post-fetch dedup loop below). The
         // shape match catches holdings that were imported before
-        // we tracked t212OrderId; without it, the optimization
+        // we tracked brokerOrderId; without it, the optimization
         // would be nearly useless on legacy portfolios.
         const isOrderKnown = (args: {
           orderId: string;
@@ -713,11 +713,11 @@ export default function PortfolioPage({
           shares: number;
         }) => {
           for (const h of holdings) {
-            if (h.t212OrderId === args.orderId) return true;
+            if (h.brokerOrderId === args.orderId) return true;
           }
           const cleaned = cleanT212Symbol(args.rawTicker);
           for (const h of holdings) {
-            if (h.t212OrderId) continue; // covered by id check above
+            if (h.brokerOrderId) continue; // covered by id check above
             if (h.symbol !== cleaned) continue;
             if (h.purchaseDate !== args.purchaseDate) continue;
             if (Math.abs(h.shares - args.shares) > 0.0001) continue;
@@ -737,8 +737,8 @@ export default function PortfolioPage({
       // subscription. handleSync is recreated on every render, so the
       // closure captures the latest holdings — no stale-snapshot race.
       // Crucial that this is the DECODED shape: for v2 docs, the
-      // dedup-by-t212OrderId check below would always fail against the
-      // raw `getDocs` shape (t212OrderId lives inside the encrypted
+      // dedup-by-brokerOrderId check below would always fail against the
+      // raw `getDocs` shape (brokerOrderId lives inside the encrypted
       // payload there, not at the doc top level). That bug caused
       // every sync after the first to double-import every order.
       const decodedCurrent = holdings;
@@ -755,13 +755,13 @@ export default function PortfolioPage({
         const existing = decodedCurrent.find(
           (h) =>
             h.importSource === "trading212" &&
-            h.t212OrderId === order.id
+            h.brokerOrderId === order.id
         );
         const byShape = existing
           ? undefined
           : decodedCurrent.find(
               (h) =>
-                !h.t212OrderId &&
+                !h.brokerOrderId &&
                 h.symbol === order.symbol &&
                 h.purchaseDate === order.purchaseDate &&
                 Math.abs(h.shares - order.shares) < 0.0001
@@ -773,7 +773,7 @@ export default function PortfolioPage({
           // docs go through decrypt-merge-encrypt rather than naively
           // updating top-level fields that don't exist on ciphertext docs.
           //
-          // Also backfill t212OrderId on holdings that were matched by
+          // Also backfill brokerOrderId on holdings that were matched by
           // shape rather than by id — without this, the dedup-and-stop
           // optimization stays expensive forever on these holdings
           // (each shape lookup is O(holdings) instead of O(1)). After
@@ -787,7 +787,7 @@ export default function PortfolioPage({
           if (order.symbol && target.symbol !== order.symbol) {
             patch.symbol = order.symbol;
           }
-          if (!target.t212OrderId) patch.t212OrderId = order.id;
+          if (!target.brokerOrderId) patch.brokerOrderId = order.id;
           if (Object.keys(patch).length > 0) {
             await updateHoldingFields(id, target.id, portfolioKey, patch);
           }
@@ -803,7 +803,7 @@ export default function PortfolioPage({
           purchaseDate: order.purchaseDate,
           createdAt: Date.now(),
           importSource: provider,
-          t212OrderId: order.id,
+          brokerOrderId: order.id,
           side: order.side,
         };
         if (order.currency) plaintextShape.currency = order.currency;
@@ -811,7 +811,7 @@ export default function PortfolioPage({
         if (order.yahooSymbol) plaintextShape.yahooSymbol = order.yahooSymbol;
 
         if (portfolioKey) {
-          // v2 shape: importSource and t212OrderId go INSIDE the
+          // v2 shape: importSource and brokerOrderId go INSIDE the
           // encrypted payload along with every other field. The
           // Firestore doc top level only carries the envelope plus
           // createdAt and schemaVersion — nothing identifying the
@@ -827,7 +827,7 @@ export default function PortfolioPage({
               isin: order.isin,
               yahooSymbol: order.yahooSymbol,
               importSource: provider,
-              t212OrderId: order.id,
+              brokerOrderId: order.id,
             },
             portfolioKey,
           );
@@ -867,18 +867,32 @@ export default function PortfolioPage({
     } finally {
       setSyncLoading(null);
       try {
-        // syncLog used to record `provider: "trading212"`; that's gone
-        // now — the existence of `secrets/credentials` already implies a
-        // broker connection, and we don't need to broadcast which one in
-        // the diagnostic log.
-        await addDoc(collection(db, "portfolios", id, "syncLogs"), {
-          timestamp: Date.now(),
+        // syncLog body is encrypted under K_portfolio because `errors`
+        // strings can carry broker-named messages (e.g. "Trading212
+        // API error 429: ..."). Server stores ciphertext only; only
+        // the user with portfolio access can decrypt. Schema mirrors
+        // holdings: `{ payload, iv, createdAt, schemaVersion: 1 }`.
+        // For pre-migration plaintext portfolios (no key) we skip the
+        // write entirely rather than leak — these are rare, and an
+        // unrecorded sync diagnostic is preferable to an at-rest leak.
+        const createdAt = Date.now();
+        const payload = {
+          timestamp: createdAt,
           imported: buys + sells,
           buys,
           sells,
           skipped,
           errors,
-        });
+        };
+        if (portfolioKey) {
+          const ct = await encryptJson(payload, portfolioKey);
+          await addDoc(collection(db, "portfolios", id, "syncLogs"), {
+            payload: ct.payload,
+            iv: ct.iv,
+            createdAt,
+            schemaVersion: 1,
+          });
+        }
       } catch {
         // best-effort audit log
       }

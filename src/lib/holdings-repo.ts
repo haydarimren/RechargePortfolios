@@ -53,10 +53,13 @@ import type { Holding } from "./types";
 import {
   type Ciphertext,
   decryptHolding,
+  encryptBrokerCredential,
   encryptHolding,
+  encryptJson,
   exportPortfolioKey,
   generatePortfolioKey,
   importPublicKey,
+  inspectBrokerCredential,
   unwrapPortfolioKeyFromSender,
   wrapPortfolioKeyForRecipient,
   type HoldingPlaintext,
@@ -104,6 +107,11 @@ interface EncryptedHoldingDoc {
   /** v1 only — top-level lookup fields preserved during the original
    *  Phase 2 plaintext→ciphertext migration. v2 docs omit these. */
   importSource?: string;
+  /**
+   * v1 only legacy field name for the broker order id. Step 8 of
+   * `runEagerMigrations` renames this to `brokerOrderId` inside the
+   * encrypted payload.
+   */
   t212OrderId?: string;
 }
 
@@ -265,8 +273,21 @@ export async function decodeHolding(
       return null;
     }
   }
-  // Legacy plaintext doc — pass through.
-  return { id: snap.id, ...(d as Omit<Holding, "id">) };
+  // Legacy plaintext doc — pass through, mirroring the order-id field
+  // name. Top-level `t212OrderId` (legacy) and `brokerOrderId` (current)
+  // are both surfaced so callers reading either name see the value;
+  // mirrors the encrypted-doc behavior in `mergePlainAndPlaintextFields`.
+  // Without this, a still-plaintext portfolio's first sync would miss
+  // the dedup-and-stop optimization (the `holding.brokerOrderId` check
+  // would always be undefined).
+  const raw = d as Omit<Holding, "id">;
+  const orderId = raw.brokerOrderId ?? raw.t212OrderId;
+  return {
+    id: snap.id,
+    ...raw,
+    brokerOrderId: orderId,
+    t212OrderId: orderId,
+  };
 }
 
 function mergePlainAndPlaintextFields(
@@ -274,15 +295,29 @@ function mergePlainAndPlaintextFields(
   encrypted: EncryptedHoldingDoc,
   plain: HoldingPlaintext,
 ): Holding {
-  // For v2 docs, importSource/t212OrderId live inside the decrypted
-  // payload (i.e. on `plain`). For v1 docs they're at the top level on
-  // the encrypted envelope. Take from `plain` first, fall back to the
-  // legacy top-level — the eager migration removes the latter eventually.
+  // For v2 docs, importSource and the broker order id live inside the
+  // decrypted payload (i.e. on `plain`). For v1 docs they're at the
+  // top level on the encrypted envelope. Take from `plain` first, fall
+  // back to the legacy top-level — the eager migration removes the
+  // latter eventually.
+  //
+  // The order-id field was renamed `t212OrderId` → `brokerOrderId` in
+  // Step 8 of the multi-broker migration. Reader path resolves both
+  // names (payload first, then envelope) so unmigrated holdings still
+  // work, especially on shared portfolios where the owner hasn't
+  // logged in to run the migration yet.
+  const brokerOrderId =
+    plain.brokerOrderId
+    ?? plain.t212OrderId
+    ?? encrypted.t212OrderId;
   return {
     id,
     createdAt: encrypted.createdAt,
     importSource: plain.importSource ?? encrypted.importSource,
-    t212OrderId: plain.t212OrderId ?? encrypted.t212OrderId,
+    brokerOrderId,
+    // Mirror to the deprecated alias for any code path that hasn't
+    // updated yet. Cleaner than scattering `?? brokerOrderId` checks.
+    t212OrderId: brokerOrderId,
     symbol: plain.symbol,
     shares: plain.shares,
     purchasePrice: plain.purchasePrice,
@@ -402,10 +437,18 @@ export async function updateHoldingFields(
   // pulled into the merged plaintext so they survive the rewrite — and
   // then we drop them from the top level to upgrade the doc to v2 in one
   // go. For v2 docs, all fields already live inside `current`.
+  // Order-id field is normalized to `brokerOrderId` on the way out
+  // (Step 8 multi-broker rename).
   const current = await decryptHolding({ payload: d.payload, iv: d.iv }, key);
   const merged: HoldingPlaintext = { ...current, ...patch };
   if (!merged.importSource && d.importSource) merged.importSource = d.importSource;
-  if (!merged.t212OrderId && d.t212OrderId) merged.t212OrderId = d.t212OrderId;
+  const orderId =
+    merged.brokerOrderId
+    ?? merged.t212OrderId
+    ?? d.t212OrderId;
+  if (orderId) merged.brokerOrderId = orderId;
+  // Drop the deprecated alias so future reads only see brokerOrderId.
+  delete merged.t212OrderId;
   const ct = await encryptHolding(merged, key);
   await updateDoc(ref, {
     payload: ct.payload,
@@ -475,6 +518,7 @@ export async function migratePortfolioToEncrypted(
     // v2 shape: every holding field lives inside the encrypted payload.
     // The Firestore doc top level only carries `payload`, `iv`,
     // `createdAt`, `schemaVersion`. Nothing identifies the broker.
+    // Legacy `t212OrderId` is renamed to `brokerOrderId` on the way in.
     const plain: HoldingPlaintext = {
       symbol: data.symbol,
       shares: data.shares,
@@ -485,7 +529,7 @@ export async function migratePortfolioToEncrypted(
       isin: data.isin,
       yahooSymbol: data.yahooSymbol,
       importSource: data.importSource,
-      t212OrderId: data.t212OrderId,
+      brokerOrderId: data.t212OrderId,
     };
     const ct = await encryptHolding(plain, portfolioKey);
     const newShape: EncryptedHoldingDoc = {
@@ -538,11 +582,18 @@ export async function migrateHoldingsToSchemaV2(
       { payload: data.payload, iv: data.iv },
       portfolioKey,
     );
+    // While we're rewriting the encrypted payload anyway, normalize the
+    // order-id field name to `brokerOrderId` (Step 8). For v1 docs the
+    // legacy id may live at the envelope top-level; for newer-but-still-
+    // pre-rename docs it lives inside `current` under `t212OrderId`.
+    const orderId =
+      current.brokerOrderId ?? current.t212OrderId ?? data.t212OrderId;
     const upgraded: HoldingPlaintext = {
       ...current,
       importSource: current.importSource ?? data.importSource,
-      t212OrderId: current.t212OrderId ?? data.t212OrderId,
+      brokerOrderId: orderId,
     };
+    delete upgraded.t212OrderId;
     const ct = await encryptHolding(upgraded, portfolioKey);
     const newShape: EncryptedHoldingDoc = {
       payload: ct.payload,
@@ -631,21 +682,165 @@ export async function clearLegacySecretsProviderField(
 }
 
 /**
- * Eager-on-login orchestrator. Called once per session from the home page
- * when the user is unlocked. Walks every portfolio the user owns and
- * brings each up to date with all current schema migrations:
+ * Encrypt any leftover plaintext `syncLogs/*` docs in place, hiding the
+ * broker-named error strings ("Trading212 API error 429: ...") that
+ * previous versions wrote in the clear. Wraps each plaintext doc into
+ * the standard `{ payload, iv, createdAt, schemaVersion: 1 }` envelope
+ * under K_portfolio.
  *
- *   1. Phase 2 (existing): plaintext → ciphertext if needed.
- *   2. v1 → v2 upgrade for any encrypted holding still on v1.
+ * Idempotent: docs already in envelope shape are skipped.
+ * `createdAt` is hoisted to the top level (mirrors holdings) so any
+ * future "show me sync activity" surface can sort without decryption.
+ */
+export async function migrateSyncLogsToEncrypted(
+  portfolioId: string,
+  portfolioKey: CryptoKey,
+): Promise<{ migrated: number }> {
+  const col = collection(db, "portfolios", portfolioId, "syncLogs");
+  const snap = await getDocs(col);
+  let migrated = 0;
+  for (const d of snap.docs) {
+    const data = d.data();
+    if (isEncryptedDoc(data)) continue;
+    // Plaintext syncLogs predating this schema typically carried
+    // `timestamp` (the field name page.tsx historically wrote). Newer
+    // ones may use `createdAt`. As a last resort fall back to "now" —
+    // we'd rather have a slightly-wrong sort key than refuse to encrypt
+    // and leave the broker-named errors in plaintext indefinitely. In
+    // practice this branch never fires on real production data.
+    const createdAt =
+      typeof data.createdAt === "number"
+        ? data.createdAt
+        : typeof data.timestamp === "number"
+          ? data.timestamp
+          : Date.now();
+    const ct = await encryptJson(data, portfolioKey);
+    await setDoc(d.ref, {
+      payload: ct.payload,
+      iv: ct.iv,
+      createdAt,
+      schemaVersion: 1,
+    });
+    migrated++;
+  }
+  return { migrated };
+}
+
+/**
+ * Fold `brokerId: "trading212"` into existing credential payloads. Old
+ * payloads were a bare credential string with the broker identity
+ * implicit (T212 was the only option); new payloads are
+ * `{ brokerId, credential }` objects so multi-broker portfolios can
+ * tell each other apart after decryption.
+ *
+ * `decryptBrokerCredential` already handles both shapes on read; this
+ * migration normalizes the on-disk shape so future writes don't need
+ * to think about the old form.
+ *
+ * Idempotent: short-circuits when `inspectBrokerCredential` reports
+ * `origin: "canonical"`, so a re-run on already-migrated data costs
+ * one read + one decrypt — no Firestore write.
+ */
+export async function migrateCredentialsToBrokerIdShape(
+  portfolioId: string,
+  masterSecret: Uint8Array,
+): Promise<{ migrated: boolean }> {
+  const ref = doc(db, "portfolios", portfolioId, "secrets", "credentials");
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return { migrated: false };
+  const data = snap.data();
+  if (typeof data.payload !== "string" || typeof data.iv !== "string") {
+    return { migrated: false };
+  }
+  const cipher = { payload: data.payload, iv: data.iv };
+  let inspected: Awaited<ReturnType<typeof inspectBrokerCredential>>;
+  try {
+    inspected = await inspectBrokerCredential(cipher, masterSecret);
+  } catch {
+    // Decryption failed (wrong key, tampered, or corrupt). Leave the
+    // doc alone — the user can reconnect to overwrite it cleanly.
+    return { migrated: false };
+  }
+  if (inspected.origin === "canonical") {
+    // Already in the new shape — no rewrite needed.
+    return { migrated: false };
+  }
+  // Legacy bare-string credential — re-encrypt as the canonical object
+  // form. The IV rotates on this write; in-flight syncs that already
+  // grabbed the plaintext are unaffected (plaintext content unchanged).
+  const ct = await encryptBrokerCredential(inspected.payload, masterSecret);
+  await updateDoc(ref, {
+    payload: ct.payload,
+    iv: ct.iv,
+    updatedAt: Date.now(),
+  });
+  return { migrated: true };
+}
+
+/**
+ * Rename the encrypted-payload field `t212OrderId` → `brokerOrderId`
+ * for every holding in the portfolio that still uses the legacy name.
+ * Decrypts each holding, mutates the field name, re-encrypts, writes.
+ *
+ * Idempotent: holdings whose payload already has `brokerOrderId` (or
+ * has neither field) are skipped without a re-encrypt.
+ *
+ * Runs AFTER `migrateHoldingsToSchemaV2` (which folds the v1 envelope-
+ * level `t212OrderId` into the encrypted payload). Together they
+ * guarantee the live Firestore state names the field consistently.
+ */
+export async function migrateHoldingsRenameOrderIdField(
+  portfolioId: string,
+  portfolioKey: CryptoKey,
+): Promise<{ migrated: number }> {
+  const holdingsCol = collection(db, "portfolios", portfolioId, "holdings");
+  const snap = await getDocs(holdingsCol);
+  const batch = writeBatch(db);
+  let migrated = 0;
+  for (const d of snap.docs) {
+    const data = d.data();
+    if (!isEncryptedDoc(data)) continue;
+    const current = await decryptHolding(
+      { payload: data.payload, iv: data.iv },
+      portfolioKey,
+    );
+    if (current.brokerOrderId || !current.t212OrderId) continue;
+    const renamed: HoldingPlaintext = {
+      ...current,
+      brokerOrderId: current.t212OrderId,
+    };
+    delete renamed.t212OrderId;
+    const ct = await encryptHolding(renamed, portfolioKey);
+    batch.update(d.ref, { payload: ct.payload, iv: ct.iv });
+    migrated++;
+  }
+  if (migrated > 0) await batch.commit();
+  return { migrated };
+}
+
+/**
+ * Eager-on-login orchestrator. Called once per session from the (app)
+ * layout when the user is unlocked. Walks every portfolio the user
+ * owns and brings each up to date with all current schema migrations:
+ *
+ *   1. plaintext → ciphertext if needed.
+ *   2. v1 → v2 holding-shape upgrade.
  *   3. Legacy `secrets/trading212` → `secrets/credentials` rename.
  *   4. Drop the deprecated `connectedBrokers` field from portfolio docs.
+ *   5. Strip leftover plaintext `provider` field from credential docs.
+ *   6. Encrypt plaintext syncLogs (closes the broker-name leak in
+ *      `errors` strings).
+ *   7. Fold `brokerId: "trading212"` into legacy bare-string credential
+ *      payloads.
+ *   8. Rename `t212OrderId` → `brokerOrderId` inside every holding's
+ *      encrypted payload.
  *
- * All four are idempotent; users who're already current pay only a small
- * read cost (one getDoc per portfolio per migration check).
+ * All eight are idempotent; users who're already current pay only a
+ * small read cost (one getDoc per portfolio per migration check).
  *
  * Failures on individual portfolios are logged and don't stop the rest.
- * The next call to this function will retry — there's nothing destructive
- * about partial completion.
+ * The next call will retry — there's nothing destructive about partial
+ * completion.
  */
 export async function runEagerMigrations(
   uid: string,
@@ -653,6 +848,7 @@ export async function runEagerMigrations(
   privateKey: CryptoKey,
   publicKey: CryptoKey,
   publicKeyHex: string,
+  masterSecret: Uint8Array,
 ): Promise<void> {
   for (const p of ownedPortfolios) {
     try {
@@ -678,6 +874,16 @@ export async function runEagerMigrations(
       // secrets/credentials docs written by an earlier buggy version
       // of step 3. Pure cleanup; idempotent on docs that don't have it.
       await clearLegacySecretsProviderField(p.id);
+      // Step 6: encrypt any plaintext syncLogs. Closes the broker-
+      // name leak from older error strings.
+      await migrateSyncLogsToEncrypted(p.id, portfolioKey);
+      // Step 7: upgrade legacy bare-string credentials to the new
+      // `{ brokerId, credential }` payload shape.
+      await migrateCredentialsToBrokerIdShape(p.id, masterSecret);
+      // Step 8: rename `t212OrderId` → `brokerOrderId` inside every
+      // encrypted holding payload. Must run after Step 2 so that any
+      // v1-shape envelope-level field has already been folded inside.
+      await migrateHoldingsRenameOrderIdField(p.id, portfolioKey);
     } catch (err) {
       console.warn("eager migration failed for portfolio", p.id, err);
     }

@@ -57,6 +57,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         unlocked.privateKey,
         unlocked.publicKey,
         unlocked.publicKeyHex,
+        unlocked.masterSecret,
       ).catch(() => {
         migrationsRanRef.current = false;
       });
