@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useMemo, useState } from "react";
+import { use, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged, User } from "firebase/auth";
@@ -37,8 +37,9 @@ import { FriendStack } from "@/components/FriendStack";
 import { PerformancePill } from "@/components/PerformancePill";
 import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { TabBar } from "@/components/TabBar";
-import { fetchTrading212Orders as fetchTrading212OrdersClient } from "@/lib/brokers/trading212/sync";
 import { cleanT212Symbol } from "@/lib/brokers/trading212/symbols";
+import { BROKERS, SUPPORTED_BROKERS } from "@/lib/brokers/registry";
+import type { BrokerId } from "@/lib/brokers/ids";
 import type { ImportResult } from "@/lib/brokers/types";
 import {
   decryptT212Secret,
@@ -73,8 +74,11 @@ import {
 
 const BENCHMARKS = ["SPY", "QQQ"] as const;
 
-const BROKER_LABELS: Record<string, string> = { trading212: "Trading212" };
-const SUPPORTED_BROKERS = ["trading212"] as const;
+// Broker constants live in src/lib/brokers/registry.ts as the single
+// source of truth — imported above. The connection picker below maps
+// over `SUPPORTED_BROKERS` (alphabetical) and uses each adapter's
+// `displayName`, `credentialFields`, and `credentialHint` to render
+// itself.
 
 export default function PortfolioPage({
   params,
@@ -115,10 +119,12 @@ export default function PortfolioPage({
   });
 
   const [showImport, setShowImport] = useState(false);
-  const [connectProvider, setConnectProvider] = useState<string>(SUPPORTED_BROKERS[0]);
-  const [connectKey, setConnectKey] = useState("");
-  const [connectSecret, setConnectSecret] = useState("");
-  const [syncResults, setSyncResults] = useState<Record<string, { buys: number; sells: number; skipped: number }>>({});
+  const [connectProvider, setConnectProvider] = useState<BrokerId>(SUPPORTED_BROKERS[0]);
+  // Generic per-field connect form state: `{ key: "...", secret: "..." }`
+  // for both T212 and Alpaca today. Populated from the active adapter's
+  // `credentialFields`.
+  const [connectFields, setConnectFields] = useState<Record<string, string>>({});
+  const [syncResults, setSyncResults] = useState<Record<string, { buys: number; sells: number; skipped: number; partialFillsSkipped: number }>>({});
   const [syncLoading, setSyncLoading] = useState<string | null>(null);
   const [syncError, setSyncError] = useState("");
 
@@ -133,12 +139,12 @@ export default function PortfolioPage({
   );
   const [migrationError, setMigrationError] = useState("");
 
-  // Which brokers are currently connected on this portfolio. Derived from
-  // the existence of `secrets/credentials` (= some broker connected); we
-  // can't tell *which* broker without decrypting, but with single-broker
-  // support today we default to the only one we know about. Replaces the
-  // deprecated plaintext `connectedBrokers` array on the portfolio doc.
-  const [connectedProviders, setConnectedProviders] = useState<string[]>([]);
+  // Whether `secrets/credentials` exists for this portfolio. We only need
+  // the boolean — the broker identity comes from `lockedBroker` (derived
+  // from `holdings.find(h => h.importSource)`). Decrypting the credential
+  // doc just to know the broker name would be wasteful; holdings already
+  // tell us, and the credential is decrypted on demand inside `handleSync`.
+  const [hasCredential, setHasCredential] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -193,19 +199,15 @@ export default function PortfolioPage({
     return () => sub.unsubscribe();
   }, [user, id, portfolioKey]);
 
-  // Watch the credentials doc to populate `connectedProviders`. The doc's
-  // existence signals "a broker is connected"; with single-broker support
-  // today we map that to the only broker we know about. Multi-broker
-  // future moves provider discrimination INTO the encrypted payload,
-  // requiring a decrypt here.
+  // Watch the credential doc — only the boolean "does it exist?"
+  // matters here. Broker identity is supplied by `lockedBroker`
+  // (derived from holdings below).
   useEffect(() => {
     if (!user) return;
     return onSnapshot(
       doc(db, "portfolios", id, "secrets", "credentials"),
-      (snap) => {
-        setConnectedProviders(snap.exists() ? ["trading212"] : []);
-      },
-      () => setConnectedProviders([]),
+      (snap) => setHasCredential(snap.exists()),
+      () => setHasCredential(false),
     );
   }, [user, id]);
 
@@ -413,6 +415,42 @@ export default function PortfolioPage({
   }, [holdings]);
 
   const isOwner = !!(user && portfolio && portfolio.ownerId === user.uid);
+  // The portfolio's locked broker, if any. Once any holding has an
+  // `importSource`, the portfolio is forever locked to that broker —
+  // disconnect deletes the credential but the lock survives. Single
+  // source of truth for "which broker does this portfolio belong to";
+  // drives both the picker filter and the connected-broker label.
+  const lockedBroker = useMemo<BrokerId | null>(() => {
+    for (const h of holdings) {
+      if (h.importSource && h.importSource in BROKERS) {
+        return h.importSource as BrokerId;
+      }
+    }
+    return null;
+  }, [holdings]);
+  // Forward-compat safety: if a holding's `importSource` names a
+  // broker this build of the app doesn't know about (e.g. portfolio
+  // was synced on a newer build with a broker added later, then opened
+  // in a stale tab/cache), `lockedBroker` is null but we mustn't let
+  // the user reconnect to a different broker. Surfacing this state
+  // explicitly lets the modal hide the connect form and tell the
+  // user to update.
+  const hasUnknownImportSource = useMemo(
+    () => holdings.some(
+      (h) => !!h.importSource && !(h.importSource in BROKERS),
+    ),
+    [holdings],
+  );
+  // Always-current reference to `holdings` — used inside `handleSync`
+  // to re-derive the lock at submit time. Without this, `handleSync`'s
+  // closure can hold a stale `lockedBroker` from an earlier render
+  // (e.g. a concurrent sync in another tab added holdings between
+  // render and click). The ref is updated on every render via the
+  // effect below; reading `.current` always sees the latest.
+  const holdingsRef = useRef(holdings);
+  useEffect(() => {
+    holdingsRef.current = holdings;
+  }, [holdings]);
   // Publish ownership to the AppShell so the right tab (Mine vs Friends)
   // highlights while we're on this route. Pass `null` until the portfolio
   // doc has loaded so we don't wrongly flash the owner state.
@@ -606,8 +644,33 @@ export default function PortfolioPage({
     setShowAdd(false);
   };
 
-  const handleSync = async (provider: string, keyOverride?: string) => {
+  const handleSync = async (provider: BrokerId, keyOverride?: string) => {
     if (!portfolio || !user) return;
+    const adapter = BROKERS[provider];
+    if (!adapter) {
+      setSyncError(`Unsupported broker: ${provider}`);
+      return;
+    }
+    // Lock enforcement (UX rail; server can't see broker identity to
+    // enforce). Re-derive from the always-current `holdingsRef` so we
+    // catch any holdings added between this handler being created
+    // (during render) and being called (on click) — e.g. a concurrent
+    // sync in another tab. The render-closure `lockedBroker` is fine
+    // for the picker UI; the runtime check needs to be live.
+    const liveLocked = (() => {
+      for (const h of holdingsRef.current) {
+        if (h.importSource && h.importSource in BROKERS) {
+          return h.importSource as BrokerId;
+        }
+      }
+      return null;
+    })();
+    if (liveLocked && liveLocked !== provider) {
+      setSyncError(
+        `This portfolio is locked to ${BROKERS[liveLocked].displayName}.`,
+      );
+      return;
+    }
     // Single generic secrets doc per portfolio. The provider name (e.g.
     // "trading212") is stamped inside the encrypted payload, never on
     // the doc path.
@@ -686,52 +749,42 @@ export default function PortfolioPage({
         // existence of `secrets/credentials`. Eager migration cleans up
         // any leftover values.
       }
-      let result: ImportResult;
-      if (provider === "trading212") {
-        // All HTTP calls to the broker go through the dumb relay at
-        // /api/broker-proxy. Server sees the auth header for the
-        // duration of one request and never persists it.
-        //
-        // The `isOrderKnown` callback lets the client stop paginating
-        // as soon as a full page of orders is already imported — T212
-        // returns orders newest-first, so once we hit a fully-known
-        // page everything older is also already imported. Repeat
-        // syncs of an active account drop from N pages to 1-2,
-        // critical for staying under T212's per-minute rate limit on
-        // history/orders.
-        //
-        // We match BOTH on `brokerOrderId` (preferred — exact identity)
-        // AND on shape (symbol + purchaseDate + shares — the
-        // fallback used by the post-fetch dedup loop below). The
-        // shape match catches holdings that were imported before
-        // we tracked brokerOrderId; without it, the optimization
-        // would be nearly useless on legacy portfolios.
-        const isOrderKnown = (args: {
-          orderId: string;
-          rawTicker: string;
-          purchaseDate: string;
-          shares: number;
-        }) => {
-          for (const h of holdings) {
-            if (h.brokerOrderId === args.orderId) return true;
-          }
-          const cleaned = cleanT212Symbol(args.rawTicker);
-          for (const h of holdings) {
-            if (h.brokerOrderId) continue; // covered by id check above
-            if (h.symbol !== cleaned) continue;
-            if (h.purchaseDate !== args.purchaseDate) continue;
-            if (Math.abs(h.shares - args.shares) > 0.0001) continue;
-            return true;
-          }
-          return false;
-        };
-        result = await fetchTrading212OrdersClient(
-          plaintextKey,
-          isOrderKnown,
-        );
-      } else {
-        throw new Error(`Unsupported provider: ${provider}`);
-      }
+      // The `isOrderKnown` predicate stops pagination as soon as a full
+      // page of orders is already imported — adapters return orders
+      // newest-first, so once we hit a fully-known page everything older
+      // is also already imported. Repeat syncs drop from N pages to 1-2.
+      //
+      // Match BOTH on `brokerOrderId` (preferred — exact identity) AND
+      // on shape (symbol + purchaseDate + shares) for legacy holdings
+      // that predate broker-id tracking. The shape match uses a per-
+      // broker symbol normalizer for `rawTicker` so that broker-specific
+      // suffixes (T212's `_EQ`, etc.) are stripped before comparing
+      // against the holding's normalized `symbol`.
+      const normalizeRawTicker = (raw: string) =>
+        provider === "trading212" ? cleanT212Symbol(raw) : raw;
+      const isOrderKnown = (args: {
+        orderId: string;
+        rawTicker: string;
+        purchaseDate: string;
+        shares: number;
+      }) => {
+        for (const h of holdings) {
+          if (h.brokerOrderId === args.orderId) return true;
+        }
+        const cleaned = normalizeRawTicker(args.rawTicker);
+        for (const h of holdings) {
+          if (h.brokerOrderId) continue; // covered by id check above
+          if (h.symbol !== cleaned) continue;
+          if (h.purchaseDate !== args.purchaseDate) continue;
+          if (Math.abs(h.shares - args.shares) > 0.0001) continue;
+          return true;
+        }
+        return false;
+      };
+      const result: ImportResult = await adapter.fetchOrders({
+        credential: plaintextKey,
+        isOrderKnown,
+      });
 
       // Use the already-decoded `holdings` state from the live
       // subscription. handleSync is recreated on every render, so the
@@ -754,7 +807,7 @@ export default function PortfolioPage({
       for (const order of result.orders) {
         const existing = decodedCurrent.find(
           (h) =>
-            h.importSource === "trading212" &&
+            h.importSource === provider &&
             h.brokerOrderId === order.id
         );
         const byShape = existing
@@ -855,15 +908,52 @@ export default function PortfolioPage({
       await batch.commit();
       setSyncResults((prev) => ({
         ...prev,
-        [provider]: { buys, sells, skipped },
+        [provider]: {
+          buys,
+          sells,
+          skipped,
+          partialFillsSkipped: result.partialFillsSkipped,
+        },
       }));
-      setConnectKey("");
-      setConnectSecret("");
+      setConnectFields({});
       setShowImport(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Sync failed";
       errors.push(msg);
       setSyncError(msg);
+      // Wrong creds are the most common reason a fresh-paste sync
+      // fails. Clear the form so a passerby can't read the API
+      // secret off the user's screen, and so a retry-with-different-
+      // creds workflow doesn't have to manually wipe the inputs first.
+      // Only do this when the user just typed credentials in this
+      // attempt (`keyOverride`) — a re-sync of an already-connected
+      // broker has empty form fields anyway.
+      if (keyOverride) {
+        setConnectFields({});
+        // Atomic rollback: if the portfolio still has zero holdings
+        // imported (sync errored before we wrote any), delete the
+        // credential doc we just wrote. Without this we'd leave an
+        // orphaned credential whose broker identity can't be derived
+        // from holdings — a confusing intermediate state.
+        //
+        // We check the LIVE ref (not the render closure) because new
+        // holdings get committed in a single atomic batch downstream;
+        // either ALL of this sync's holdings are present (and the lock
+        // is established) or NONE are. So a fresh re-derivation here
+        // faithfully reflects whether this sync wrote anything before
+        // failing. If you ever split the batch, revisit this — the
+        // assumption breaks.
+        const lockedNow = holdingsRef.current.find(
+          (h) => h.importSource && h.importSource in BROKERS,
+        );
+        if (!lockedNow) {
+          try {
+            await deleteDoc(secretRef);
+          } catch {
+            // best-effort cleanup
+          }
+        }
+      }
     } finally {
       setSyncLoading(null);
       try {
@@ -899,18 +989,15 @@ export default function PortfolioPage({
     }
   };
 
-  const handleDisconnect = async (provider: string) => {
-    // Generic credentials doc; the provider name is/was stamped in the
+  const handleDisconnect = async () => {
+    // Generic credentials doc; the broker id is stamped inside the
     // encrypted payload, not the path. No portfolio-doc field to update
-    // — connectedBrokers is deprecated and connection state is now
-    // implicit in the existence of `secrets/credentials`.
+    // — connection state is implicit in the existence of
+    // `secrets/credentials`. The lock survives — `importSource` on
+    // existing holdings still constrains future reconnects to the
+    // same broker.
     await deleteDoc(doc(db, "portfolios", id, "secrets", "credentials"));
-    void provider; // signature kept for the existing call sites; unused now
-    setSyncResults((prev) => {
-      const next = { ...prev };
-      delete next[provider];
-      return next;
-    });
+    setSyncResults({});
   };
 
   if (loading) {
@@ -1005,7 +1092,7 @@ export default function PortfolioPage({
                 <button
                   onClick={() => setShowImport(true)}
                   className="inline-flex items-center gap-1.5 bg-transparent text-fg-dim border border-line-strong rounded-btn px-3 py-2 text-sm font-medium hover:border-accent hover:text-accent transition"
-                  title="Sync from Trading 212"
+                  title="Open import / sync"
                 >
                   <RefreshCw className="w-4 h-4" aria-hidden /> Sync
                 </button>
@@ -1539,33 +1626,36 @@ export default function PortfolioPage({
               </button>
             </div>
 
-            {/* Connected brokers */}
-            {connectedProviders.length > 0 && (
+            {/* Connected Broker — singular: one portfolio, one broker. */}
+            {hasCredential && lockedBroker && (
               <div className="mb-5">
-                <div className="label mb-3">Connected brokers</div>
+                <div className="label mb-3">Connected Broker</div>
                 <ul className="space-y-2">
-                  {connectedProviders.map((provider) => {
-                    const result = syncResults[provider];
-                    const isLoading = syncLoading === provider;
+                  {(() => {
+                    const result = syncResults[lockedBroker];
+                    const isLoading = syncLoading === lockedBroker;
                     return (
-                      <li key={provider} className="flex items-center gap-2 bg-bg-3 border border-line rounded-lg px-3 py-2.5">
+                      <li key={lockedBroker} className="flex items-center gap-2 bg-bg-3 border border-line rounded-lg px-3 py-2.5">
                         <span className="text-sm font-medium flex-1">
-                          {BROKER_LABELS[provider] ?? provider}
+                          {BROKERS[lockedBroker].displayName}
                         </span>
                         {result && (
                           <span className="text-xs text-fg-fade">
                             {result.buys} buys · {result.sells} sells · {result.skipped} already existed
+                            {result.partialFillsSkipped > 0 && (
+                              <> · {result.partialFillsSkipped} partial fills skipped</>
+                            )}
                           </span>
                         )}
                         <button
-                          onClick={() => handleSync(provider)}
+                          onClick={() => handleSync(lockedBroker)}
                           disabled={!!syncLoading}
                           className="text-xs btn-ghost px-2.5 py-1 disabled:opacity-40"
                         >
                           {isLoading ? "Syncing…" : "Sync"}
                         </button>
                         <button
-                          onClick={() => handleDisconnect(provider)}
+                          onClick={() => handleDisconnect()}
                           disabled={!!syncLoading}
                           className="text-fg-fade hover:text-neg transition disabled:opacity-40"
                           title="Disconnect"
@@ -1574,65 +1664,126 @@ export default function PortfolioPage({
                         </button>
                       </li>
                     );
-                  })}
+                  })()}
                 </ul>
               </div>
             )}
 
-            {/* Connect new broker */}
-            <div>
-              <div className="label mb-3">Connect a broker</div>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const credentials = `${connectKey.trim()}:${connectSecret.trim()}`;
-                  if (connectKey.trim() && connectSecret.trim()) handleSync(connectProvider, credentials);
-                }}
-                className="space-y-3"
-              >
-                <Field label="Provider">
-                  <select
-                    value={connectProvider}
-                    onChange={(e) => setConnectProvider(e.target.value)}
-                    className="field"
-                  >
-                    {SUPPORTED_BROKERS.filter(
-                      (b) => !connectedProviders.includes(b)
-                    ).map((b) => (
-                      <option key={b} value={b}>{BROKER_LABELS[b]}</option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="API key">
-                  <input
-                    value={connectKey}
-                    onChange={(e) => setConnectKey(e.target.value)}
-                    placeholder="Paste your API key"
-                    className="field font-mono text-xs"
-                    required
-                  />
-                </Field>
-                <Field label="API secret">
-                  <input
-                    value={connectSecret}
-                    onChange={(e) => setConnectSecret(e.target.value)}
-                    placeholder="Paste your API secret"
-                    className="field font-mono text-xs"
-                    required
-                  />
-                </Field>
-                <p className="text-xs text-fg-fade">
-                  Trading212: Settings → API (Beta) → Generate key
-                </p>
+            {/* Orphan-credential safety: should never happen with the
+                atomic-rollback in handleSync, but if it does (e.g. tab
+                closed mid-first-sync), let the user disconnect and
+                start over rather than be stuck.
+                Suppressed while a sync is in flight (`syncLoading`)
+                or has just failed (`syncError`) — both states are
+                transient orphan windows that the rollback resolves
+                within ~hundreds of ms; flashing this red panel during
+                them confuses the user about what just happened.
+                After the user dismisses syncError (by closing the
+                modal), this becomes visible for any genuinely orphaned
+                state. */}
+            {hasCredential && !lockedBroker && !syncLoading && !syncError && (
+              <div className="mb-5 border border-neg/40 bg-neg/10 text-neg text-xs rounded-md p-3 flex items-center gap-2">
+                <span className="flex-1">
+                  A credential is connected but no holdings have been
+                  imported yet. Disconnect and try again.
+                </span>
                 <button
-                  type="submit"
-                  disabled={!!syncLoading || !connectKey.trim() || !connectSecret.trim()}
-                  className="btn-primary w-full disabled:opacity-50"
+                  onClick={() => handleDisconnect()}
+                  className="btn-ghost px-2 py-1 text-xs"
                 >
-                  {syncLoading === connectProvider ? "Connecting…" : "Connect & Sync"}
+                  Disconnect
                 </button>
-              </form>
-            </div>
+              </div>
+            )}
+
+            {/* Forward-compat safety: portfolio has holdings tagged
+                with a broker this build doesn't know. Refuse to show
+                the connect form rather than risk accidentally mixing
+                brokers via a fall-through to the all-brokers picker. */}
+            {!hasCredential && hasUnknownImportSource && !lockedBroker && (
+              <div className="border border-line bg-bg-3 text-xs text-fg-dim rounded-md p-3">
+                This portfolio was synced with a broker this version of
+                the app doesn&apos;t recognize. Update the app to
+                reconnect.
+              </div>
+            )}
+
+            {/* Connect a broker — visible whenever no credential is
+                stored AND we recognize the broker (or there's no
+                broker yet). Picker is filtered to `lockedBroker` if
+                the portfolio is locked from prior holdings. */}
+            {!hasCredential && (lockedBroker || !hasUnknownImportSource) && (() => {
+              const activeProvider: BrokerId = lockedBroker ?? connectProvider;
+              const adapter = BROKERS[activeProvider];
+              const allFieldsFilled = adapter.credentialFields.every(
+                (f) => (connectFields[f.id] ?? "").trim().length > 0,
+              );
+              return (
+                <div>
+                  <div className="label mb-3">Connect a broker</div>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!allFieldsFilled) return;
+                      const credential = adapter.buildCredential(connectFields);
+                      handleSync(activeProvider, credential);
+                    }}
+                    className="space-y-3"
+                  >
+                    <Field label="Broker">
+                      {lockedBroker ? (
+                        // When the portfolio is locked, render the broker
+                        // name as a static label rather than a single-
+                        // option disabled <select> — clearer affordance
+                        // ("locked" vs "broken control").
+                        <div className="field flex items-center gap-2 text-sm">
+                          <span>{BROKERS[lockedBroker].displayName}</span>
+                          <span className="text-xs text-fg-fade">(locked)</span>
+                        </div>
+                      ) : (
+                        <select
+                          value={activeProvider}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            // Type guard: only accept values that are
+                            // genuinely known broker ids.
+                            if (v in BROKERS) setConnectProvider(v as BrokerId);
+                          }}
+                          className="field"
+                        >
+                          {SUPPORTED_BROKERS.map((b) => (
+                            <option key={b} value={b}>{BROKERS[b].displayName}</option>
+                          ))}
+                        </select>
+                      )}
+                    </Field>
+                    {adapter.credentialFields.map((f) => (
+                      <Field key={f.id} label={f.label}>
+                        <input
+                          value={connectFields[f.id] ?? ""}
+                          onChange={(e) =>
+                            setConnectFields((prev) => ({ ...prev, [f.id]: e.target.value }))
+                          }
+                          placeholder={f.placeholder}
+                          className="field font-mono text-xs"
+                          required
+                        />
+                      </Field>
+                    ))}
+                    <p className="text-xs text-fg-fade">
+                      {adapter.credentialHint}
+                    </p>
+                    <button
+                      type="submit"
+                      disabled={!!syncLoading || !allFieldsFilled}
+                      className="btn-primary w-full disabled:opacity-50"
+                    >
+                      {syncLoading === activeProvider ? "Connecting…" : "Connect & Sync"}
+                    </button>
+                  </form>
+                </div>
+              );
+            })()}
 
             {syncError && (
               <div className="mt-4 border border-neg/40 bg-neg/10 text-neg text-sm rounded-md p-3">

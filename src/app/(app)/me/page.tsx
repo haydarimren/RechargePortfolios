@@ -362,10 +362,10 @@ export default function MePage() {
 
         <MeSettingsSection title="Connections">
           <MeSettingsRow
-            name="Trading 212"
-            description="Sync your Invest / ISA positions. API key is encrypted in your browser."
+            name="Brokers"
+            description="Manage broker connections inside each portfolio. API keys are encrypted in your browser."
             right={
-              <span className="text-xs text-fg-mid">Manage in portfolio</span>
+              <span className="text-xs text-fg-mid">Manage in Mine</span>
             }
             onClick={() => router.push("/mine")}
           />
