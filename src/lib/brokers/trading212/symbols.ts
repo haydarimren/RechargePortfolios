@@ -1,4 +1,14 @@
 /**
+ * Trading 212-specific symbol normalization. T212's tickers carry exchange
+ * suffixes (`_US_EQ`, `_EQ`) and lowercase exchange-letter hints
+ * (`VUAAl_EQ` for London) that need stripping/translating before they can
+ * be used with Yahoo Finance for price lookups.
+ *
+ * Other brokers (e.g. Alpaca) have much simpler ticker conventions and
+ * have their own `symbols.ts`.
+ */
+
+/**
  * Strip Trading212's exchange/suffix segments from a ticker.
  * Loops the regex so multi-segment suffixes like `_US_EQ` or `_ABC_EQ` are
  * fully stripped: `AAPL_US_EQ` -> `AAPL`, `XYZ_ABC_EQ` -> `XYZ`.

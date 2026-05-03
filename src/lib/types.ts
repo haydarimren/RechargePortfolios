@@ -25,6 +25,21 @@ export interface Holding {
   createdAt: number;
   importSource?: string;
   currency?: string;
+  /**
+   * Stable order id from the source broker — used by sync to dedup.
+   * Broker-agnostic name; was `t212OrderId` before the multi-broker
+   * migration. Reads accept both names (back-compat); writes always
+   * use `brokerOrderId`.
+   */
+  brokerOrderId?: string;
+  /**
+   * @deprecated read-only fallback for unmigrated holdings. Mirrored
+   * from `brokerOrderId` by `mergePlainAndPlaintextFields`. Once every
+   * call site reads `brokerOrderId` (audit grep should return zero hits
+   * for `t212OrderId` outside crypto-client.ts/holdings-repo.ts back-
+   * compat paths), this field can be deleted in a single follow-up
+   * commit. Same applies to `HoldingPlaintext.t212OrderId`.
+   */
   t212OrderId?: string;
   /**
    * Transaction side. `undefined` is treated as "BUY" so pre-existing

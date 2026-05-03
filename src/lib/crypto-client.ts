@@ -400,6 +400,19 @@ export interface HoldingPlaintext {
   side?: "BUY" | "SELL";
   importSource?: string;
   currency?: string;
+  /**
+   * Broker-agnostic stable order id from the source broker (formerly
+   * `t212OrderId` — renamed in the multi-broker migration so the field
+   * works for Alpaca, IBKR, etc. Reader path falls back to
+   * `t212OrderId` for unmigrated holdings until the eager migration
+   * completes.
+   */
+  brokerOrderId?: string;
+  /**
+   * @deprecated Use `brokerOrderId`. Kept on the type so legacy
+   * payloads still round-trip through encrypt/decrypt. Migration
+   * Step 8 renames this to `brokerOrderId` in place.
+   */
   t212OrderId?: string;
   isin?: string;
   yahooSymbol?: string;
@@ -421,21 +434,141 @@ export async function decryptHolding(
   return JSON.parse(new TextDecoder().decode(bytes)) as HoldingPlaintext;
 }
 
-// ---------- T212 secret (encrypted under master secret) ------------------
+// ---------- generic JSON-under-portfolio-key envelope --------------------
+// Used by syncLogs and any other per-portfolio JSON record we want
+// encrypted at rest. Same crypto primitives as `encryptHolding` but
+// the type is generic. Holdings keep their dedicated wrapper because
+// the schema versioning + per-doc shape lives in holdings-repo.
+
+export async function encryptJson(
+  value: unknown,
+  key: CryptoKey,
+): Promise<Ciphertext> {
+  const json = new TextEncoder().encode(JSON.stringify(value));
+  return aesGcmEncrypt(key, json as Uint8Array);
+}
+
+export async function decryptJson<T = unknown>(
+  cipher: Ciphertext,
+  key: CryptoKey,
+): Promise<T> {
+  const bytes = await aesGcmDecrypt(key, cipher);
+  return JSON.parse(new TextDecoder().decode(bytes)) as T;
+}
+
+// ---------- broker credential (encrypted under master secret) ------------
+// Schema: encrypted payload is a JSON object `{ brokerId, credential }`.
+// Legacy payloads were a bare credential string with broker identity
+// implicit ("trading212"). The decrypt path accepts both shapes; the
+// encrypt path always emits the new object shape. Migration Step 7
+// rewrites legacy docs in place.
+
+export interface BrokerCredentialPayload {
+  brokerId: string;
+  credential: string;
+}
+
+export async function encryptBrokerCredential(
+  payload: BrokerCredentialPayload,
+  masterSecret: Uint8Array,
+): Promise<Ciphertext> {
+  // Reuses the legacy "t212-secret" HKDF info string so already-
+  // encrypted credential docs decrypt without a key rotation. The
+  // string is just a labeling parameter; renaming it would invalidate
+  // every existing user's credential doc.
+  const key = await deriveAesKeyFromMaster(masterSecret, "t212-secret");
+  const json = new TextEncoder().encode(JSON.stringify(payload));
+  return aesGcmEncrypt(key, json as Uint8Array);
+}
+
+/**
+ * Decrypt a credential cipher and report which on-disk shape it had.
+ * `origin: "canonical"` means the inner JSON was already
+ * `{ brokerId, credential }`; `origin: "legacy"` means it was a bare
+ * credential string from before the multi-broker fold (treated as
+ * `brokerId: "trading212"`). Migrations use this to short-circuit
+ * already-canonical docs without an extra round-trip.
+ */
+export async function inspectBrokerCredential(
+  cipher: Ciphertext,
+  masterSecret: Uint8Array,
+): Promise<{ payload: BrokerCredentialPayload; origin: "canonical" | "legacy" }> {
+  const key = await deriveAesKeyFromMaster(masterSecret, "t212-secret");
+  const bytes = await aesGcmDecrypt(key, cipher);
+  const text = new TextDecoder().decode(bytes);
+  // New shape: JSON object with brokerId. Legacy: bare credential string.
+  // Detect by attempting JSON.parse and checking shape.
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (
+      parsed !== null
+      && typeof parsed === "object"
+      && typeof (parsed as { brokerId?: unknown }).brokerId === "string"
+      && typeof (parsed as { credential?: unknown }).credential === "string"
+    ) {
+      return {
+        payload: parsed as BrokerCredentialPayload,
+        origin: "canonical",
+      };
+    }
+  } catch {
+    // Fall through to legacy treatment.
+  }
+  return {
+    payload: { brokerId: "trading212", credential: text },
+    origin: "legacy",
+  };
+}
+
+export async function decryptBrokerCredential(
+  cipher: Ciphertext,
+  masterSecret: Uint8Array,
+): Promise<BrokerCredentialPayload> {
+  return (await inspectBrokerCredential(cipher, masterSecret)).payload;
+}
+
+// ---------- T212 secret (legacy aliases — kept for transition) -----------
+// These wrappers preserve the pre-multi-broker function names so any
+// in-flight branches don't break during the migration window. Internal
+// callers should prefer `encryptBrokerCredential`/`decryptBrokerCredential`.
+// Once all callers move over, these can be deleted.
 
 export async function encryptT212Secret(
   secret: string,
   masterSecret: Uint8Array,
 ): Promise<Ciphertext> {
-  const key = await deriveAesKeyFromMaster(masterSecret, "t212-secret");
-  return aesGcmEncrypt(key, new TextEncoder().encode(secret) as Uint8Array);
+  return encryptBrokerCredential(
+    { brokerId: "trading212", credential: secret },
+    masterSecret,
+  );
 }
 
 export async function decryptT212Secret(
   cipher: Ciphertext,
   masterSecret: Uint8Array,
 ): Promise<string> {
+  const { credential } = await decryptBrokerCredential(cipher, masterSecret);
+  return credential;
+}
+
+// ---------- test-only -----------------------------------------------------
+//
+// These exports exist to let the migration test suite construct the
+// genuinely-legacy on-disk shape (a bare credential string, not the
+// canonical {brokerId, credential} object). Do not call from production
+// code — `encryptBrokerCredential` is the only correct write path.
+
+/**
+ * @internal Test-only. Reproduces the pre-multi-broker write shape:
+ * the AES-GCM-encrypted bytes are the bare credential string, not
+ * a JSON object. Lets tests verify that `inspectBrokerCredential`
+ * and the migration both correctly handle ciphertexts produced by
+ * older versions of the app.
+ */
+export async function __testOnlyEncryptLegacyBareCredential(
+  bareString: string,
+  masterSecret: Uint8Array,
+): Promise<Ciphertext> {
   const key = await deriveAesKeyFromMaster(masterSecret, "t212-secret");
-  const bytes = await aesGcmDecrypt(key, cipher);
-  return new TextDecoder().decode(bytes);
+  return aesGcmEncrypt(key, new TextEncoder().encode(bareString) as Uint8Array);
 }

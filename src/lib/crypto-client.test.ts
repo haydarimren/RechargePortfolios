@@ -20,8 +20,14 @@ import {
   unwrapPortfolioKeyFromSender,
   encryptHolding,
   decryptHolding,
+  encryptJson,
+  decryptJson,
   encryptT212Secret,
   decryptT212Secret,
+  encryptBrokerCredential,
+  decryptBrokerCredential,
+  inspectBrokerCredential,
+  __testOnlyEncryptLegacyBareCredential,
 } from "./crypto-client";
 
 describe("hex helpers", () => {
@@ -199,7 +205,7 @@ describe("holding encryption", () => {
       purchaseDate: "2024-03-15",
       side: "BUY" as const,
       currency: "USD",
-      t212OrderId: "abc123",
+      brokerOrderId: "abc123",
     };
     const ct = await encryptHolding(plain, key);
     const recovered = await decryptHolding(ct, key);
@@ -252,5 +258,114 @@ describe("T212 secret encryption", () => {
     const m2 = generateMasterSecret();
     const ct = await encryptT212Secret("hello", m1);
     await expect(decryptT212Secret(ct, m2)).rejects.toThrow();
+  });
+});
+
+describe("encryptJson / decryptJson", () => {
+  it("round-trips arbitrary JSON values under a portfolio key", async () => {
+    const key = await generatePortfolioKey();
+    const value = {
+      timestamp: 1234567890,
+      buys: 3,
+      sells: 1,
+      errors: ["broker API error 429"],
+      nested: { ok: true, items: [1, 2, 3] },
+    };
+    const ct = await encryptJson(value, key);
+    expect(await decryptJson(ct, key)).toEqual(value);
+  });
+
+  it("round-trips primitive values too", async () => {
+    const key = await generatePortfolioKey();
+    expect(await decryptJson(await encryptJson("hello", key), key)).toBe("hello");
+    expect(await decryptJson(await encryptJson(42, key), key)).toBe(42);
+    expect(await decryptJson(await encryptJson(null, key), key)).toBe(null);
+  });
+});
+
+describe("broker credential encryption", () => {
+  it("round-trips the new {brokerId, credential} shape", async () => {
+    const master = generateMasterSecret();
+    const ct = await encryptBrokerCredential(
+      { brokerId: "alpaca", credential: "PKABC:SECRET" },
+      master,
+    );
+    expect(await decryptBrokerCredential(ct, master)).toEqual({
+      brokerId: "alpaca",
+      credential: "PKABC:SECRET",
+    });
+  });
+
+  it("decrypts a genuinely-legacy bare-string credential as trading212", async () => {
+    // Reproduces the pre-multi-broker on-disk shape via the test-only
+    // primitive. The new decrypt path must still surface it as a
+    // canonical {brokerId, credential} object — that's the migration's
+    // forward-compat guarantee.
+    const master = generateMasterSecret();
+    const ct = await __testOnlyEncryptLegacyBareCredential(
+      "legacy-key:legacy-secret",
+      master,
+    );
+    expect(await decryptBrokerCredential(ct, master)).toEqual({
+      brokerId: "trading212",
+      credential: "legacy-key:legacy-secret",
+    });
+  });
+
+  it("decryptT212Secret still returns the bare credential string for back-compat", async () => {
+    const master = generateMasterSecret();
+    // Even when the underlying payload is the new object shape, the
+    // legacy wrapper must keep returning the credential half so any
+    // call site that hasn't been updated still works.
+    const ct = await encryptBrokerCredential(
+      { brokerId: "trading212", credential: "key:secret" },
+      master,
+    );
+    expect(await decryptT212Secret(ct, master)).toBe("key:secret");
+  });
+
+  it("fails under a different master secret", async () => {
+    const m1 = generateMasterSecret();
+    const m2 = generateMasterSecret();
+    const ct = await encryptBrokerCredential(
+      { brokerId: "trading212", credential: "x:y" },
+      m1,
+    );
+    await expect(decryptBrokerCredential(ct, m2)).rejects.toThrow();
+  });
+
+  it("inspectBrokerCredential reports origin: canonical for new payloads", async () => {
+    const master = generateMasterSecret();
+    const ct = await encryptBrokerCredential(
+      { brokerId: "alpaca", credential: "PK:SK" },
+      master,
+    );
+    const inspected = await inspectBrokerCredential(ct, master);
+    expect(inspected.origin).toBe("canonical");
+    expect(inspected.payload).toEqual({ brokerId: "alpaca", credential: "PK:SK" });
+  });
+
+  it("inspectBrokerCredential reports origin: legacy for bare-string payloads", async () => {
+    const master = generateMasterSecret();
+    const ct = await __testOnlyEncryptLegacyBareCredential(
+      "legacy-key:legacy-secret",
+      master,
+    );
+    const inspected = await inspectBrokerCredential(ct, master);
+    expect(inspected.origin).toBe("legacy");
+    expect(inspected.payload).toEqual({
+      brokerId: "trading212",
+      credential: "legacy-key:legacy-secret",
+    });
+  });
+
+  it("encryptT212Secret upgrades-on-write — its output is canonical, not legacy", async () => {
+    // Confirms the deliberate behavior of the legacy wrapper: it now
+    // writes the new shape. Means once this code ships, no fresh writes
+    // produce the legacy form anywhere.
+    const master = generateMasterSecret();
+    const ct = await encryptT212Secret("k:s", master);
+    const inspected = await inspectBrokerCredential(ct, master);
+    expect(inspected.origin).toBe("canonical");
   });
 });

@@ -9,23 +9,25 @@
  *
  *   1. Verify the caller has a valid Firebase ID token. Stops random
  *      internet traffic from using us as a free relay.
- *   2. Forward the call to the broker with the auth header the client
- *      supplied.
- *   3. Return the response untouched. Don't log bodies, don't persist
+ *   2. Look up `brokerId` in the server-side registry to pick the
+ *      outbound base URL, allowed path prefix, and auth-header builder.
+ *   3. Forward the call with the resulting headers.
+ *   4. Return the response untouched. Don't log bodies, don't persist
  *      anything.
  *
- * The route name and request body are deliberately broker-agnostic
- * (`/api/broker-proxy`, body field `auth` rather than `t212Auth`) so
- * Vercel access logs and HTTP debuggers don't broadcast which broker
- * the user is syncing from. The actual outbound destination is
- * hardcoded server-side because that's the SSRF guard — letting the
- * client pick the URL would let any user with a Firebase token use us
+ * The route name is broker-agnostic so Vercel access logs and HTTP
+ * debuggers don't broadcast which broker a request is going to. The
+ * `brokerId` field in the request body is ephemeral — used only for
+ * outbound routing, never persisted, never logged.
+ *
+ * The destination allowlist lives in `./brokers.ts` (server-only). Letting
+ * the client pick the URL would let any user with a Firebase token use us
  * as an open HTTP forwarder.
  *
- * The auth header is supplied per-request by the browser, which has
- * just decrypted it from the user's master-secret-wrapped Firestore
- * doc. The server holds it in memory only for the duration of one
- * HTTPS round trip — same model as Bitwarden's "send" feature.
+ * The auth header is supplied per-request by the browser, which has just
+ * decrypted it from the user's master-secret-wrapped Firestore doc. The
+ * server holds it in memory only for the duration of one HTTPS round
+ * trip — same model as Bitwarden's "send" feature.
  *
  * Firebase ID-token verification uses Google's identity toolkit REST
  * endpoint with our public Firebase Web API key, avoiding a
@@ -34,28 +36,16 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-
-// Outbound destination. Hardcoded server-side as the SSRF guard. If we
-// ever support a second broker, this becomes a per-request switch keyed
-// by an opaque identifier in the request body — but the destination
-// allowlist still lives here, in code, never under client control.
-const OUTBOUND_BASE = "https://live.trading212.com";
+import { SERVER_BROKERS, isServerBrokerId } from "./brokers";
 
 const FIREBASE_API_KEY = "AIzaSyAQgpOsdm8XjVeWYvahfhH7OdSeRptci7o";
 
-// Restrict the proxy to the broker's documented API root so a
-// compromised auth token can't steer us at internal admin endpoints on
-// the same host.
-const ALLOWED_PATH_PREFIX = "/api/v0/";
-
-// We allow GET-shaped browses only. Read-only against the broker; if
-// we ever need POST/DELETE we'll add a per-method allowlist.
-const ALLOWED_METHODS = new Set(["GET"]);
-
 interface ProxyRequestBody {
-  /** Broker auth credential (e.g. for T212, a `key:secret` pair). */
+  /** Registry key for the broker — `trading212`, `alpaca`, etc. */
+  brokerId: string;
+  /** Broker auth credential (shape varies by broker; e.g. `key:secret`). */
   auth: string;
-  /** Path under the broker's API, e.g. "/api/v0/equity/history/orders?limit=50". */
+  /** Path under the broker's API. Must start with the broker's allowed prefix. */
   path: string;
   method?: string;
 }
@@ -105,26 +95,60 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: "bad request body" }, { status: 400 });
   }
+
+  if (!isServerBrokerId(body.brokerId)) {
+    return NextResponse.json({ error: "unknown broker" }, { status: 400 });
+  }
+  const broker = SERVER_BROKERS[body.brokerId];
+
   if (
     typeof body.path !== "string" ||
-    !body.path.startsWith(ALLOWED_PATH_PREFIX) ||
     typeof body.auth !== "string" ||
     body.auth.length < 8
   ) {
     return NextResponse.json({ error: "bad proxy params" }, { status: 400 });
   }
+
+  // Build and validate the outbound URL with the WHATWG parser so that
+  // `..` segments are normalized BEFORE the prefix check. A naive
+  // string-prefix check on the raw `path` would let
+  // `/api/v0/../../internal/admin` slip through — the prefix matches,
+  // but the actual request would resolve to an unintended endpoint on
+  // the same host. We also pin the resolved origin against the broker's
+  // base, so that an injected absolute URL like
+  // `https://evil.com/api/v0/...` can't redirect us to a foreign host
+  // even if it happens to match the prefix string-wise.
+  let outboundUrl: URL;
+  try {
+    outboundUrl = new URL(body.path, broker.base);
+  } catch {
+    return NextResponse.json({ error: "bad proxy params" }, { status: 400 });
+  }
+  const baseOrigin = new URL(broker.base).origin;
+  if (
+    outboundUrl.origin !== baseOrigin
+    || !outboundUrl.pathname.startsWith(broker.pathPrefix)
+  ) {
+    return NextResponse.json({ error: "bad proxy params" }, { status: 400 });
+  }
+
   const method = (body.method ?? "GET").toUpperCase();
-  if (!ALLOWED_METHODS.has(method)) {
+  if (!broker.methods.has(method)) {
     return NextResponse.json({ error: "method not allowed" }, { status: 405 });
   }
 
-  // Forward to the broker. We translate the user-supplied `key:secret`
-  // into the HTTP Basic auth header. The server sees this in memory for
-  // the duration of this fetch — never written anywhere.
-  const basic = Buffer.from(body.auth).toString("base64");
-  const upstreamRes = await fetch(`${OUTBOUND_BASE}${body.path}`, {
+  let headers: Record<string, string>;
+  try {
+    headers = broker.auth(body.auth);
+  } catch {
+    return NextResponse.json({ error: "bad credential" }, { status: 400 });
+  }
+
+  // Forward to the broker. The auth header (and credential it carries) is
+  // in memory for the duration of this fetch — never written anywhere.
+  const upstreamRes = await fetch(outboundUrl.toString(), {
     method,
-    headers: { Authorization: `Basic ${basic}` },
+    headers,
     cache: "no-store",
   });
 

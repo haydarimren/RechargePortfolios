@@ -1,23 +1,21 @@
 "use client";
 
 /**
- * Browser-side port of the Trading 212 sync logic. Mirrors the original
- * `src/lib/trading212.ts` server action but routes every HTTP call through
- * `/api/broker-proxy` so the server stays a TLS-terminating relay rather
- * than a data processor.
+ * Trading 212 sync orchestration. Pulls the user's order history through
+ * the broker proxy, normalizes symbols, and returns a broker-agnostic
+ * `ImportResult` for the page to fold into Firestore.
  *
- * The orchestration (pagination, ISIN map, exchange-letter normalization,
- * 429 retries, sequential rate-limit queue) all lives here. Tests against
- * the original logic still apply; only the transport layer differs.
- *
- * The proxy URL and request body field names are deliberately broker-
- * agnostic so server access logs don't broadcast that the user is using
- * Trading 212 specifically. The actual outbound destination is hardcoded
- * server-side; this client just speaks "broker-proxy" to it.
+ * Concurrency / rate-limit policy is T212-specific and lives here:
+ *   - Per-tab serial queue (T212 rate-limits some endpoints to 1 req/min;
+ *     parallel calls would burn the same bucket).
+ *   - 65s sleep on 429 with bounded retries.
+ *   - 11s sleep between order-history pages to stay under the documented
+ *     6/min cap on `/equity/history/orders`.
  */
 
-import { auth } from "./firebase";
-import { cleanT212Symbol, toYahooSymbol } from "./trading212-utils";
+import { proxyFetch as sharedProxyFetch } from "../proxy-fetch";
+import type { ImportResult, IsOrderKnownFn } from "../types";
+import { cleanT212Symbol, toYahooSymbol } from "./symbols";
 
 interface T212OrderItem {
   order: {
@@ -41,29 +39,12 @@ interface T212OrdersResponse {
   nextPagePath?: string;
 }
 
-export interface ImportResult {
-  orders: Array<{
-    id: string;
-    symbol: string;
-    shares: number;
-    purchasePrice: number;
-    purchaseDate: string;
-    currency?: string;
-    isin?: string;
-    yahooSymbol?: string;
-    side: "BUY" | "SELL";
-  }>;
-  sellsSkipped: number;
-  sellsImported: number;
-}
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Per-tab concurrency-1 queue. T212 rate-limits aggressively (1 req/min for
  * some endpoints, plus burst limits) and parallel calls would burn the
- * same bucket. This used to be module-local in the server action; it stays
- * module-local here too, scoped per browser tab.
+ * same bucket. Module-local, scoped per browser tab.
  */
 let chain: Promise<unknown> = Promise.resolve();
 function enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -80,13 +61,9 @@ function validateApiKey(apiKey: string): void {
 }
 
 /**
- * Issue a single proxy call. Always uses POST to `/api/broker-proxy`
- * with a generic body shape; the proxy translates into the appropriate
- * GET to the broker (destination hardcoded server-side).
- *
- * Retries once on 429 after a 65s sleep — T212's rate window is 60s, so
- * one extra wait usually unblocks subsequent requests. Beyond that we
- * surface an error so the user knows to wait.
+ * T212-flavored proxy call: serial-queued, with a 65s sleep + bounded
+ * retry on 429. The shared `proxyFetch` underneath is dumb — all the
+ * pacing is here.
  */
 async function proxyFetch(
   apiKey: string,
@@ -94,18 +71,8 @@ async function proxyFetch(
   retries = 3,
 ): Promise<Response> {
   return enqueue(async () => {
-    const idToken = await auth.currentUser?.getIdToken();
-    if (!idToken) throw new Error("not signed in");
     for (let attempt = 0; attempt <= retries; attempt++) {
-      const res = await fetch("/api/broker-proxy", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({ auth: apiKey, path }),
-        cache: "no-store",
-      });
+      const res = await sharedProxyFetch("trading212", apiKey, path);
       if (res.status !== 429) return res;
       if (attempt < retries) await sleep(65_000);
     }
@@ -156,26 +123,14 @@ async function fetchOpenPositionTickers(
   }
 }
 
-/** Predicate evaluated for each raw T212 order to decide whether we've
- *  already imported it. Used to short-circuit pagination. The caller has
- *  the full holdings list and the right notion of "known," so the
- *  paginator just consults this callback per item. */
-export type IsOrderKnownFn = (args: {
-  orderId: string;
-  rawTicker: string;
-  purchaseDate: string;
-  shares: number;
-}) => boolean;
-
-export async function fetchTrading212OrdersClient(
+export async function fetchTrading212Orders(
   apiKey: string,
   /**
    * Optional predicate: returns true for orders we've already imported.
    * When supplied, pagination stops as soon as a page is fully made up
-   * of known orders — T212 is documented as returning orders
-   * newest-first, so any older orders on subsequent pages are by
-   * definition also already imported. Repeat syncs of an active
-   * account drop from N pages to 1.
+   * of known orders — T212 returns orders newest-first, so any older
+   * orders on subsequent pages are by definition also already imported.
+   * Repeat syncs of an active account drop from N pages to 1.
    */
   isOrderKnown?: IsOrderKnownFn,
 ): Promise<ImportResult> {
@@ -276,5 +231,5 @@ export async function fetchTrading212OrdersClient(
     if (isSell) sellsImported++;
   }
 
-  return { orders: mapped, sellsSkipped: 0, sellsImported };
+  return { orders: mapped, sellsSkipped: 0, sellsImported, partialFillsSkipped: 0 };
 }
