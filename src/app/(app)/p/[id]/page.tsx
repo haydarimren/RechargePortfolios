@@ -37,8 +37,9 @@ import { FriendStack } from "@/components/FriendStack";
 import { PerformancePill } from "@/components/PerformancePill";
 import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { TabBar } from "@/components/TabBar";
-import { fetchTrading212OrdersClient } from "@/lib/trading212-client";
-import { cleanT212Symbol } from "@/lib/trading212-utils";
+import { fetchTrading212Orders as fetchTrading212OrdersClient } from "@/lib/brokers/trading212/sync";
+import { cleanT212Symbol } from "@/lib/brokers/trading212/symbols";
+import type { ImportResult } from "@/lib/brokers/types";
 import {
   decryptT212Secret,
   encryptT212Secret,
@@ -685,7 +686,7 @@ export default function PortfolioPage({
         // existence of `secrets/credentials`. Eager migration cleans up
         // any leftover values.
       }
-      let result: Awaited<ReturnType<typeof fetchTrading212OrdersClient>>;
+      let result: ImportResult;
       if (provider === "trading212") {
         // All HTTP calls to the broker go through the dumb relay at
         // /api/broker-proxy. Server sees the auth header for the
