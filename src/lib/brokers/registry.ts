@@ -18,6 +18,7 @@
  */
 
 import type { BrokerAdapter, BrokerId } from "./types";
+import { alpacaAdapter } from "./alpaca";
 import { trading212Adapter } from "./trading212";
 
 // Both `BROKERS` and `SUPPORTED_BROKERS` are unused until Phase 4's UI
@@ -26,8 +27,8 @@ import { trading212Adapter } from "./trading212";
 // Phase 4 (modal swap) can wire up via the registry without further
 // shape churn.
 export const BROKERS: Record<BrokerId, BrokerAdapter> = {
+  alpaca: alpacaAdapter,
   trading212: trading212Adapter,
-  // alpaca adapter lands in Phase 2.
 };
 
 /** Brokers in alphabetical order — used by the connection picker. */

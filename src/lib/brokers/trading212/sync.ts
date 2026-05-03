@@ -231,5 +231,5 @@ export async function fetchTrading212Orders(
     if (isSell) sellsImported++;
   }
 
-  return { orders: mapped, sellsSkipped: 0, sellsImported };
+  return { orders: mapped, sellsSkipped: 0, sellsImported, partialFillsSkipped: 0 };
 }

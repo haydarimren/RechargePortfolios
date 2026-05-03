@@ -9,4 +9,4 @@
  * registries get an entry simultaneously; TypeScript enforces it.
  */
 
-export type BrokerId = "trading212";
+export type BrokerId = "trading212" | "alpaca";

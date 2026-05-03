@@ -57,7 +57,28 @@ export const SERVER_BROKERS: Record<ServerBrokerId, ServerBroker> = {
       Authorization: `Basic ${Buffer.from(cred).toString("base64")}`,
     }),
   },
-  // Additional brokers (alpaca) land in Phase 2.
+  alpaca: {
+    base: "https://api.alpaca.markets",
+    pathPrefix: "/v2/",
+    methods: new Set(["GET"]),
+    auth: (cred) => {
+      // Alpaca uses two custom headers (key id + secret) instead of
+      // HTTP Basic. Wire format from the client is `key:secret`. Throw
+      // on malformed input — the route handler relies on the throw to
+      // return 400 instead of forwarding garbage upstream.
+      // The same rule is duplicated client-side in
+      // src/lib/brokers/alpaca/sync.ts:validateCredential as an early
+      // friendlier error; if you change one, change the other.
+      const idx = cred.indexOf(":");
+      if (idx <= 0 || idx === cred.length - 1) {
+        throw new Error("malformed alpaca credential");
+      }
+      return {
+        "APCA-API-KEY-ID": cred.slice(0, idx),
+        "APCA-API-SECRET-KEY": cred.slice(idx + 1),
+      };
+    },
+  },
 };
 
 /**

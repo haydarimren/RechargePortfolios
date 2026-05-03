@@ -27,6 +27,15 @@ export interface ImportResult {
   orders: ImportedOrder[];
   sellsSkipped: number;
   sellsImported: number;
+  /**
+   * Orders we silently dropped because they were partially-filled-then-
+   * cancelled (Alpaca's `status === "canceled"` with `filled_qty > 0`).
+   * Faithfully representing partial fills as lots needs its own design;
+   * for v1 we count them so the sync UI can surface "skipped N partial
+   * fills" rather than silently losing shares. Always 0 for brokers
+   * (e.g. T212) that don't expose this state shape.
+   */
+  partialFillsSkipped: number;
 }
 
 /**

@@ -4,6 +4,7 @@ import { isServerBrokerId, SERVER_BROKERS } from "./brokers";
 describe("isServerBrokerId", () => {
   it("accepts known broker keys", () => {
     expect(isServerBrokerId("trading212")).toBe(true);
+    expect(isServerBrokerId("alpaca")).toBe(true);
   });
 
   it("rejects unknown strings", () => {
@@ -38,5 +39,38 @@ describe("SERVER_BROKERS.trading212.auth", () => {
     // Pre-registry route did exactly: `Basic ${Buffer.from(cred).toString("base64")}`.
     const expected = `Basic ${Buffer.from("key123:secret456").toString("base64")}`;
     expect(headers).toEqual({ Authorization: expected });
+  });
+});
+
+describe("SERVER_BROKERS.alpaca.auth", () => {
+  it("splits key:secret into APCA headers", () => {
+    const headers = SERVER_BROKERS.alpaca.auth("PKABC123:SK_secret_xyz");
+    expect(headers).toEqual({
+      "APCA-API-KEY-ID": "PKABC123",
+      "APCA-API-SECRET-KEY": "SK_secret_xyz",
+    });
+  });
+
+  it("preserves colons in the secret half", () => {
+    // Alpaca secrets shouldn't contain colons in practice, but the
+    // splitter uses `indexOf(":")` (not `split(":")`), so the secret
+    // part keeps any later colons intact.
+    const headers = SERVER_BROKERS.alpaca.auth("KEYID:has:colons:in:it");
+    expect(headers).toEqual({
+      "APCA-API-KEY-ID": "KEYID",
+      "APCA-API-SECRET-KEY": "has:colons:in:it",
+    });
+  });
+
+  it("throws on a credential with no colon", () => {
+    expect(() => SERVER_BROKERS.alpaca.auth("nocolon")).toThrow();
+  });
+
+  it("throws on a credential that ends with a colon (empty secret)", () => {
+    expect(() => SERVER_BROKERS.alpaca.auth("keyid:")).toThrow();
+  });
+
+  it("throws on a credential that starts with a colon (empty key)", () => {
+    expect(() => SERVER_BROKERS.alpaca.auth(":justasecret")).toThrow();
   });
 });
