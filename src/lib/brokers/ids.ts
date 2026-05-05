@@ -5,8 +5,10 @@
  * client-side adapter registry. Keeps the two registries from drifting
  * out of sync without dragging adapter code into the server bundle.
  *
- * Phase 2 widens to `"trading212" | "alpaca"`. Both client and server
- * registries get an entry simultaneously; TypeScript enforces it.
+ * Adding a new broker: extend the union here, then add an entry to BOTH
+ * `BROKERS` (client adapter map) AND `SERVER_BROKERS` (proxy registry).
+ * TypeScript enforces both — `Record<BrokerId, ...>` consumers won't
+ * compile until they cover the new arm.
  */
 
-export type BrokerId = "trading212" | "alpaca";
+export type BrokerId = "trading212" | "alpaca" | "snaptrade";

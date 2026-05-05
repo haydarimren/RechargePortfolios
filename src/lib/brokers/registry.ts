@@ -19,6 +19,7 @@
 
 import type { BrokerAdapter, BrokerId } from "./types";
 import { alpacaAdapter } from "./alpaca";
+import { snaptradeAdapter } from "./snaptrade";
 import { trading212Adapter } from "./trading212";
 
 // Both `BROKERS` and `SUPPORTED_BROKERS` are unused until Phase 4's UI
@@ -28,6 +29,7 @@ import { trading212Adapter } from "./trading212";
 // shape churn.
 export const BROKERS: Record<BrokerId, BrokerAdapter> = {
   alpaca: alpacaAdapter,
+  snaptrade: snaptradeAdapter,
   trading212: trading212Adapter,
 };
 

@@ -318,6 +318,7 @@ function mergePlainAndPlaintextFields(
     // Mirror to the deprecated alias for any code path that hasn't
     // updated yet. Cleaner than scattering `?? brokerOrderId` checks.
     t212OrderId: brokerOrderId,
+    snaptradeAccountId: plain.snaptradeAccountId,
     symbol: plain.symbol,
     shares: plain.shares,
     purchasePrice: plain.purchasePrice,

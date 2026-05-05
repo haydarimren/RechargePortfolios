@@ -26,6 +26,14 @@ export interface Holding {
   importSource?: string;
   currency?: string;
   /**
+   * SnapTrade-only: which SnapTrade-connected brokerage account this
+   * holding came from. Drives lock granularity for SnapTrade
+   * portfolios — a portfolio is locked not just to "snaptrade" but
+   * to a specific SnapTrade account. Present iff
+   * `importSource === "snaptrade"`.
+   */
+  snaptradeAccountId?: string;
+  /**
    * Stable order id from the source broker — used by sync to dedup.
    * Broker-agnostic name; was `t212OrderId` before the multi-broker
    * migration. Reads accept both names (back-compat); writes always

@@ -42,9 +42,10 @@ import { BROKERS, SUPPORTED_BROKERS } from "@/lib/brokers/registry";
 import type { BrokerId } from "@/lib/brokers/ids";
 import type { ImportResult } from "@/lib/brokers/types";
 import {
-  decryptT212Secret,
-  encryptT212Secret,
+  decryptBrokerCredential,
+  encryptBrokerCredential,
 } from "@/lib/crypto-client";
+import { SnapTradeConnectFlow } from "@/components/SnapTradeConnectFlow";
 import { useEncryption } from "@/lib/use-encryption";
 import { getCachedPortfolioKey, getUnlocked } from "@/lib/key-store";
 import {
@@ -428,6 +429,25 @@ export default function PortfolioPage({
     }
     return null;
   }, [holdings]);
+  // For SnapTrade-locked portfolios, additionally pin the SnapTrade
+  // account id from the first holding that carries one. A user with
+  // two SnapTrade-connected portfolios shouldn't be able to mix
+  // accounts; the picker filter (and the runtime check inside
+  // handleSync) require any future SnapTrade reconnect to use the
+  // same account id.
+  const lockedSnaptradeAccountId = useMemo<string | null>(() => {
+    if (lockedBroker !== "snaptrade") return null;
+    for (const h of holdings) {
+      if (
+        h.importSource === "snaptrade"
+        && typeof h.snaptradeAccountId === "string"
+        && h.snaptradeAccountId.length > 0
+      ) {
+        return h.snaptradeAccountId;
+      }
+    }
+    return null;
+  }, [lockedBroker, holdings]);
   // Forward-compat safety: if a holding's `importSource` names a
   // broker this build of the app doesn't know about (e.g. portfolio
   // was synced on a newer build with a broker added later, then opened
@@ -671,6 +691,45 @@ export default function PortfolioPage({
       );
       return;
     }
+    // SnapTrade gets a second-tier lock: the same broker, different
+    // account is also a violation. Re-derive from the live ref so we
+    // catch any holdings added between this handler being created and
+    // being called. The picker UI in SnapTradeConnectFlow already
+    // enforces this for the happy path; this is defense-in-depth so
+    // any future caller (retry button, scripted invocation, refactor
+    // that bypasses the picker) can't slip past the lock.
+    const liveLockedSnaptradeAccountId = (() => {
+      if (provider !== "snaptrade") return null;
+      for (const h of holdingsRef.current) {
+        if (
+          h.importSource === "snaptrade"
+          && typeof h.snaptradeAccountId === "string"
+          && h.snaptradeAccountId.length > 0
+        ) {
+          return h.snaptradeAccountId;
+        }
+      }
+      return null;
+    })();
+    if (provider === "snaptrade" && keyOverride && liveLockedSnaptradeAccountId) {
+      try {
+        const incoming = JSON.parse(keyOverride) as {
+          snaptradeAccountId?: string;
+        };
+        if (
+          typeof incoming.snaptradeAccountId !== "string"
+          || incoming.snaptradeAccountId !== liveLockedSnaptradeAccountId
+        ) {
+          setSyncError(
+            "This portfolio is locked to a different SnapTrade account.",
+          );
+          return;
+        }
+      } catch {
+        setSyncError("Malformed SnapTrade credential.");
+        return;
+      }
+    }
     // Single generic secrets doc per portfolio. The provider name (e.g.
     // "trading212") is stamped inside the encrypted payload, never on
     // the doc path.
@@ -705,10 +764,22 @@ export default function PortfolioPage({
         typeof data.iv === "string"
       ) {
         try {
-          plaintextKey = await decryptT212Secret(
+          // decryptBrokerCredential returns `{brokerId, credential}`.
+          // For T212/Alpaca the credential is the bare `key:secret`
+          // string. For SnapTrade it's the JSON-encoded 5-field BYO
+          // blob. The adapter knows how to parse its own shape.
+          const decoded = await decryptBrokerCredential(
             { payload: data.payload, iv: data.iv },
             unlocked.masterSecret,
           );
+          // Sanity: doc says it's broker X, picker says Y → refuse.
+          if (decoded.brokerId !== provider) {
+            setSyncError(
+              `Stored credentials are for ${decoded.brokerId}, not ${provider}.`,
+            );
+            return;
+          }
+          plaintextKey = decoded.credential;
         } catch {
           setSyncError("Stored credentials are corrupt — reconnect.");
           return;
@@ -725,29 +796,61 @@ export default function PortfolioPage({
     let buys = 0;
     let sells = 0;
     let skipped = 0;
+    // For SnapTrade, the keyOverride / decrypted credential is JSON
+    // containing `snaptradeAccountId`. Pull it out so each newly
+    // imported holding can be tagged with the source account id —
+    // that's how `lockedSnaptradeAccountId` enforces account-level
+    // lock on subsequent reconnects. Other brokers leave this null.
+    //
+    // Belt-and-braces re-sync check: if we read a stored credential
+    // (no keyOverride) and its accountId doesn't match the live lock
+    // derived from holdings, refuse rather than silently rebind. The
+    // picker can't reach this state, but if a stored credential ever
+    // drifted from the holdings (corruption, partial migration,
+    // future bug), we'd rather surface than tag new holdings with the
+    // wrong account.
+    let snaptradeAccountIdForWrites: string | null = null;
+    if (provider === "snaptrade") {
+      let parsedAccountId: string | null = null;
+      try {
+        const parsed = JSON.parse(plaintextKey) as {
+          snaptradeAccountId?: string;
+        };
+        if (typeof parsed.snaptradeAccountId === "string") {
+          parsedAccountId = parsed.snaptradeAccountId;
+        }
+      } catch {
+        // Adapter will surface the JSON parse error itself.
+      }
+      if (
+        !keyOverride
+        && liveLockedSnaptradeAccountId
+        && parsedAccountId
+        && parsedAccountId !== liveLockedSnaptradeAccountId
+      ) {
+        setSyncError(
+          "Stored SnapTrade credentials don't match this portfolio's locked account. Disconnect and reconnect.",
+        );
+        return;
+      }
+      snaptradeAccountIdForWrites = parsedAccountId;
+    }
     try {
       if (needsWriteBack) {
-        // Client-side encrypt under master secret. Server holds ciphertext
-        // it can't decrypt at rest. The provider field is informational
-        // only — we know which broker this portfolio talks to once we've
-        // decrypted; before that the server sees only "credentials".
-        const env = await encryptT212Secret(plaintextKey, unlocked.masterSecret);
-        // No `provider` field on the doc itself — that would leak the
-        // broker name. With single-broker support today, the UI infers
-        // "this is a T212 connection" from the doc's existence. Adding
-        // a second broker in the future means moving provider
-        // discrimination INTO the encrypted payload (e.g. encrypting a
-        // `{ provider, apiKey }` object instead of just the API key).
+        // Client-side encrypt under master secret. The brokerId stamped
+        // INSIDE the encrypted payload tells future readers (us, on
+        // re-sync) which broker the credential is for; the doc top
+        // level stays generic so the server can't infer broker
+        // identity from at-rest data.
+        const env = await encryptBrokerCredential(
+          { brokerId: provider, credential: plaintextKey },
+          unlocked.masterSecret,
+        );
         await setDoc(secretRef, {
           payload: env.payload,
           iv: env.iv,
           updatedAt: Date.now(),
         });
-        // Note: previously this call also wrote `connectedBrokers:
-        // arrayUnion(provider)` on the portfolio doc. That field has
-        // been deprecated — UI now infers connection state from the
-        // existence of `secrets/credentials`. Eager migration cleans up
-        // any leftover values.
       }
       // The `isOrderKnown` predicate stops pagination as soon as a full
       // page of orders is already imported — adapters return orders
@@ -862,6 +965,13 @@ export default function PortfolioPage({
         if (order.currency) plaintextShape.currency = order.currency;
         if (order.isin) plaintextShape.isin = order.isin;
         if (order.yahooSymbol) plaintextShape.yahooSymbol = order.yahooSymbol;
+        // SnapTrade-locked holdings carry the SnapTrade account id
+        // they came from, so future syncs can verify the lock at
+        // account granularity (one-account-one-portfolio) — not just
+        // at broker granularity. Only stamped for SnapTrade.
+        if (snaptradeAccountIdForWrites) {
+          plaintextShape.snaptradeAccountId = snaptradeAccountIdForWrites;
+        }
 
         if (portfolioKey) {
           // v2 shape: importSource and brokerOrderId go INSIDE the
@@ -881,6 +991,9 @@ export default function PortfolioPage({
               yahooSymbol: order.yahooSymbol,
               importSource: provider,
               brokerOrderId: order.id,
+              ...(snaptradeAccountIdForWrites
+                ? { snaptradeAccountId: snaptradeAccountIdForWrites }
+                : {}),
             },
             portfolioKey,
           );
@@ -1711,76 +1824,117 @@ export default function PortfolioPage({
             {/* Connect a broker — visible whenever no credential is
                 stored AND we recognize the broker (or there's no
                 broker yet). Picker is filtered to `lockedBroker` if
-                the portfolio is locked from prior holdings. */}
+                the portfolio is locked from prior holdings.
+                SnapTrade has its own multi-step flow (disclosure →
+                4-field form → account picker) handled by the
+                `SnapTradeConnectFlow` component below; the standard
+                form path renders for T212/Alpaca. */}
             {!hasCredential && (lockedBroker || !hasUnknownImportSource) && (() => {
               const activeProvider: BrokerId = lockedBroker ?? connectProvider;
               const adapter = BROKERS[activeProvider];
-              const allFieldsFilled = adapter.credentialFields.every(
-                (f) => (connectFields[f.id] ?? "").trim().length > 0,
-              );
               return (
                 <div>
                   <div className="label mb-3">Connect a broker</div>
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (!allFieldsFilled) return;
-                      const credential = adapter.buildCredential(connectFields);
-                      handleSync(activeProvider, credential);
-                    }}
-                    className="space-y-3"
-                  >
-                    <Field label="Broker">
-                      {lockedBroker ? (
-                        // When the portfolio is locked, render the broker
-                        // name as a static label rather than a single-
-                        // option disabled <select> — clearer affordance
-                        // ("locked" vs "broken control").
-                        <div className="field flex items-center gap-2 text-sm">
-                          <span>{BROKERS[lockedBroker].displayName}</span>
-                          <span className="text-xs text-fg-fade">(locked)</span>
-                        </div>
-                      ) : (
-                        <select
-                          value={activeProvider}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            // Type guard: only accept values that are
-                            // genuinely known broker ids.
-                            if (v in BROKERS) setConnectProvider(v as BrokerId);
+                  <Field label="Broker">
+                    {lockedBroker ? (
+                      // When the portfolio is locked, render the broker
+                      // name as a static label rather than a single-
+                      // option disabled <select> — clearer affordance
+                      // ("locked" vs "broken control").
+                      <div className="field flex items-center gap-2 text-sm">
+                        <span>{BROKERS[lockedBroker].displayName}</span>
+                        <span className="text-xs text-fg-fade">(locked)</span>
+                      </div>
+                    ) : (
+                      <select
+                        value={activeProvider}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          // Type guard: only accept values that are
+                          // genuinely known broker ids.
+                          if (v in BROKERS) setConnectProvider(v as BrokerId);
+                        }}
+                        className="field"
+                      >
+                        {SUPPORTED_BROKERS.map((b) => (
+                          <option key={b} value={b}>{BROKERS[b].displayName}</option>
+                        ))}
+                      </select>
+                    )}
+                  </Field>
+
+                  {/* SnapTrade: multi-step BYO flow */}
+                  {activeProvider === "snaptrade" ? (
+                    <div className="mt-3">
+                      <SnapTradeConnectFlow
+                        syncLoading={syncLoading === "snaptrade"}
+                        lockedSnaptradeAccountId={lockedSnaptradeAccountId}
+                        onCancel={() => {
+                          // For locked portfolios, close the modal
+                          // (no other broker is selectable anyway).
+                          // For unlocked, just close the modal too —
+                          // re-opening leaves the dropdown on the
+                          // user's last pick (SnapTrade) so they can
+                          // continue or change their mind, rather
+                          // than yanking the dropdown to a different
+                          // broker behind their back.
+                          setShowImport(false);
+                          setSyncError("");
+                        }}
+                        onSubmit={async (credential) => {
+                          await handleSync("snaptrade", credential);
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    /* Standard credential form (T212, Alpaca) */
+                    (() => {
+                      const allFieldsFilled = adapter.credentialFields.every(
+                        (f) => (connectFields[f.id] ?? "").trim().length > 0,
+                      );
+                      return (
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            if (!allFieldsFilled) return;
+                            const credential =
+                              adapter.buildCredential(connectFields);
+                            handleSync(activeProvider, credential);
                           }}
-                          className="field"
+                          className="space-y-3 mt-3"
                         >
-                          {SUPPORTED_BROKERS.map((b) => (
-                            <option key={b} value={b}>{BROKERS[b].displayName}</option>
+                          {adapter.credentialFields.map((f) => (
+                            <Field key={f.id} label={f.label}>
+                              <input
+                                value={connectFields[f.id] ?? ""}
+                                onChange={(e) =>
+                                  setConnectFields((prev) => ({
+                                    ...prev,
+                                    [f.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder={f.placeholder}
+                                className="field font-mono text-xs"
+                                required
+                              />
+                            </Field>
                           ))}
-                        </select>
-                      )}
-                    </Field>
-                    {adapter.credentialFields.map((f) => (
-                      <Field key={f.id} label={f.label}>
-                        <input
-                          value={connectFields[f.id] ?? ""}
-                          onChange={(e) =>
-                            setConnectFields((prev) => ({ ...prev, [f.id]: e.target.value }))
-                          }
-                          placeholder={f.placeholder}
-                          className="field font-mono text-xs"
-                          required
-                        />
-                      </Field>
-                    ))}
-                    <p className="text-xs text-fg-fade">
-                      {adapter.credentialHint}
-                    </p>
-                    <button
-                      type="submit"
-                      disabled={!!syncLoading || !allFieldsFilled}
-                      className="btn-primary w-full disabled:opacity-50"
-                    >
-                      {syncLoading === activeProvider ? "Connecting…" : "Connect & Sync"}
-                    </button>
-                  </form>
+                          <p className="text-xs text-fg-fade">
+                            {adapter.credentialHint}
+                          </p>
+                          <button
+                            type="submit"
+                            disabled={!!syncLoading || !allFieldsFilled}
+                            className="btn-primary w-full disabled:opacity-50"
+                          >
+                            {syncLoading === activeProvider
+                              ? "Connecting…"
+                              : "Connect & Sync"}
+                          </button>
+                        </form>
+                      );
+                    })()
+                  )}
                 </div>
               );
             })()}
