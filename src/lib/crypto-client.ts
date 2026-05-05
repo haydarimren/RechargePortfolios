@@ -401,6 +401,14 @@ export interface HoldingPlaintext {
   importSource?: string;
   currency?: string;
   /**
+   * SnapTrade-only: which connected brokerage account this holding
+   * came from. Lets the lock derivation enforce one-portfolio-one-
+   * account granularity (a user with two SnapTrade-connected
+   * portfolios shouldn't be able to cross-import). Present iff
+   * `importSource === "snaptrade"`.
+   */
+  snaptradeAccountId?: string;
+  /**
    * Broker-agnostic stable order id from the source broker (formerly
    * `t212OrderId` — renamed in the multi-broker migration so the field
    * works for Alpaca, IBKR, etc. Reader path falls back to
@@ -550,6 +558,15 @@ export async function decryptT212Secret(
   const { credential } = await decryptBrokerCredential(cipher, masterSecret);
   return credential;
 }
+
+// SnapTrade in this app uses a "Bring Your Own credentials" model —
+// the user signs up at SnapTrade themselves and pastes their full
+// credential set (clientId + consumerKey + userId + userSecret) into
+// our connect form. Everything is encrypted into the per-portfolio
+// `secrets/credentials` envelope via the existing
+// `encryptBrokerCredential`/`decryptBrokerCredential` helpers; there
+// is no separate per-user SnapTrade doc. No crypto primitives are
+// needed here for SnapTrade.
 
 // ---------- test-only -----------------------------------------------------
 //

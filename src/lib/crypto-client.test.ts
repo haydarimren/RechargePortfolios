@@ -369,3 +369,9 @@ describe("broker credential encryption", () => {
     expect(inspected.origin).toBe("canonical");
   });
 });
+
+// SnapTrade no longer has its own crypto helpers — credentials live
+// in the per-portfolio `secrets/credentials` envelope alongside T212
+// and Alpaca, exercised through encryptBrokerCredential /
+// decryptBrokerCredential above. Nothing SnapTrade-specific to test
+// in the crypto layer.

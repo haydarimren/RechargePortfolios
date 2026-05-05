@@ -30,6 +30,7 @@
  */
 
 import type { BrokerId } from "@/lib/brokers/ids";
+import { snapTradeSign } from "./snaptrade-sign";
 
 export type ServerBrokerId = BrokerId;
 
@@ -46,6 +47,21 @@ export interface ServerBrokerAuthRequest {
   body: string | null;
 }
 
+/**
+ * Auth builder result. `headers` is always set (even if empty); the
+ * optional `pathWithQueryOverride` lets a builder mutate the outbound
+ * URL — needed for SnapTrade, which appends `clientId` and `timestamp`
+ * query params before signing. The route handler uses the override
+ * (when present) for both the upstream `fetch` and the signed path.
+ *
+ * Static-auth brokers (T212, Alpaca) just return `{ headers }` and
+ * leave the path alone.
+ */
+export interface ServerBrokerAuthResult {
+  headers: Record<string, string>;
+  pathWithQueryOverride?: string;
+}
+
 export interface ServerBroker {
   /** Outbound origin. Hardcoded — never client-controlled. */
   base: string;
@@ -58,20 +74,26 @@ export interface ServerBroker {
   /** HTTP methods the proxy is willing to forward. */
   methods: ReadonlySet<string>;
   /**
-   * Build the auth headers for the upstream request from the client's
-   * opaque credential string. The shape of the credential is broker-
-   * specific and known only to the matching client adapter; the server
-   * just translates it into headers.
+   * Build the auth headers (and optionally a path override) for the
+   * upstream request from the client's opaque credential string. The
+   * shape of the credential is broker-specific and known only to the
+   * matching client adapter; the server just translates it into headers.
    *
    * The `req` arg gives request context (method, full path with query,
    * body) so builders that produce a signature over the request — not
-   * just a static credential header — have everything they need. Static-
-   * auth builders (T212 Basic, Alpaca custom headers) can ignore it.
+   * just a static credential header — have everything they need.
+   * Static-auth builders (T212 Basic, Alpaca custom headers) can
+   * ignore it.
+   *
+   * Returning a `pathWithQueryOverride` mutates the outbound URL
+   * before fetch — used by SnapTrade to append `clientId` and
+   * `timestamp` query params (which must be in the URL the upstream
+   * receives, not just in the signed payload). Other brokers omit it.
    */
   auth: (
     credential: string,
     req: ServerBrokerAuthRequest,
-  ) => Record<string, string>;
+  ) => ServerBrokerAuthResult;
 }
 
 export const SERVER_BROKERS: Record<ServerBrokerId, ServerBroker> = {
@@ -81,7 +103,9 @@ export const SERVER_BROKERS: Record<ServerBrokerId, ServerBroker> = {
     methods: new Set(["GET"]),
     auth: (cred) => ({
       // Static credential — no need to look at request context.
-      Authorization: `Basic ${Buffer.from(cred).toString("base64")}`,
+      headers: {
+        Authorization: `Basic ${Buffer.from(cred).toString("base64")}`,
+      },
     }),
   },
   alpaca: {
@@ -102,8 +126,112 @@ export const SERVER_BROKERS: Record<ServerBrokerId, ServerBroker> = {
         throw new Error("malformed alpaca credential");
       }
       return {
-        "APCA-API-KEY-ID": cred.slice(0, idx),
-        "APCA-API-SECRET-KEY": cred.slice(idx + 1),
+        headers: {
+          "APCA-API-KEY-ID": cred.slice(0, idx),
+          "APCA-API-SECRET-KEY": cred.slice(idx + 1),
+        },
+      };
+    },
+  },
+  snaptrade: {
+    base: "https://api.snaptrade.com",
+    pathPrefix: "/api/v1/",
+    // SnapTrade BYO mode: only GET is exercised. Activities + account
+    // listing are GET; registration / login portal don't run from our
+    // app (the user does those at SnapTrade themselves before pasting
+    // their credentials in our connect form). POST stays disallowed
+    // to keep the surface narrow.
+    methods: new Set(["GET"]),
+    /**
+     * SnapTrade auth (BYO-credentials model): HMAC-SHA256 over a
+     * sorted-keys JSON of `{ content, path, query }` using the
+     * user's own consumer key as the HMAC secret. Result goes in the
+     * `Signature` header. `clientId` and `timestamp` are appended to
+     * the URL query string before signing.
+     *
+     * `cred` is JSON-encoded `{ clientId, consumerKey,
+     * snaptradeUserId, snaptradeUserSecret }` — the four values the
+     * end user pasted into our connect form (taken from THEIR own
+     * SnapTrade developer account). Unlike the operator-managed model,
+     * we never use server env vars; every request is signed with the
+     * caller's own keys. The userId/userSecret fields aren't part of
+     * the HMAC inputs themselves — they travel in the URL where
+     * SnapTrade's app-layer auth reads them. The HMAC just signs over
+     * the assembled request.
+     */
+    auth: (cred, req) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(cred);
+      } catch {
+        throw new Error("malformed snaptrade credential (not JSON)");
+      }
+      if (
+        parsed === null
+        || typeof parsed !== "object"
+        || typeof (parsed as { clientId?: unknown }).clientId !== "string"
+        || typeof (parsed as { consumerKey?: unknown }).consumerKey !== "string"
+        || typeof (parsed as { snaptradeUserId?: unknown }).snaptradeUserId !== "string"
+        || typeof (parsed as { snaptradeUserSecret?: unknown }).snaptradeUserSecret !== "string"
+      ) {
+        throw new Error("malformed snaptrade credential (missing fields)");
+      }
+      const {
+        clientId,
+        consumerKey,
+        snaptradeUserId,
+        snaptradeUserSecret,
+      } = parsed as {
+        clientId: string;
+        consumerKey: string;
+        snaptradeUserId: string;
+        snaptradeUserSecret: string;
+      };
+      // All four must be non-empty. The client-side `buildCredential`
+      // already trims, but server can't trust the client — and an
+      // empty userId/userSecret would still produce a valid HMAC,
+      // failing only at SnapTrade's own auth layer with a less
+      // diagnostic error. Surface the bad-shape failure here instead.
+      if (
+        clientId.length === 0
+        || consumerKey.length === 0
+        || snaptradeUserId.length === 0
+        || snaptradeUserSecret.length === 0
+      ) {
+        throw new Error("malformed snaptrade credential (empty fields)");
+      }
+
+      // Append clientId + timestamp to the URL's query string. The
+      // upstream URL must contain BOTH params, and the signature
+      // must sign over the same query string. We use a dummy base
+      // URL just to get URLSearchParams' serialization for free.
+      const dummy = new URL(req.pathWithQuery, "https://x.invalid");
+      dummy.searchParams.set("clientId", clientId);
+      dummy.searchParams.set("timestamp", String(Math.floor(Date.now() / 1000)));
+      const overriddenPath = dummy.pathname + dummy.search;
+      const queryStringOnly = dummy.search.replace(/^\?/, "");
+
+      // GETs only today (see `methods` above) → body is always null.
+      // We still tolerate an empty / "{}" string defensively.
+      let content: unknown = null;
+      if (req.body !== null && req.body !== "" && req.body !== "{}") {
+        try {
+          content = JSON.parse(req.body);
+        } catch {
+          throw new Error("malformed snaptrade body (not JSON)");
+        }
+      }
+
+      const signature = snapTradeSign({
+        content,
+        path: dummy.pathname,
+        query: queryStringOnly,
+        consumerKey,
+      });
+
+      return {
+        headers: { Signature: signature },
+        pathWithQueryOverride: overriddenPath,
       };
     },
   },

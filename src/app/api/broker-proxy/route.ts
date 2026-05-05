@@ -96,13 +96,12 @@ export async function POST(req: NextRequest) {
   }
 
   // Read raw bytes first so we can cap the request size before parsing.
-  // Without this, a malicious client could send arbitrarily large bodies
-  // and force us to parse them into the server heap. Today T212/Alpaca
-  // are GET-only so the 405 gate catches POST attempts, but Phase 2
-  // (SnapTrade) opens POST to a real broker, and we don't want to expose
-  // an amplification surface. SnapTrade's actual request bodies are
-  // sub-1KB; 64KB is an order of magnitude beyond what any legitimate
-  // broker call needs.
+  // Without this, a malicious client could send arbitrarily large
+  // bodies and force us to parse them into the server heap. All
+  // current brokers are GET-only at the proxy layer, but the
+  // body-forwarding path remains wired for any future broker that
+  // needs POST. Cap the inbound body at 64KB — far above any
+  // legitimate broker call (typical bodies are sub-1KB).
   const MAX_BODY_BYTES = 64 * 1024;
   let rawText: string;
   try {
@@ -178,13 +177,55 @@ export async function POST(req: NextRequest) {
     // Use `outboundUrl.pathname + outboundUrl.search` rather than
     // `body.path` so the signed path matches what's actually sent
     // (post-`URL` normalization, no `..` segments).
-    headers = broker.auth(body.auth, {
+    const result = broker.auth(body.auth, {
       method,
       pathWithQuery: outboundUrl.pathname + outboundUrl.search,
       body: outboundBody,
     });
-  } catch {
-    return NextResponse.json({ error: "bad credential" }, { status: 400 });
+    headers = result.headers;
+    // Auth builder may mutate the outbound URL (SnapTrade appends
+    // `clientId` + `timestamp` query params before signing). Re-resolve
+    // against the broker's base + re-validate origin AND pathname so a
+    // buggy or compromised builder can't escape the SSRF guard.
+    //
+    // Tightening: builders may only mutate the QUERY STRING, not the
+    // pathname itself. Path mutation would let a builder silently
+    // retarget the upstream request to a different endpoint within the
+    // same prefix — strictly more permissive than any real builder
+    // needs (SnapTrade only adds query params). The pathname-equality
+    // check below makes that future bug impossible.
+    if (result.pathWithQueryOverride !== undefined) {
+      let overridden: URL;
+      try {
+        overridden = new URL(result.pathWithQueryOverride, broker.base);
+      } catch {
+        return NextResponse.json({ error: "bad proxy params" }, { status: 400 });
+      }
+      if (
+        overridden.origin !== baseOrigin
+        || !overridden.pathname.startsWith(broker.pathPrefix)
+        || overridden.pathname !== outboundUrl.pathname
+      ) {
+        return NextResponse.json({ error: "bad proxy params" }, { status: 400 });
+      }
+      outboundUrl = overridden;
+    }
+  } catch (err) {
+    // Surface the auth builder's error verbatim. Builders throw on
+    // malformed credentials or other structural failures — none of
+    // these messages contain user secrets, broker responses, or
+    // anything else sensitive (they're all about request shape).
+    // A generic "bad credential" string was making real debugging
+    // needlessly opaque (e.g. a malformed SnapTrade credential JSON
+    // would surface as the same HTTP 400 as a malformed T212
+    // key:secret pair, with no diagnostic clue).
+    const msg =
+      err instanceof Error
+      && typeof err.message === "string"
+      && err.message.length > 0
+        ? err.message
+        : "bad credential";
+    return NextResponse.json({ error: msg }, { status: 400 });
   }
 
   // Outbound fetch options. Body is included only for non-GET methods.
