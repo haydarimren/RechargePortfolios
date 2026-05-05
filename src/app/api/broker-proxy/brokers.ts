@@ -19,14 +19,32 @@
  * implementations themselves (which are `"use client"` and pull in
  * browser APIs).
  *
- * Auth builder contract: each broker's `auth(credential)` MUST throw on
- * any malformed credential. The route handler relies on the throw to
- * return 400 instead of forwarding garbage upstream.
+ * Auth builder contract: each broker's `auth(credential, req)` MUST
+ * throw on any malformed credential. The route handler relies on the
+ * throw to return 400 instead of forwarding garbage upstream. The
+ * `req` arg gives the builder access to the request method, path
+ * (with query string), and body — required for HMAC signers (e.g.
+ * SnapTrade) that sign over the full request, not just attach a
+ * static credential. Builders for brokers that use static auth
+ * (T212, Alpaca) can ignore the `req` arg.
  */
 
 import type { BrokerId } from "@/lib/brokers/ids";
 
 export type ServerBrokerId = BrokerId;
+
+/**
+ * Request context passed to auth builders. `pathWithQuery` is the
+ * outbound path including any `?...` segment, exactly as the upstream
+ * URL will see it. `body` is the raw outbound body (for `POST`/`PUT`)
+ * or `null` for body-less methods. Pre-resolved by the route handler
+ * so builders don't need to think about URL parsing or body framing.
+ */
+export interface ServerBrokerAuthRequest {
+  method: string;
+  pathWithQuery: string;
+  body: string | null;
+}
 
 export interface ServerBroker {
   /** Outbound origin. Hardcoded — never client-controlled. */
@@ -44,8 +62,16 @@ export interface ServerBroker {
    * opaque credential string. The shape of the credential is broker-
    * specific and known only to the matching client adapter; the server
    * just translates it into headers.
+   *
+   * The `req` arg gives request context (method, full path with query,
+   * body) so builders that produce a signature over the request — not
+   * just a static credential header — have everything they need. Static-
+   * auth builders (T212 Basic, Alpaca custom headers) can ignore it.
    */
-  auth: (credential: string) => Record<string, string>;
+  auth: (
+    credential: string,
+    req: ServerBrokerAuthRequest,
+  ) => Record<string, string>;
 }
 
 export const SERVER_BROKERS: Record<ServerBrokerId, ServerBroker> = {
@@ -54,6 +80,7 @@ export const SERVER_BROKERS: Record<ServerBrokerId, ServerBroker> = {
     pathPrefix: "/api/v0/",
     methods: new Set(["GET"]),
     auth: (cred) => ({
+      // Static credential — no need to look at request context.
       Authorization: `Basic ${Buffer.from(cred).toString("base64")}`,
     }),
   },
@@ -62,6 +89,7 @@ export const SERVER_BROKERS: Record<ServerBrokerId, ServerBroker> = {
     pathPrefix: "/v2/",
     methods: new Set(["GET"]),
     auth: (cred) => {
+      // Static credential — no need to look at request context.
       // Alpaca uses two custom headers (key id + secret) instead of
       // HTTP Basic. Wire format from the client is `key:secret`. Throw
       // on malformed input — the route handler relies on the throw to

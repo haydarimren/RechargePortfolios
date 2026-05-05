@@ -48,6 +48,12 @@ interface ProxyRequestBody {
   /** Path under the broker's API. Must start with the broker's allowed prefix. */
   path: string;
   method?: string;
+  /**
+   * Optional request body for non-GET methods. Forwarded verbatim to
+   * the upstream broker. The auth builder can also see this string so
+   * HMAC signers can sign over it.
+   */
+  body?: string;
 }
 
 /**
@@ -89,9 +95,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Read raw bytes first so we can cap the request size before parsing.
+  // Without this, a malicious client could send arbitrarily large bodies
+  // and force us to parse them into the server heap. Today T212/Alpaca
+  // are GET-only so the 405 gate catches POST attempts, but Phase 2
+  // (SnapTrade) opens POST to a real broker, and we don't want to expose
+  // an amplification surface. SnapTrade's actual request bodies are
+  // sub-1KB; 64KB is an order of magnitude beyond what any legitimate
+  // broker call needs.
+  const MAX_BODY_BYTES = 64 * 1024;
+  let rawText: string;
+  try {
+    rawText = await req.text();
+  } catch {
+    return NextResponse.json({ error: "bad request body" }, { status: 400 });
+  }
+  if (rawText.length > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "request too large" }, { status: 413 });
+  }
   let body: ProxyRequestBody;
   try {
-    body = (await req.json()) as ProxyRequestBody;
+    body = JSON.parse(rawText) as ProxyRequestBody;
   } catch {
     return NextResponse.json({ error: "bad request body" }, { status: 400 });
   }
@@ -137,20 +161,56 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "method not allowed" }, { status: 405 });
   }
 
+  // Body is only meaningful for methods that carry one. Reject a
+  // non-empty body on a GET-shaped request — guards against confused
+  // clients passing payloads that the auth builder might sign over
+  // even though the upstream `fetch` will silently drop them.
+  if (method === "GET" && typeof body.body === "string" && body.body.length > 0) {
+    return NextResponse.json({ error: "body not allowed for GET" }, { status: 400 });
+  }
+  const outboundBody: string | null =
+    method === "GET" ? null : (body.body ?? null);
+
   let headers: Record<string, string>;
   try {
-    headers = broker.auth(body.auth);
+    // Auth builder gets request context so HMAC signers (e.g. SnapTrade)
+    // can sign over the full request. Static-auth builders ignore it.
+    // Use `outboundUrl.pathname + outboundUrl.search` rather than
+    // `body.path` so the signed path matches what's actually sent
+    // (post-`URL` normalization, no `..` segments).
+    headers = broker.auth(body.auth, {
+      method,
+      pathWithQuery: outboundUrl.pathname + outboundUrl.search,
+      body: outboundBody,
+    });
   } catch {
     return NextResponse.json({ error: "bad credential" }, { status: 400 });
   }
 
-  // Forward to the broker. The auth header (and credential it carries) is
-  // in memory for the duration of this fetch — never written anywhere.
-  const upstreamRes = await fetch(outboundUrl.toString(), {
+  // Outbound fetch options. Body is included only for non-GET methods.
+  // `Content-Type` defaults to JSON when there's a body and the auth
+  // builder didn't set one explicitly — most broker APIs (including
+  // SnapTrade) expect JSON request bodies. The case-insensitive check
+  // means a builder-supplied `content-type` (any casing) wins; we
+  // deliberately preserve the builder's verbatim header object (and
+  // its casing) in that branch rather than ever clobbering it.
+  // Forward to the broker — auth header, credential, and body all live
+  // in memory only for this fetch's duration. Never persisted.
+  const fetchInit: RequestInit = {
     method,
     headers,
     cache: "no-store",
-  });
+  };
+  if (outboundBody !== null) {
+    fetchInit.body = outboundBody;
+    if (
+      !Object.keys(headers).some((k) => k.toLowerCase() === "content-type")
+    ) {
+      fetchInit.headers = { ...headers, "Content-Type": "application/json" };
+    }
+  }
+
+  const upstreamRes = await fetch(outboundUrl.toString(), fetchInit);
 
   // Pass through status + body verbatim. Don't read .text() unless we
   // need to — Web Streams keep the body off our heap.
