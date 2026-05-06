@@ -471,6 +471,14 @@ export default function PortfolioPage({
   useEffect(() => {
     holdingsRef.current = holdings;
   }, [holdings]);
+  // Synchronous in-flight guard for handleSync. The button uses
+  // `disabled={!!syncLoading}` based on React state, but state updates
+  // don't apply until the next render — so a fast double-click or
+  // user impatiently re-clicking can fire multiple `handleSync` calls
+  // before the disabled state takes effect, and each one runs through
+  // the full pipeline (real-world: user clicked 5x, got 5 duplicate
+  // SnapTrade lots). This ref blocks re-entry synchronously.
+  const syncInFlightRef = useRef(false);
   // Publish ownership to the AppShell so the right tab (Mine vs Friends)
   // highlights while we're on this route. Pass `null` until the portfolio
   // doc has loaded so we don't wrongly flash the owner state.
@@ -665,6 +673,28 @@ export default function PortfolioPage({
   };
 
   const handleSync = async (provider: BrokerId, keyOverride?: string) => {
+    // Synchronous re-entry guard. Must run before any async work so
+    // back-to-back clicks (or React-state-lag from `setSyncLoading`)
+    // can't double-fire. See `syncInFlightRef` declaration above.
+    if (syncInFlightRef.current) return;
+    syncInFlightRef.current = true;
+    // Set syncLoading BEFORE the runHandleSync call so the button's
+    // `disabled={!!syncLoading}` applies on the next render — i.e.
+    // immediately, not after the credential-decrypt + Firestore-read
+    // chain inside runHandleSync. Without this, the button stays
+    // visually clickable for up to ~30s during the SnapTrade API
+    // call, which makes the click look ignored.
+    setSyncLoading(provider);
+    setSyncError("");
+    try {
+      await runHandleSync(provider, keyOverride);
+    } finally {
+      syncInFlightRef.current = false;
+      setSyncLoading(null);
+    }
+  };
+
+  const runHandleSync = async (provider: BrokerId, keyOverride?: string) => {
     if (!portfolio || !user) return;
     const adapter = BROKERS[provider];
     if (!adapter) {
@@ -790,8 +820,8 @@ export default function PortfolioPage({
       }
     }
 
-    setSyncLoading(provider);
-    setSyncError("");
+    // Note: setSyncLoading/setSyncError already fired in the
+    // `handleSync` wrapper before any await. Don't duplicate here.
     const errors: string[] = [];
     let buys = 0;
     let sells = 0;
@@ -1068,7 +1098,9 @@ export default function PortfolioPage({
         }
       }
     } finally {
-      setSyncLoading(null);
+      // Note: setSyncLoading(null) is now handled in the `handleSync`
+      // wrapper's finally — keeps the in-flight ref + the loading
+      // state lifecycle in one place.
       try {
         // syncLog body is encrypted under K_portfolio because `errors`
         // strings can carry broker-named messages (e.g. "Trading212
@@ -1754,9 +1786,27 @@ export default function PortfolioPage({
                         </span>
                         {result && (
                           <span className="text-xs text-fg-fade">
-                            {result.buys} buys · {result.sells} sells · {result.skipped} already existed
-                            {result.partialFillsSkipped > 0 && (
-                              <> · {result.partialFillsSkipped} partial fills skipped</>
+                            {result.buys === 0
+                              && result.sells === 0
+                              && result.skipped === 0
+                              && result.partialFillsSkipped === 0 ? (
+                              // All counters zero → either nothing
+                              // changed since last sync (adapter-level
+                              // dedup filtered everything before the
+                              // page even saw it), or the broker
+                              // returned no orders at all. Either way
+                              // the literal "0 buys · 0 sells · 0
+                              // already existed" line is misleading;
+                              // a single "Already up to date" reads
+                              // correctly for both cases.
+                              <>Already up to date</>
+                            ) : (
+                              <>
+                                {result.buys} buys · {result.sells} sells · {result.skipped} already existed
+                                {result.partialFillsSkipped > 0 && (
+                                  <> · {result.partialFillsSkipped} partial fills skipped</>
+                                )}
+                              </>
                             )}
                           </span>
                         )}
