@@ -1,8 +1,10 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   mapSnaptradeActivity,
+  mapSnaptradePosition,
   listSnapTradeAccounts,
   type SnaptradeActivity,
+  type SnaptradePosition,
 } from "./sync";
 import { snaptradeAdapter } from "./index";
 
@@ -193,7 +195,7 @@ describe("listSnapTradeAccounts", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("calls /api/v1/snapTrade/listUserAccounts with userId+userSecret in query", async () => {
+  it("calls /api/v1/accounts with userId+userSecret in query", async () => {
     const fetchSpy = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
         new Response("[]", { status: 200 }),
@@ -206,7 +208,7 @@ describe("listSnapTradeAccounts", () => {
     const body = JSON.parse(init.body as string);
     expect(body.brokerId).toBe("snaptrade");
     expect(body.path).toBe(
-      "/api/v1/snapTrade/listUserAccounts?userId=u&userSecret=s",
+      "/api/v1/accounts?userId=u&userSecret=s",
     );
     expect(body.method).toBe("GET");
     // Auth payload handed to the proxy contains exactly the 4 BYO
