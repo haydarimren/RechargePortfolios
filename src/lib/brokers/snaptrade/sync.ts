@@ -27,7 +27,17 @@
  */
 
 import { proxyFetch } from "../proxy-fetch";
-import type { ImportedOrder, ImportResult, IsOrderKnownFn } from "../types";
+import type {
+  DiagDecision,
+  FilledQtySign,
+  ImportedOrder,
+  ImportResult,
+  IsOrderKnownFn,
+  SkipReason,
+  SnapTradeDiagnostics,
+  SnapTradeOrderDiag,
+  SnapTradePositionDiag,
+} from "../types";
 import { snaptradeSymbolToYahoo } from "./symbols";
 
 /**
@@ -172,7 +182,7 @@ export type MapSnaptradeActivityResult =
 
 export type MapSnaptradeOrderResult =
   | { kind: "keep"; order: ImportedOrder }
-  | { kind: "skip" };
+  | { kind: "skip"; reason: SkipReason };
 
 /**
  * Pure mapping: take one raw SnapTrade order leg, decide whether to
@@ -200,18 +210,20 @@ export function mapSnaptradeOrder(
   raw: SnaptradeOrder,
 ): MapSnaptradeOrderResult {
   const action = raw.action;
-  if (action !== "BUY" && action !== "SELL") return { kind: "skip" };
-
-  if (!raw.brokerage_order_id) return { kind: "skip" };
-  if (!raw.time_executed) return { kind: "skip" };
-  if (raw.execution_price === null || raw.execution_price === undefined) {
-    return { kind: "skip" };
+  if (action !== "BUY" && action !== "SELL") {
+    return { kind: "skip", reason: "unsupported-action" };
   }
-  if (!raw.filled_quantity) return { kind: "skip" };
+
+  if (!raw.brokerage_order_id) return { kind: "skip", reason: "no-order-id" };
+  if (!raw.time_executed) return { kind: "skip", reason: "no-time-executed" };
+  if (raw.execution_price === null || raw.execution_price === undefined) {
+    return { kind: "skip", reason: "no-execution-price" };
+  }
+  if (!raw.filled_quantity) return { kind: "skip", reason: "no-filled-qty" };
 
   const rawSymbol = raw.universal_symbol?.symbol;
   if (typeof rawSymbol !== "string" || rawSymbol.length === 0) {
-    return { kind: "skip" };
+    return { kind: "skip", reason: "no-symbol" };
   }
 
   // SnapTrade returns filled_quantity as a string (decimal-friendly).
@@ -219,8 +231,12 @@ export function mapSnaptradeOrder(
   // the finite check rather than silently truncate.
   const shares = Math.abs(Number(raw.filled_quantity));
   const price = raw.execution_price;
-  if (!isFinite(shares) || shares <= 0) return { kind: "skip" };
-  if (!isFinite(price) || price <= 0) return { kind: "skip" };
+  if (!isFinite(shares) || shares <= 0) {
+    return { kind: "skip", reason: "non-finite-shares" };
+  }
+  if (!isFinite(price) || price <= 0) {
+    return { kind: "skip", reason: "non-positive-price" };
+  }
 
   const symbol = snaptradeSymbolToYahoo(rawSymbol);
   return {
@@ -240,7 +256,7 @@ export function mapSnaptradeOrder(
 
 export type MapSnaptradePositionResult =
   | { kind: "keep"; order: ImportedOrder }
-  | { kind: "skip" };
+  | { kind: "skip"; reason: SkipReason };
 
 /**
  * Pure mapping: take one raw SnapTrade position, produce a synthetic
@@ -269,16 +285,16 @@ export function mapSnaptradePosition(
 ): MapSnaptradePositionResult {
   const rawSymbol = raw.symbol?.symbol?.symbol;
   if (typeof rawSymbol !== "string" || rawSymbol.length === 0) {
-    return { kind: "skip" };
+    return { kind: "skip", reason: "no-symbol" };
   }
   const units = raw.units;
   const price = raw.average_purchase_price ?? raw.price;
   if (typeof units !== "number" || !isFinite(units) || units <= 0) {
     // Skip empty or short positions for v1.
-    return { kind: "skip" };
+    return { kind: "skip", reason: "non-positive-units" };
   }
   if (typeof price !== "number" || !isFinite(price) || price <= 0) {
-    return { kind: "skip" };
+    return { kind: "skip", reason: "non-positive-price" };
   }
   const symbol = snaptradeSymbolToYahoo(rawSymbol);
   return {
@@ -418,6 +434,39 @@ async function fetchSnaptradeHoldings(
  * positions use `pos-{accountId}-{symbol}` as a deterministic id
  * for the same dedup behavior.
  */
+/**
+ * Sign of a SnapTrade `filled_quantity` (string|null) — magnitude is
+ * deliberately discarded so the diagnostics trace can record direction
+ * without exporting any share count.
+ */
+function filledQtySign(v: string | null | undefined): FilledQtySign {
+  if (v === null || v === undefined || v === "") return "absent";
+  const n = Number(v);
+  if (Number.isNaN(n)) return "absent";
+  if (n > 0) return "positive";
+  if (n < 0) return "negative";
+  return "zero";
+}
+
+/**
+ * Stable opaque symbol→token mapper for the redacted trace. The real
+ * ticker never appears in the diagnostics; correlation across orders
+ * and positions is preserved via the token only.
+ */
+function makeSymbolTokenizer(): (symbol: string | null) => string | null {
+  const map = new Map<string, string>();
+  let n = 0;
+  return (symbol) => {
+    if (!symbol) return null;
+    const existing = map.get(symbol);
+    if (existing) return existing;
+    n += 1;
+    const token = `SYM_${n}`;
+    map.set(symbol, token);
+    return token;
+  };
+}
+
 export async function fetchSnapTradeOrders(
   credential: string,
   isOrderKnown?: IsOrderKnownFn,
@@ -433,26 +482,91 @@ export async function fetchSnapTradeOrders(
   // form to match what mapSnaptradePosition emits.
   const symbolsCoveredByOrders = new Set<string>();
 
+  // --- Redacted diagnostics accumulators (no holdings data) ---
+  const tokenFor = makeSymbolTokenizer();
+  const orderDiags: SnapTradeOrderDiag[] = [];
+  const positionDiags: SnapTradePositionDiag[] = [];
+  // Net signed order shares + position units per token, kept ONLY to
+  // derive a boolean; the numbers themselves never enter the trace.
+  const ordersNetByToken = new Map<string, number>();
+  const positionUnitsByToken = new Map<string, number>();
+  const ordersSkipped: Partial<Record<SkipReason, number>> = {};
+  const positionsSkipped: Partial<Record<SkipReason, number>> = {};
+  let ordersKept = 0;
+  let ordersDeduped = 0;
+  let positionsKept = 0;
+  let positionsSuppressed = 0;
+  let positionsDeduped = 0;
+  const bump = (
+    acc: Partial<Record<SkipReason, number>>,
+    r: SkipReason,
+  ) => {
+    acc[r] = (acc[r] ?? 0) + 1;
+  };
+
   // Primary: real orders. Each executed BUY/SELL leg becomes its own
   // lot with the broker-side timestamp + execution price.
   const orderRecords = holdings.orders ?? [];
   for (const raw of orderRecords) {
     const out = mapSnaptradeOrder(raw);
-    if (out.kind === "skip") continue;
-    symbolsCoveredByOrders.add(out.order.symbol);
-    if (
-      isOrderKnown
-      && isOrderKnown({
-        orderId: out.order.id,
-        rawTicker: out.order.symbol,
-        purchaseDate: out.order.purchaseDate,
-        shares: out.order.shares,
-      })
-    ) {
-      continue;
+    const rawOrderSymbol = raw.universal_symbol?.symbol;
+    const normSymbol =
+      typeof rawOrderSymbol === "string" && rawOrderSymbol.length > 0
+        ? snaptradeSymbolToYahoo(rawOrderSymbol)
+        : null;
+    const symbolToken = tokenFor(normSymbol);
+    let decision: DiagDecision;
+    let skipReason: SkipReason | null = null;
+
+    if (out.kind === "skip") {
+      decision = "skipped";
+      skipReason = out.reason;
+      bump(ordersSkipped, out.reason);
+    } else {
+      symbolsCoveredByOrders.add(out.order.symbol);
+      const known =
+        !!isOrderKnown
+        && isOrderKnown({
+          orderId: out.order.id,
+          rawTicker: out.order.symbol,
+          purchaseDate: out.order.purchaseDate,
+          shares: out.order.shares,
+        });
+      // Net is over all mappable orders in the window (kept OR already
+      // imported) so it can be compared against the position snapshot.
+      if (symbolToken) {
+        const signed =
+          (out.order.side === "SELL" ? -1 : 1) * out.order.shares;
+        ordersNetByToken.set(
+          symbolToken,
+          (ordersNetByToken.get(symbolToken) ?? 0) + signed,
+        );
+      }
+      if (known) {
+        decision = "deduped";
+        ordersDeduped += 1;
+      } else {
+        decision = "kept";
+        ordersKept += 1;
+        mapped.push(out.order);
+        if (out.order.side === "SELL") sellsImported++;
+      }
     }
-    mapped.push(out.order);
-    if (out.order.side === "SELL") sellsImported++;
+
+    orderDiags.push({
+      action: typeof raw.action === "string" ? raw.action : null,
+      status: typeof raw.status === "string" ? raw.status : null,
+      hasOrderId: !!raw.brokerage_order_id,
+      hasTimeExecuted: !!raw.time_executed,
+      hasExecutionPrice:
+        raw.execution_price !== null && raw.execution_price !== undefined,
+      hasFilledQty: !!raw.filled_quantity,
+      filledQtySign: filledQtySign(raw.filled_quantity),
+      rawKeys: Object.keys(raw as Record<string, unknown>).sort(),
+      symbolToken,
+      decision,
+      skipReason,
+    });
   }
 
   // Fill the gaps from positions: any position whose symbol isn't
@@ -467,27 +581,94 @@ export async function fetchSnapTradeOrders(
   const positions = holdings.positions ?? [];
   for (const raw of positions) {
     const out = mapSnaptradePosition(raw, cred.snaptradeAccountId, today);
-    if (out.kind === "skip") continue;
-    if (symbolsCoveredByOrders.has(out.order.symbol)) continue;
-    if (
-      isOrderKnown
-      && isOrderKnown({
-        orderId: out.order.id,
-        rawTicker: out.order.symbol,
-        purchaseDate: out.order.purchaseDate,
-        shares: out.order.shares,
-      })
-    ) {
-      continue;
+    const rawPosSymbol = raw.symbol?.symbol?.symbol;
+    const normSymbol =
+      typeof rawPosSymbol === "string" && rawPosSymbol.length > 0
+        ? snaptradeSymbolToYahoo(rawPosSymbol)
+        : null;
+    const symbolToken = tokenFor(normSymbol);
+    let decision: DiagDecision;
+    let skipReason: SkipReason | null = null;
+
+    if (out.kind === "skip") {
+      decision = "skipped";
+      skipReason = out.reason;
+      bump(positionsSkipped, out.reason);
+    } else if (symbolsCoveredByOrders.has(out.order.symbol)) {
+      decision = "suppressed-by-orders";
+      positionsSuppressed += 1;
+      if (symbolToken) positionUnitsByToken.set(symbolToken, out.order.shares);
+    } else {
+      const known =
+        !!isOrderKnown
+        && isOrderKnown({
+          orderId: out.order.id,
+          rawTicker: out.order.symbol,
+          purchaseDate: out.order.purchaseDate,
+          shares: out.order.shares,
+        });
+      if (symbolToken) positionUnitsByToken.set(symbolToken, out.order.shares);
+      if (known) {
+        decision = "deduped";
+        positionsDeduped += 1;
+      } else {
+        decision = "kept";
+        positionsKept += 1;
+        mapped.push(out.order);
+      }
     }
-    mapped.push(out.order);
+
+    positionDiags.push({
+      symbolToken,
+      hasUnits: raw.units !== null && raw.units !== undefined,
+      hasPrice:
+        (raw.average_purchase_price ?? raw.price ?? null) !== null,
+      decision,
+      skipReason,
+    });
   }
+
+  const tokens = new Set<string>([
+    ...ordersNetByToken.keys(),
+    ...positionUnitsByToken.keys(),
+  ]);
+  const perSymbol = Array.from(tokens).map((symbolToken) => {
+    const units = positionUnitsByToken.get(symbolToken);
+    if (units === undefined) {
+      return { symbolToken, ordersNetMatchesPositionUnits: null };
+    }
+    const net = ordersNetByToken.get(symbolToken) ?? 0;
+    return {
+      symbolToken,
+      ordersNetMatchesPositionUnits: Math.abs(net - units) < 1e-4,
+    };
+  });
+
+  const diagnostics: SnapTradeDiagnostics = {
+    schemaVersion: 1,
+    httpOk: true,
+    rawOrderCount: orderRecords.length,
+    rawPositionCount: positions.length,
+    orders: orderDiags,
+    positions: positionDiags,
+    perSymbol,
+    summary: {
+      ordersKept,
+      ordersDeduped,
+      ordersSkipped,
+      positionsKept,
+      positionsSuppressed,
+      positionsDeduped,
+      positionsSkipped,
+    },
+  };
 
   return {
     orders: mapped,
     sellsSkipped: 0,
     sellsImported,
     partialFillsSkipped: 0,
+    diagnostics,
   };
 }
 
