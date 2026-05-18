@@ -1,9 +1,12 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   mapSnaptradeActivity,
+  mapSnaptradeOrder,
   mapSnaptradePosition,
+  fetchSnapTradeOrders,
   listSnapTradeAccounts,
   type SnaptradeActivity,
+  type SnaptradeOrder,
   type SnaptradePosition,
 } from "./sync";
 import { snaptradeAdapter } from "./index";
@@ -167,6 +170,185 @@ describe("snaptradeAdapter", () => {
       snaptradeUserSecret: "secret",
     });
     expect(parsed.snaptradeAccountId).toBeUndefined();
+  });
+});
+
+function order(overrides: Partial<SnaptradeOrder> = {}): SnaptradeOrder {
+  return {
+    brokerage_order_id: "oid-1",
+    status: "EXECUTED",
+    action: "BUY",
+    filled_quantity: "10",
+    execution_price: 100,
+    time_executed: "2026-05-15T14:30:00Z",
+    universal_symbol: { symbol: "AAPL" },
+    quote_currency: { code: "USD" },
+    ...overrides,
+  };
+}
+
+describe("mapSnaptradeOrder skip reasons", () => {
+  const reason = (o: SnaptradeOrder) => {
+    const r = mapSnaptradeOrder(o);
+    return r.kind === "skip" ? r.reason : "keep";
+  };
+  it("keeps a valid order", () => {
+    expect(mapSnaptradeOrder(order()).kind).toBe("keep");
+  });
+  it("flags every guard with the matching reason", () => {
+    expect(reason(order({ action: "DIVIDEND" }))).toBe("unsupported-action");
+    expect(reason(order({ brokerage_order_id: undefined }))).toBe("no-order-id");
+    expect(reason(order({ time_executed: null }))).toBe("no-time-executed");
+    expect(reason(order({ execution_price: null }))).toBe("no-execution-price");
+    expect(reason(order({ filled_quantity: null }))).toBe("no-filled-qty");
+    expect(reason(order({ universal_symbol: { symbol: "" } }))).toBe(
+      "no-symbol",
+    );
+    expect(reason(order({ filled_quantity: "abc" }))).toBe("non-finite-shares");
+    expect(reason(order({ execution_price: -1 }))).toBe("non-positive-price");
+  });
+});
+
+describe("mapSnaptradePosition skip reasons", () => {
+  const base: SnaptradePosition = {
+    units: 5,
+    average_purchase_price: 10,
+    symbol: { symbol: { symbol: "AAPL" } },
+    currency: { code: "USD" },
+  };
+  const reason = (p: SnaptradePosition) => {
+    const r = mapSnaptradePosition(p, "acc", "2026-05-18");
+    return r.kind === "skip" ? r.reason : "keep";
+  };
+  it("flags each guard", () => {
+    expect(reason({ ...base, symbol: null })).toBe("no-symbol");
+    expect(reason({ ...base, units: 0 })).toBe("non-positive-units");
+    expect(
+      reason({ ...base, average_purchase_price: 0, price: 0 }),
+    ).toBe("non-positive-price");
+    expect(reason(base)).toBe("keep");
+  });
+});
+
+describe("fetchSnapTradeOrders diagnostics", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const cred = JSON.stringify({
+    clientId: "C",
+    consumerKey: "K",
+    snaptradeUserId: "u",
+    snaptradeUserSecret: "s",
+    snaptradeAccountId: "ACCT-ZZSECRET",
+  });
+
+  function stubHoldings(body: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })),
+    );
+  }
+
+  it("records a decision per record with skip reasons + qty sign", async () => {
+    stubHoldings({
+      orders: [
+        order(), // kept BUY
+        order({ action: "DIVIDEND", brokerage_order_id: "oid-div" }), // skipped
+        order({
+          brokerage_order_id: "oid-neg",
+          action: "BUY",
+          filled_quantity: "-7", // sign signal for the mis-sided-sell bug
+          universal_symbol: { symbol: "TSLA" },
+        }),
+      ],
+      positions: [
+        // Same symbol as a kept order → suppressed-by-orders.
+        {
+          units: 10,
+          average_purchase_price: 100,
+          symbol: { symbol: { symbol: "AAPL" } },
+        },
+        // Distinct symbol with no order → kept.
+        {
+          units: 3,
+          average_purchase_price: 50,
+          symbol: { symbol: { symbol: "MSFT" } },
+        },
+      ],
+    });
+
+    const res = await fetchSnapTradeOrders(cred);
+    const d = res.diagnostics;
+    expect(d).toBeDefined();
+    if (!d) return;
+
+    expect(d.rawOrderCount).toBe(3);
+    expect(d.rawPositionCount).toBe(2);
+
+    const byTokenDecision = d.orders.map((o) => o.decision);
+    expect(byTokenDecision).toContain("kept");
+    expect(byTokenDecision).toContain("skipped");
+
+    const div = d.orders.find((o) => o.action === "DIVIDEND");
+    expect(div?.decision).toBe("skipped");
+    expect(div?.skipReason).toBe("unsupported-action");
+
+    const neg = d.orders.find((o) => o.filledQtySign === "negative");
+    expect(neg).toBeDefined();
+    expect(neg?.rawKeys).toContain("filled_quantity");
+
+    const suppressed = d.positions.find(
+      (p) => p.decision === "suppressed-by-orders",
+    );
+    expect(suppressed).toBeDefined();
+    expect(d.positions.some((p) => p.decision === "kept")).toBe(true);
+    expect(d.summary.positionsSuppressed).toBe(1);
+    expect(d.summary.ordersSkipped["unsupported-action"]).toBe(1);
+  });
+
+  it("marks an order deduped (not kept) when isOrderKnown matches", async () => {
+    stubHoldings({ orders: [order({ brokerage_order_id: "known-1" })], positions: [] });
+    const res = await fetchSnapTradeOrders(cred, (a) => a.orderId === "known-1");
+    expect(res.orders).toHaveLength(0);
+    expect(res.diagnostics?.orders[0].decision).toBe("deduped");
+    expect(res.diagnostics?.summary.ordersDeduped).toBe(1);
+  });
+
+  it("redacts: trace contains no symbols, magnitudes, prices, ids", async () => {
+    stubHoldings({
+      orders: [
+        order({
+          brokerage_order_id: "OID-ZZSECRET",
+          filled_quantity: "777.7777",
+          execution_price: 4242.42,
+          universal_symbol: { symbol: "ZZSECRETSYMZZ" },
+        }),
+      ],
+      positions: [
+        {
+          units: 88.88,
+          average_purchase_price: 1313.13,
+          symbol: { symbol: { symbol: "ZZSECRETSYMZZ" } },
+        },
+      ],
+    });
+    const res = await fetchSnapTradeOrders(cred);
+    const blob = JSON.stringify(res.diagnostics);
+    for (const sentinel of [
+      "ZZSECRETSYM",
+      "777.777",
+      "4242",
+      "OID-ZZSECRET",
+      "ACCT-ZZSECRET",
+      "88.88",
+      "1313.13",
+    ]) {
+      expect(blob).not.toContain(sentinel);
+    }
+    // The redacted token IS present (correlation without identity).
+    expect(blob).toContain("SYM_1");
   });
 });
 

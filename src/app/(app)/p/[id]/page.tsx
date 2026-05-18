@@ -37,10 +37,11 @@ import { FriendStack } from "@/components/FriendStack";
 import { PerformancePill } from "@/components/PerformancePill";
 import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { TabBar } from "@/components/TabBar";
+import { SyncHistory } from "@/components/SyncHistory";
 import { cleanT212Symbol } from "@/lib/brokers/trading212/symbols";
 import { BROKERS, SUPPORTED_BROKERS } from "@/lib/brokers/registry";
 import type { BrokerId } from "@/lib/brokers/ids";
-import type { ImportResult } from "@/lib/brokers/types";
+import type { ImportResult, SnapTradeDiagnostics } from "@/lib/brokers/types";
 import {
   decryptBrokerCredential,
   encryptBrokerCredential,
@@ -826,6 +827,10 @@ export default function PortfolioPage({
     let buys = 0;
     let sells = 0;
     let skipped = 0;
+    // Captured from the adapter result so the `finally` syncLog write
+    // can persist the redacted SnapTrade decision trace (encrypted
+    // under the portfolio key). Null for non-SnapTrade brokers.
+    let syncDiagnostics: SnapTradeDiagnostics | null = null;
     // For SnapTrade, the keyOverride / decrypted credential is JSON
     // containing `snaptradeAccountId`. Pull it out so each newly
     // imported holding can be tagged with the source account id —
@@ -918,6 +923,7 @@ export default function PortfolioPage({
         credential: plaintextKey,
         isOrderKnown,
       });
+      syncDiagnostics = result.diagnostics ?? null;
 
       // Use the already-decoded `holdings` state from the live
       // subscription. handleSync is recreated on every render, so the
@@ -1118,6 +1124,9 @@ export default function PortfolioPage({
           sells,
           skipped,
           errors,
+          // Redacted SnapTrade decision trace (no symbols/amounts/ids).
+          // Encrypted under K_portfolio along with the rest of the log.
+          diagnostics: syncDiagnostics,
         };
         if (portfolioKey) {
           const ct = await encryptJson(payload, portfolioKey);
@@ -1755,6 +1764,16 @@ export default function PortfolioPage({
               )}
             </>
           )}
+
+          {/* Encrypted sync diagnostics — readable in-app by the owner
+              and by shared viewers (Firestore rule relaxed to
+              owner-or-sharedWith). Lets a collaborator debug a sync
+              without any download or server logs. */}
+          <SyncHistory
+            portfolioId={id}
+            portfolioKey={portfolioKey}
+            isOwner={isOwner}
+          />
         </section>
       </main>
 

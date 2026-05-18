@@ -23,6 +23,98 @@ export interface ImportedOrder {
   side: "BUY" | "SELL";
 }
 
+/**
+ * Why a raw SnapTrade order/position was not turned into a holding.
+ * Every existing guard in the SnapTrade mappers maps to one of these.
+ * Recorded in the redacted diagnostics trace so a silently-dropped
+ * record becomes explainable without exporting any holdings data.
+ */
+export type SkipReason =
+  | "unsupported-action"
+  | "no-order-id"
+  | "no-time-executed"
+  | "no-execution-price"
+  | "no-filled-qty"
+  | "no-symbol"
+  | "non-finite-shares"
+  | "non-positive-price"
+  | "non-positive-units";
+
+/** Sign of `filled_quantity` — the magnitude is deliberately never recorded. */
+export type FilledQtySign = "positive" | "negative" | "zero" | "absent";
+
+/** What the sync pipeline did with one raw record. */
+export type DiagDecision =
+  | "kept"
+  | "deduped"
+  | "suppressed-by-orders"
+  | "skipped";
+
+/**
+ * Per-order diagnostic. Redacted by construction: enums, presence
+ * booleans, a sign, an opaque symbol token, and the set of raw field
+ * *names*. No shares magnitude, price, date, currency amount, order id,
+ * or raw ticker — ever.
+ */
+export interface SnapTradeOrderDiag {
+  action: string | null;
+  status: string | null;
+  hasOrderId: boolean;
+  hasTimeExecuted: boolean;
+  hasExecutionPrice: boolean;
+  hasFilledQty: boolean;
+  filledQtySign: FilledQtySign;
+  /** Sorted property names present on the raw order (values omitted). */
+  rawKeys: string[];
+  /** Stable opaque token (`SYM_1`, …) — never the real ticker. */
+  symbolToken: string | null;
+  decision: DiagDecision;
+  skipReason: SkipReason | null;
+}
+
+/** Per-position diagnostic. Same redaction guarantees as orders. */
+export interface SnapTradePositionDiag {
+  symbolToken: string | null;
+  hasUnits: boolean;
+  hasPrice: boolean;
+  decision: DiagDecision;
+  skipReason: SkipReason | null;
+}
+
+/**
+ * Redacted SnapTrade sync trace. Persisted (encrypted under the
+ * portfolio key) in the `syncLogs` doc so the operator can read *why*
+ * records were skipped/suppressed without any holdings data leaving the
+ * E2E boundary. Contains no symbols, share counts, prices, dates,
+ * account ids, or order ids.
+ */
+export interface SnapTradeDiagnostics {
+  schemaVersion: 1;
+  httpOk: boolean;
+  rawOrderCount: number;
+  rawPositionCount: number;
+  orders: SnapTradeOrderDiag[];
+  positions: SnapTradePositionDiag[];
+  /**
+   * Per opaque symbol token: did the net of mappable orders match the
+   * position snapshot's units? Boolean only — never the share numbers.
+   * `null` when there's no position to compare against.
+   */
+  perSymbol: Array<{
+    symbolToken: string;
+    ordersNetMatchesPositionUnits: boolean | null;
+  }>;
+  summary: {
+    ordersKept: number;
+    ordersDeduped: number;
+    ordersSkipped: Partial<Record<SkipReason, number>>;
+    positionsKept: number;
+    positionsSuppressed: number;
+    positionsDeduped: number;
+    positionsSkipped: Partial<Record<SkipReason, number>>;
+  };
+}
+
 export interface ImportResult {
   orders: ImportedOrder[];
   sellsSkipped: number;
@@ -36,6 +128,11 @@ export interface ImportResult {
    * (e.g. T212) that don't expose this state shape.
    */
   partialFillsSkipped: number;
+  /**
+   * SnapTrade-only redacted decision trace. Optional/broker-specific
+   * like `partialFillsSkipped`; other adapters leave it undefined.
+   */
+  diagnostics?: SnapTradeDiagnostics;
 }
 
 /**
