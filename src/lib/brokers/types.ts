@@ -115,10 +115,32 @@ export interface SnapTradeDiagnostics {
   };
 }
 
+/**
+ * The broker's authoritative *current* holding for one symbol — the
+ * position snapshot already reflects every sale. Reconciliation uses
+ * this as the source of truth for the current share count; the order
+ * legs only supply the timeline. Surfaced to the page (not the
+ * adapter) because the page is where stored holdings live and where
+ * the UI's pooling function can be applied to enforce the invariant.
+ */
+export interface ReconcilePosition {
+  symbol: string;
+  units: number;
+  price: number;
+  currency?: string;
+  yahooSymbol?: string;
+}
+
 export interface ImportResult {
   orders: ImportedOrder[];
   sellsSkipped: number;
   sellsImported: number;
+  /**
+   * SnapTrade-only: the broker's authoritative current positions. The
+   * page reconciles stored holdings to these via
+   * `reconcileToPositionUnits`. Other adapters leave it undefined.
+   */
+  positions?: ReconcilePosition[];
   /**
    * Orders we silently dropped because they were partially-filled-then-
    * cancelled (Alpaca's `status === "canceled"` with `filled_qty > 0`).

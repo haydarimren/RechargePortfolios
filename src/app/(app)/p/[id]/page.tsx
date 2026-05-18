@@ -25,6 +25,7 @@ import {
   buildTradeLog,
   fmtShares,
   poolPositions,
+  reconcileToPositionUnits,
   SeriesPoint,
 } from "@/lib/portfolio";
 import { useChartColors } from "@/lib/theme";
@@ -1055,6 +1056,121 @@ export default function PortfolioPage({
         batch.set(doc(holdingsCol), item.encryptedShape);
       }
       await batch.commit();
+
+      // --- Positions-authoritative reconciliation -------------------
+      // The broker's position snapshot is the truth for CURRENT shares
+      // (it already reflects every sale). SnapTrade's order window is
+      // partial/mis-dated, so the Section-104 pool over stored lots can
+      // disagree (a real sale dropped during import, mis-sided, or a
+      // sync-dated synthetic sorting after — and erasing — an earlier
+      // real sell). For each broker position, pool the actually-stored
+      // holdings (with the UI's own function) and write/maintain ONE
+      // canonical `pos-recon-` adjustment lot so the displayed net lands
+      // exactly on the broker's units. Best-effort: a hiccup here must
+      // not fail an otherwise-successful order import (onSnapshot
+      // reconciles; same optimistic contract as the rest of sync).
+      try {
+        const recPositions = result.positions ?? [];
+        if (recPositions.length > 0 && snaptradeAccountIdForWrites) {
+          const today = new Date().toISOString().split("T")[0];
+          // Lots written THIS sync aren't in `decodedCurrent` yet (the
+          // snapshot is async) — project them in memory so the pool is
+          // accurate now.
+          const projectedNew: Holding[] = newDocsBuffer.map((b, i) => {
+            const p = b.plaintextShape;
+            return {
+              id: `__new_${i}`,
+              symbol: String(p.symbol),
+              shares: Number(p.shares),
+              purchasePrice: Number(p.purchasePrice),
+              purchaseDate: String(p.purchaseDate),
+              createdAt: Number(p.createdAt ?? 0),
+              side: p.side === "SELL" ? "SELL" : "BUY",
+            };
+          });
+          const positionSymbols = new Set(recPositions.map((p) => p.symbol));
+
+          for (const pos of recPositions) {
+            const reconId =
+              `pos-recon-${snaptradeAccountIdForWrites}-${pos.symbol}`;
+            const existingRecon = decodedCurrent.find(
+              (h) =>
+                h.importSource === provider && h.brokerOrderId === reconId,
+            );
+            // Pool everything for this symbol EXCEPT a prior reconciler
+            // (recompute fresh) plus this sync's new legs.
+            const lots: Holding[] = [
+              ...decodedCurrent.filter(
+                (h) =>
+                  h.symbol === pos.symbol && h.id !== existingRecon?.id,
+              ),
+              ...projectedNew.filter((h) => h.symbol === pos.symbol),
+            ];
+            const adj = reconcileToPositionUnits(lots, pos.symbol, pos.units, {
+              price: pos.price,
+              date: today,
+              id: reconId,
+            });
+            if (adj && existingRecon) {
+              await updateHoldingFields(id, existingRecon.id, portfolioKey, {
+                shares: adj.shares,
+                purchasePrice: adj.purchasePrice,
+                side: adj.side,
+              });
+            } else if (adj && !existingRecon) {
+              const plain = {
+                symbol: adj.symbol,
+                shares: adj.shares,
+                purchasePrice: adj.purchasePrice,
+                purchaseDate: today,
+                side: adj.side,
+                importSource: provider,
+                brokerOrderId: reconId,
+                ...(pos.currency ? { currency: pos.currency } : {}),
+                ...(pos.yahooSymbol ? { yahooSymbol: pos.yahooSymbol } : {}),
+                snaptradeAccountId: snaptradeAccountIdForWrites,
+              };
+              if (portfolioKey) {
+                const ct = await encryptHolding(plain, portfolioKey);
+                await addDoc(holdingsCol, {
+                  payload: ct.payload,
+                  iv: ct.iv,
+                  createdAt: Date.now(),
+                  schemaVersion: 2,
+                });
+              } else {
+                await addDoc(holdingsCol, {
+                  ...plain,
+                  createdAt: Date.now(),
+                });
+              }
+            } else if (!adj && existingRecon && existingRecon.shares !== 0) {
+              // Lots now reconcile on their own — neutralize the stale
+              // reconciler (0 shares is inert in the pool).
+              await updateHoldingFields(id, existingRecon.id, portfolioKey, {
+                shares: 0,
+              });
+            }
+          }
+
+          // A symbol the broker no longer reports (fully sold) won't be
+          // in recPositions — neutralize any leftover reconciler so it
+          // can't keep a closed position visible.
+          for (const h of decodedCurrent) {
+            if (
+              h.importSource === provider &&
+              h.brokerOrderId?.startsWith("pos-recon-") &&
+              !positionSymbols.has(h.symbol) &&
+              h.shares !== 0
+            ) {
+              await updateHoldingFields(id, h.id, portfolioKey, { shares: 0 });
+            }
+          }
+        }
+      } catch (reconErr) {
+        console.warn("snaptrade reconciliation (best-effort) failed", reconErr);
+      }
+
       setSyncResults((prev) => ({
         ...prev,
         [provider]: {
