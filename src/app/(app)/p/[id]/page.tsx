@@ -983,6 +983,32 @@ export default function PortfolioPage({
           if (Object.keys(patch).length > 0) {
             await updateHoldingFields(id, target.id, portfolioKey, patch);
           }
+          // Synthetic position / reconciler lots (`pos-…` ids) carry the
+          // broker's *current* authoritative state for the symbol, not
+          // an immutable historical fill. They MUST self-correct on
+          // resync when the broker's units/price/side drift — otherwise
+          // a synthesized holding is frozen at its first-sync value
+          // forever (the old skip-forever bug). Real order legs are
+          // never rewritten here; only these adjustment lots.
+          if (order.id.startsWith("pos-")) {
+            const recon: {
+              shares?: number;
+              purchasePrice?: number;
+              side?: "BUY" | "SELL";
+            } = {};
+            if (Math.abs(target.shares - order.shares) > 1e-6) {
+              recon.shares = order.shares;
+            }
+            if (Math.abs(target.purchasePrice - order.purchasePrice) > 1e-6) {
+              recon.purchasePrice = order.purchasePrice;
+            }
+            if ((target.side ?? "BUY") !== order.side) {
+              recon.side = order.side;
+            }
+            if (Object.keys(recon).length > 0) {
+              await updateHoldingFields(id, target.id, portfolioKey, recon);
+            }
+          }
           skipped++;
           continue;
         }

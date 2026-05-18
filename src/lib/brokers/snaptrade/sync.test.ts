@@ -352,6 +352,107 @@ describe("fetchSnapTradeOrders diagnostics", () => {
   });
 });
 
+describe("fetchSnapTradeOrders reconciliation (positions authoritative)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const cred = JSON.stringify({
+    clientId: "C",
+    consumerKey: "K",
+    snaptradeUserId: "u",
+    snaptradeUserSecret: "s",
+    snaptradeAccountId: "ACC",
+  });
+
+  function stubHoldings(body: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })),
+    );
+  }
+
+  const netFor = (orders: { symbol: string; shares: number; side: string }[], sym: string) =>
+    orders
+      .filter((o) => o.symbol === sym)
+      .reduce((s, o) => s + (o.side === "SELL" ? -1 : 1) * o.shares, 0);
+
+  it("reconciles to position units when the order window is incomplete (sold-aged-out shows as BUY)", async () => {
+    // Window has only the BUY; the offsetting SELL aged out of
+    // SnapTrade's recent orders. Broker says he now holds 40.
+    stubHoldings({
+      orders: [
+        order({
+          brokerage_order_id: "b1",
+          action: "BUY",
+          filled_quantity: "100",
+          universal_symbol: { symbol: "REC" },
+        }),
+      ],
+      positions: [
+        {
+          units: 40,
+          average_purchase_price: 50,
+          symbol: { symbol: { symbol: "REC" } },
+        },
+      ],
+    });
+    const res = await fetchSnapTradeOrders(cred);
+    // Current holding must equal the broker's authoritative units (40),
+    // not the incomplete order-window net (100).
+    expect(netFor(res.orders, "REC")).toBeCloseTo(40, 6);
+  });
+
+  it("does not add a reconciling lot when orders already match the position", async () => {
+    stubHoldings({
+      orders: [
+        order({
+          brokerage_order_id: "b1",
+          action: "BUY",
+          filled_quantity: "100",
+          universal_symbol: { symbol: "REC" },
+        }),
+        order({
+          brokerage_order_id: "s1",
+          action: "SELL",
+          filled_quantity: "60",
+          universal_symbol: { symbol: "REC" },
+        }),
+      ],
+      positions: [
+        {
+          units: 40,
+          average_purchase_price: 50,
+          symbol: { symbol: { symbol: "REC" } },
+        },
+      ],
+    });
+    const res = await fetchSnapTradeOrders(cred);
+    expect(netFor(res.orders, "REC")).toBeCloseTo(40, 6);
+    // Only the two real legs — no synthetic reconciler.
+    expect(res.orders.filter((o) => o.symbol === "REC")).toHaveLength(2);
+    expect(
+      res.orders.some((o) => o.id.startsWith("pos-recon-")),
+    ).toBe(false);
+  });
+
+  it("still synthesizes a position with no order history at all", async () => {
+    stubHoldings({
+      orders: [],
+      positions: [
+        {
+          units: 7,
+          average_purchase_price: 12,
+          symbol: { symbol: { symbol: "NOORD" } },
+        },
+      ],
+    });
+    const res = await fetchSnapTradeOrders(cred);
+    expect(netFor(res.orders, "NOORD")).toBeCloseTo(7, 6);
+  });
+});
+
 describe("listSnapTradeAccounts", () => {
   afterEach(() => {
     vi.restoreAllMocks();

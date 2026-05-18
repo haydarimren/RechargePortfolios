@@ -490,6 +490,9 @@ export async function fetchSnapTradeOrders(
   // derive a boolean; the numbers themselves never enter the trace.
   const ordersNetByToken = new Map<string, number>();
   const positionUnitsByToken = new Map<string, number>();
+  // Same net, keyed by the real normalized symbol — used to reconcile
+  // each position against its in-window order legs (NOT exported).
+  const ordersNetBySymbol = new Map<string, number>();
   const ordersSkipped: Partial<Record<SkipReason, number>> = {};
   const positionsSkipped: Partial<Record<SkipReason, number>> = {};
   let ordersKept = 0;
@@ -534,14 +537,18 @@ export async function fetchSnapTradeOrders(
         });
       // Net is over all mappable orders in the window (kept OR already
       // imported) so it can be compared against the position snapshot.
+      const signed =
+        (out.order.side === "SELL" ? -1 : 1) * out.order.shares;
       if (symbolToken) {
-        const signed =
-          (out.order.side === "SELL" ? -1 : 1) * out.order.shares;
         ordersNetByToken.set(
           symbolToken,
           (ordersNetByToken.get(symbolToken) ?? 0) + signed,
         );
       }
+      ordersNetBySymbol.set(
+        out.order.symbol,
+        (ordersNetBySymbol.get(out.order.symbol) ?? 0) + signed,
+      );
       if (known) {
         decision = "deduped";
         ordersDeduped += 1;
@@ -594,26 +601,65 @@ export async function fetchSnapTradeOrders(
       decision = "skipped";
       skipReason = out.reason;
       bump(positionsSkipped, out.reason);
-    } else if (symbolsCoveredByOrders.has(out.order.symbol)) {
-      decision = "suppressed-by-orders";
-      positionsSuppressed += 1;
-      if (symbolToken) positionUnitsByToken.set(symbolToken, out.order.shares);
     } else {
-      const known =
-        !!isOrderKnown
-        && isOrderKnown({
-          orderId: out.order.id,
-          rawTicker: out.order.symbol,
-          purchaseDate: out.order.purchaseDate,
-          shares: out.order.shares,
-        });
+      // Position mapped with real units. Record units for the
+      // perSymbol diagnostic (pre-reconciliation comparison).
       if (symbolToken) positionUnitsByToken.set(symbolToken, out.order.shares);
-      if (known) {
-        decision = "deduped";
-        positionsDeduped += 1;
+      const unitsTrue = out.order.shares;
+
+      if (symbolsCoveredByOrders.has(out.order.symbol)) {
+        // Orders touched this symbol. The position is the authoritative
+        // CURRENT holding; the order legs supply the timeline. If the
+        // in-window order net already equals the broker units, the
+        // orders fully cover it — nothing to add. If they diverge
+        // (SnapTrade's order window is partial — older sells/buys aged
+        // out), emit ONE reconciling adjustment lot so the pooled
+        // current shares equal the broker's units. Deterministic id =>
+        // idempotent across resyncs; the page updates it in place when
+        // units drift, so it self-corrects instead of suppressing the
+        // truth forever.
+        const net = ordersNetBySymbol.get(out.order.symbol) ?? 0;
+        const delta = unitsTrue - net;
+        if (Math.abs(delta) <= 1e-4) {
+          decision = "suppressed-by-orders";
+          positionsSuppressed += 1;
+        } else {
+          decision = "kept";
+          positionsKept += 1;
+          mapped.push({
+            id: `pos-recon-${cred.snaptradeAccountId}-${out.order.symbol}`,
+            symbol: out.order.symbol,
+            shares: Math.abs(delta),
+            purchasePrice: out.order.purchasePrice,
+            purchaseDate: today,
+            currency: out.order.currency,
+            yahooSymbol: out.order.yahooSymbol,
+            side: delta > 0 ? "BUY" : "SELL",
+          });
+          if (delta < 0) sellsImported++;
+        }
       } else {
-        decision = "kept";
-        positionsKept += 1;
+        // No order history for this symbol at all — synthesize the
+        // whole position (existing fallback). ALWAYS emit it (no
+        // isOrderKnown dedup-skip): the page matches the deterministic
+        // `pos-` id and updates the stored holding in place when units
+        // drift, fixing the old "synthesized position never
+        // self-corrects" limitation. `known` only affects the trace.
+        const known =
+          !!isOrderKnown
+          && isOrderKnown({
+            orderId: out.order.id,
+            rawTicker: out.order.symbol,
+            purchaseDate: out.order.purchaseDate,
+            shares: out.order.shares,
+          });
+        if (known) {
+          decision = "deduped";
+          positionsDeduped += 1;
+        } else {
+          decision = "kept";
+          positionsKept += 1;
+        }
         mapped.push(out.order);
       }
     }
