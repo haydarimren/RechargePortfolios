@@ -55,7 +55,7 @@ export function AppShell({
   return (
     <div className="flex flex-1 min-h-screen bg-bg">
       {/* Sidebar — md and up */}
-      <aside className="hidden md:flex flex-col w-[180px] shrink-0 bg-bg-3 border-r border-line px-3 py-5 gap-1">
+      <aside className="hidden md:flex md:sticky md:top-0 md:h-screen md:overflow-y-auto flex-col w-[180px] shrink-0 bg-bg-3 border-r border-line px-3 py-5 gap-1">
         <div className="text-sm font-semibold text-fg px-2.5 pt-1 pb-5">Recharge</div>
         {NAV.map((item) => {
           const active = isActive(pathname, item.href, ownership);
