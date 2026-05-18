@@ -123,6 +123,45 @@ export function poolPositions(holdings: Holding[]): PooledPosition[] {
 }
 
 /**
+ * The broker's position snapshot is the authoritative answer to "how
+ * many shares does he hold right now" — it already reflects every sale.
+ * The order history we import from SnapTrade is only a partial,
+ * sometimes mis-dated window, so the Section-104 pool over the stored
+ * lots can disagree with the truth: a real sale may have been dropped
+ * during import, mis-sided, or (as a synthesized position) stamped with
+ * the sync date so it sorts after — and thus erases — an earlier real
+ * sell.
+ *
+ * Rather than trust the derived lot math for the *current* count, this
+ * returns a single adjustment lot that, appended to the symbol's
+ * holdings, forces `poolPositions` to land exactly on the broker's
+ * units — independent of which upstream step lost the sale. It sorts
+ * strictly last so it corrects the FINAL pool and can never be
+ * pre-empted by a mis-dated lot. Returns null when the stored holdings
+ * already pool to the target (no adjustment needed).
+ */
+export function reconcileToPositionUnits(
+  holdings: Holding[],
+  symbol: string,
+  targetUnits: number,
+  opts: { price: number; date: string; id: string },
+): Holding | null {
+  const current =
+    poolPositions(holdings).find((p) => p.symbol === symbol)?.shares ?? 0;
+  const delta = targetUnits - current;
+  if (Math.abs(delta) <= 1e-6) return null;
+  return {
+    id: opts.id,
+    symbol,
+    shares: Math.abs(delta),
+    purchasePrice: opts.price,
+    purchaseDate: opts.date,
+    side: delta > 0 ? "BUY" : "SELL",
+    createdAt: Number.MAX_SAFE_INTEGER,
+  };
+}
+
+/**
  * Legacy shim used by existing UI callers. Preserves the `TickerPosition`
  * interface shape (including `lots`, `cost`, `firstDate`). Symbols fully
  * sold out are dropped.

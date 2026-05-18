@@ -373,14 +373,16 @@ describe("fetchSnapTradeOrders reconciliation (positions authoritative)", () => 
     );
   }
 
-  const netFor = (orders: { symbol: string; shares: number; side: string }[], sym: string) =>
-    orders
-      .filter((o) => o.symbol === sym)
-      .reduce((s, o) => s + (o.side === "SELL" ? -1 : 1) * o.shares, 0);
+  const posFor = (
+    positions: { symbol: string; units: number; price: number }[] | undefined,
+    sym: string,
+  ) => (positions ?? []).find((p) => p.symbol === sym);
 
-  it("reconciles to position units when the order window is incomplete (sold-aged-out shows as BUY)", async () => {
-    // Window has only the BUY; the offsetting SELL aged out of
-    // SnapTrade's recent orders. Broker says he now holds 40.
+  it("surfaces the broker position as authoritative units, even on an incomplete window", async () => {
+    // Window has only the BUY; the offsetting SELL aged out. Broker
+    // says he now holds 40. The adapter must NOT turn this into a lot
+    // or net the orders — it surfaces the position for the page to
+    // reconcile against stored holdings.
     stubHoldings({
       orders: [
         order({
@@ -399,12 +401,20 @@ describe("fetchSnapTradeOrders reconciliation (positions authoritative)", () => 
       ],
     });
     const res = await fetchSnapTradeOrders(cred);
-    // Current holding must equal the broker's authoritative units (40),
-    // not the incomplete order-window net (100).
-    expect(netFor(res.orders, "REC")).toBeCloseTo(40, 6);
+    expect(posFor(res.positions, "REC")).toEqual({
+      symbol: "REC",
+      units: 40,
+      price: 50,
+      currency: undefined,
+      yahooSymbol: "REC",
+    });
+    // The real BUY leg still flows through for the timeline...
+    expect(res.orders.filter((o) => o.symbol === "REC")).toHaveLength(1);
+    // ...but no synthetic/reconciler lot is emitted by the adapter.
+    expect(res.orders.some((o) => o.id.startsWith("pos-"))).toBe(false);
   });
 
-  it("does not add a reconciling lot when orders already match the position", async () => {
+  it("surfaces the position even when orders already reconcile", async () => {
     stubHoldings({
       orders: [
         order({
@@ -429,15 +439,12 @@ describe("fetchSnapTradeOrders reconciliation (positions authoritative)", () => 
       ],
     });
     const res = await fetchSnapTradeOrders(cred);
-    expect(netFor(res.orders, "REC")).toBeCloseTo(40, 6);
-    // Only the two real legs — no synthetic reconciler.
+    expect(posFor(res.positions, "REC")?.units).toBe(40);
     expect(res.orders.filter((o) => o.symbol === "REC")).toHaveLength(2);
-    expect(
-      res.orders.some((o) => o.id.startsWith("pos-recon-")),
-    ).toBe(false);
+    expect(res.orders.some((o) => o.id.startsWith("pos-"))).toBe(false);
   });
 
-  it("still synthesizes a position with no order history at all", async () => {
+  it("surfaces a position that has no order history at all", async () => {
     stubHoldings({
       orders: [],
       positions: [
@@ -449,7 +456,12 @@ describe("fetchSnapTradeOrders reconciliation (positions authoritative)", () => 
       ],
     });
     const res = await fetchSnapTradeOrders(cred);
-    expect(netFor(res.orders, "NOORD")).toBeCloseTo(7, 6);
+    expect(posFor(res.positions, "NOORD")).toMatchObject({
+      symbol: "NOORD",
+      units: 7,
+      price: 12,
+    });
+    expect(res.orders).toHaveLength(0);
   });
 });
 

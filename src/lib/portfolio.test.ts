@@ -5,6 +5,7 @@ import {
   fmtShares,
   buildComparisonSeries,
   poolPositions,
+  reconcileToPositionUnits,
 } from "./portfolio";
 import type { Holding } from "./types";
 import type { HistoricalPoint } from "./yahoo";
@@ -356,5 +357,53 @@ describe("poolPositions", () => {
     expect(res[0].lots).toBeDefined();
     expect(res[0].cost).toBeCloseTo(2000);
     expect(res[0].firstDate).toBe("2024-02-10");
+  });
+});
+
+describe("reconcileToPositionUnits", () => {
+  const opts = { price: 50, date: "2026-05-18", id: "pos-recon-ACC-PANW" };
+
+  it("forces the pooled net to the broker units when a sell was lost upstream", () => {
+    // The real sale never made it into stored holdings (dropped during
+    // import). Only a BUY 100 is on file; the broker says he holds 40.
+    const stored = [h("b1", "PANW", 100, 50, "2026-05-10")];
+    const adj = reconcileToPositionUnits(stored, "PANW", 40, opts);
+    expect(adj).not.toBeNull();
+    const net =
+      poolPositions([...stored, adj!]).find((p) => p.symbol === "PANW")
+        ?.shares ?? 0;
+    expect(net).toBeCloseTo(40, 6);
+  });
+
+  it("forces the net even when a real sell sorts before a sync-dated buy", () => {
+    // The exact reported bug shape: a real SELL dated earlier than a
+    // synthesized BUY stamped with the sync day. Section-104 drops the
+    // pre-buy sell, so the naive pooled net is wrong (100). The
+    // reconciler must still land the displayed net on the broker truth.
+    const stored = [
+      sell("s1", "PANW", 60, "2026-05-15"),
+      h("synth", "PANW", 100, 50, "2026-05-18"),
+    ];
+    const adj = reconcileToPositionUnits(stored, "PANW", 40, opts);
+    const net =
+      poolPositions(adj ? [...stored, adj] : stored).find(
+        (p) => p.symbol === "PANW",
+      )?.shares ?? 0;
+    expect(net).toBeCloseTo(40, 6);
+  });
+
+  it("returns null when the stored net already equals the broker units", () => {
+    const stored = [h("b1", "PANW", 40, 50, "2026-05-10")];
+    expect(reconcileToPositionUnits(stored, "PANW", 40, opts)).toBeNull();
+  });
+
+  it("emits a BUY adjustment when the broker holds more than is stored", () => {
+    const stored = [h("b1", "PANW", 40, 50, "2026-05-10")];
+    const adj = reconcileToPositionUnits(stored, "PANW", 70, opts);
+    expect(adj?.side).toBe("BUY");
+    const net =
+      poolPositions([...stored, adj!]).find((p) => p.symbol === "PANW")
+        ?.shares ?? 0;
+    expect(net).toBeCloseTo(70, 6);
   });
 });

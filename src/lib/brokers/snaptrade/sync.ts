@@ -33,6 +33,7 @@ import type {
   ImportedOrder,
   ImportResult,
   IsOrderKnownFn,
+  ReconcilePosition,
   SkipReason,
   SnapTradeDiagnostics,
   SnapTradeOrderDiag,
@@ -490,16 +491,20 @@ export async function fetchSnapTradeOrders(
   // derive a boolean; the numbers themselves never enter the trace.
   const ordersNetByToken = new Map<string, number>();
   const positionUnitsByToken = new Map<string, number>();
-  // Same net, keyed by the real normalized symbol — used to reconcile
-  // each position against its in-window order legs (NOT exported).
-  const ordersNetBySymbol = new Map<string, number>();
+  // The broker's authoritative current positions, handed to the page
+  // so it can reconcile stored holdings to them with the UI's own
+  // pooling function (reconciliation can't live here — the adapter
+  // can't see what's already stored).
+  const reconcilePositions: ReconcilePosition[] = [];
   const ordersSkipped: Partial<Record<SkipReason, number>> = {};
   const positionsSkipped: Partial<Record<SkipReason, number>> = {};
   let ordersKept = 0;
   let ordersDeduped = 0;
   let positionsKept = 0;
   let positionsSuppressed = 0;
-  let positionsDeduped = 0;
+  // Positions are no longer dedup-imported as lots (the page reconciles
+  // them), so this stays 0 — kept in the trace shape for stability.
+  const positionsDeduped = 0;
   const bump = (
     acc: Partial<Record<SkipReason, number>>,
     r: SkipReason,
@@ -535,20 +540,17 @@ export async function fetchSnapTradeOrders(
           purchaseDate: out.order.purchaseDate,
           shares: out.order.shares,
         });
-      // Net is over all mappable orders in the window (kept OR already
-      // imported) so it can be compared against the position snapshot.
-      const signed =
-        (out.order.side === "SELL" ? -1 : 1) * out.order.shares;
+      // Net over all mappable orders in the window (kept OR already
+      // imported), token-keyed, ONLY to derive the redacted perSymbol
+      // "orders vs position units" boolean for the diagnostics trace.
       if (symbolToken) {
+        const signed =
+          (out.order.side === "SELL" ? -1 : 1) * out.order.shares;
         ordersNetByToken.set(
           symbolToken,
           (ordersNetByToken.get(symbolToken) ?? 0) + signed,
         );
       }
-      ordersNetBySymbol.set(
-        out.order.symbol,
-        (ordersNetBySymbol.get(out.order.symbol) ?? 0) + signed,
-      );
       if (known) {
         decision = "deduped";
         ordersDeduped += 1;
@@ -602,65 +604,28 @@ export async function fetchSnapTradeOrders(
       skipReason = out.reason;
       bump(positionsSkipped, out.reason);
     } else {
-      // Position mapped with real units. Record units for the
-      // perSymbol diagnostic (pre-reconciliation comparison).
+      // Position mapped with real units. This is the broker's
+      // authoritative CURRENT holding for the symbol — it already
+      // reflects every sale. We do NOT turn it into a lot here:
+      // reconciliation against what's actually stored must happen on
+      // the page (it owns the stored holdings + the UI pooling fn).
+      // Surface it for the page to reconcile.
       if (symbolToken) positionUnitsByToken.set(symbolToken, out.order.shares);
-      const unitsTrue = out.order.shares;
-
+      reconcilePositions.push({
+        symbol: out.order.symbol,
+        units: out.order.shares,
+        price: out.order.purchasePrice,
+        currency: out.order.currency,
+        yahooSymbol: out.order.yahooSymbol,
+      });
+      // The decision label is purely diagnostic — it records the
+      // orders↔position relationship, not what we imported.
       if (symbolsCoveredByOrders.has(out.order.symbol)) {
-        // Orders touched this symbol. The position is the authoritative
-        // CURRENT holding; the order legs supply the timeline. If the
-        // in-window order net already equals the broker units, the
-        // orders fully cover it — nothing to add. If they diverge
-        // (SnapTrade's order window is partial — older sells/buys aged
-        // out), emit ONE reconciling adjustment lot so the pooled
-        // current shares equal the broker's units. Deterministic id =>
-        // idempotent across resyncs; the page updates it in place when
-        // units drift, so it self-corrects instead of suppressing the
-        // truth forever.
-        const net = ordersNetBySymbol.get(out.order.symbol) ?? 0;
-        const delta = unitsTrue - net;
-        if (Math.abs(delta) <= 1e-4) {
-          decision = "suppressed-by-orders";
-          positionsSuppressed += 1;
-        } else {
-          decision = "kept";
-          positionsKept += 1;
-          mapped.push({
-            id: `pos-recon-${cred.snaptradeAccountId}-${out.order.symbol}`,
-            symbol: out.order.symbol,
-            shares: Math.abs(delta),
-            purchasePrice: out.order.purchasePrice,
-            purchaseDate: today,
-            currency: out.order.currency,
-            yahooSymbol: out.order.yahooSymbol,
-            side: delta > 0 ? "BUY" : "SELL",
-          });
-          if (delta < 0) sellsImported++;
-        }
+        decision = "suppressed-by-orders";
+        positionsSuppressed += 1;
       } else {
-        // No order history for this symbol at all — synthesize the
-        // whole position (existing fallback). ALWAYS emit it (no
-        // isOrderKnown dedup-skip): the page matches the deterministic
-        // `pos-` id and updates the stored holding in place when units
-        // drift, fixing the old "synthesized position never
-        // self-corrects" limitation. `known` only affects the trace.
-        const known =
-          !!isOrderKnown
-          && isOrderKnown({
-            orderId: out.order.id,
-            rawTicker: out.order.symbol,
-            purchaseDate: out.order.purchaseDate,
-            shares: out.order.shares,
-          });
-        if (known) {
-          decision = "deduped";
-          positionsDeduped += 1;
-        } else {
-          decision = "kept";
-          positionsKept += 1;
-        }
-        mapped.push(out.order);
+        decision = "kept";
+        positionsKept += 1;
       }
     }
 
@@ -711,6 +676,7 @@ export async function fetchSnapTradeOrders(
 
   return {
     orders: mapped,
+    positions: reconcilePositions,
     sellsSkipped: 0,
     sellsImported,
     partialFillsSkipped: 0,
