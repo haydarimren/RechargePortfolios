@@ -403,6 +403,41 @@ export function buildTradeLog(holdings: Holding[]): TradeLogEntry[] {
 }
 
 /**
+ * Convert an absolute-value comparison series into %-return-from-base
+ * form. Each line (portfolio, SPY, QQQ) finds its own first positive
+ * base independently so a temporary zero on day 0 for one benchmark
+ * doesn't hide its line for the whole chart. This is the exact math the
+ * shared-viewer chart has always used — the share-link snapshot stores
+ * its output, so the public page inherits identical behavior.
+ */
+export function normalizeSeries(series: SeriesPoint[]): SeriesPoint[] {
+  if (series.length === 0) return [];
+  const baseIdx = series.findIndex((p) => p.portfolio > 0);
+  if (baseIdx === -1) return [];
+  const baseP = series[baseIdx].portfolio;
+  const findBase = (key: "SPY" | "QQQ"): number | null => {
+    for (let i = baseIdx; i < series.length; i++) {
+      const v = series[i][key];
+      if (typeof v === "number" && v > 0) return v;
+    }
+    return null;
+  };
+  const baseSPY = findBase("SPY");
+  const baseQQQ = findBase("QQQ");
+  return series.slice(baseIdx).map((p) => {
+    const spy = typeof p.SPY === "number" && p.SPY > 0 ? p.SPY : null;
+    const qqq = typeof p.QQQ === "number" && p.QQQ > 0 ? p.QQQ : null;
+    const point: SeriesPoint = {
+      date: p.date,
+      portfolio: (p.portfolio / baseP - 1) * 100,
+    };
+    if (baseSPY && spy !== null) point.SPY = (spy / baseSPY - 1) * 100;
+    if (baseQQQ && qqq !== null) point.QQQ = (qqq / baseQQQ - 1) * 100;
+    return point;
+  });
+}
+
+/**
  * Format a share count with up to 4 significant fractional digits,
  * trimming trailing zeros. Keeps numeric columns aligned.
  */
