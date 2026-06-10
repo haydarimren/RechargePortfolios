@@ -2214,6 +2214,7 @@ export default function PortfolioPage({
                     }
                   : undefined
               }
+              onKeyRotated={(k) => setPortfolioKey(k)}
             />
           </div>
         </div>

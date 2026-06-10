@@ -594,6 +594,11 @@ export default function MinePage() {
                   }
                 : undefined
             }
+            onKeyRotated={(k) =>
+              setPortfolioKeys((prev) =>
+                new Map(prev).set(shareTarget.id, k),
+              )
+            }
           />
         </Modal>
       )}

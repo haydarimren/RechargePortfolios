@@ -82,6 +82,14 @@ interface SharePanelProps {
     ownerPublicKey: CryptoKey;
     ownerPublicKeyHex: string;
   };
+  /**
+   * Called with the rotated K_portfolio after an encrypted follower
+   * removal. Removing a follower re-encrypts every holding under a fresh
+   * key; the parent must re-seed its in-component portfolio-key state
+   * with this, or its live holdings subscription keeps trying the stale
+   * key and the owner's holdings render as empty until a reload.
+   */
+  onKeyRotated?: (newKey: CryptoKey) => void;
 }
 
 export function SharePanel({
@@ -92,6 +100,7 @@ export function SharePanel({
   sharedWith,
   onClose: _onClose,
   encryption,
+  onKeyRotated,
 }: SharePanelProps) {
   void _onClose;
   const ownerName = useDisplayName(ownerUid);
@@ -193,7 +202,7 @@ export function SharePanel({
     try {
       if (encryption) {
         const remaining = localShared.filter((u) => u !== target);
-        await revokeFromUser(portfolioId, target, {
+        const newKey = await revokeFromUser(portfolioId, target, {
           oldKey: encryption.portfolioKey,
           ownerUid,
           ownerPrivateKey: encryption.ownerPrivateKey,
@@ -201,6 +210,10 @@ export function SharePanel({
           ownerPublicKeyHex: encryption.ownerPublicKeyHex,
           remainingSharerUids: remaining,
         });
+        // Key rotated — hand it up so the parent's holdings subscription
+        // re-decodes with the new key instead of showing an empty
+        // portfolio until reload.
+        if (newKey) onKeyRotated?.(newKey);
       } else {
         await updateDoc(doc(db, "portfolios", portfolioId), {
           sharedWith: arrayRemove(target),
