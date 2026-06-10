@@ -2123,6 +2123,8 @@ export default function PortfolioPage({
             <SharePanel
               portfolioId={id}
               ownerUid={portfolio.ownerId}
+              portfolioName={portfolio.name}
+              holdings={holdings}
               sharedWith={portfolio.sharedWith}
               onClose={() => setShowShare(false)}
               encryption={

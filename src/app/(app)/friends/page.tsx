@@ -18,14 +18,13 @@ import type { ActivityEvent } from "@/lib/activity-types";
 import { ActivityRow } from "@/components/ActivityRow";
 import { FriendPortfolioCard, FriendPortfolioCardSummary } from "@/components/FriendPortfolioCard";
 import { InitialChip } from "@/components/InitialChip";
-import { InviteModal } from "@/components/InviteModal";
 import { TabBar } from "@/components/TabBar";
 import {
   bumpLastActivityViewAt,
   fetchLastActivityViewAt,
   useDisplayNamesForUids,
 } from "@/lib/users";
-import { MoreHorizontal, Plus } from "lucide-react";
+import { MoreHorizontal } from "lucide-react";
 
 type FriendsView = "portfolios" | "activity";
 
@@ -416,9 +415,6 @@ export default function FriendsPage() {
     [mergedEvents, lastVisit],
   );
 
-  // 11. Invite modal
-  const [showInvite, setShowInvite] = useState(false);
-
   return (
     <div className="px-6 md:px-8 py-7 max-w-5xl">
       <header className="flex items-end justify-between mb-5">
@@ -432,12 +428,6 @@ export default function FriendsPage() {
             </p>
           )}
         </div>
-        <button
-          onClick={() => setShowInvite(true)}
-          className="btn-ghost inline-flex items-center gap-1.5"
-        >
-          <Plus className="w-4 h-4" aria-hidden /> Invite
-        </button>
       </header>
 
       <TabBar
@@ -570,7 +560,6 @@ export default function FriendsPage() {
         ))
       )}
 
-      {showInvite && <InviteModal onClose={() => setShowInvite(false)} />}
     </div>
   );
 }

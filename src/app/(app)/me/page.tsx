@@ -334,7 +334,7 @@ export default function MePage() {
             <div className="flex flex-col gap-1 mb-2">
               <div className="text-[13.5px] font-medium text-fg">Your UID</div>
               <div className="text-xs text-fg-fade leading-snug">
-                Share this so friends can add you to their portfolios.
+                Your account identifier — handy for support requests.
               </div>
             </div>
             <div className="flex items-center gap-2">

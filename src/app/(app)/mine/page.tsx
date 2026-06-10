@@ -544,6 +544,8 @@ export default function MinePage() {
           <SharePanel
             portfolioId={shareTarget.id}
             ownerUid={shareTarget.ownerId}
+            portfolioName={shareTarget.name}
+            holdings={holdingsByPortfolio[shareTarget.id] ?? []}
             sharedWith={shareTarget.sharedWith}
             onClose={() => setShareTarget(null)}
             encryption={
