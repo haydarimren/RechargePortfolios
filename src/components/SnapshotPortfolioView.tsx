@@ -44,7 +44,20 @@ export function SnapshotPortfolioView({
 }) {
   const chartColors = useChartColors();
   const [quotes, setQuotes] = useState<Record<string, StockQuote | null>>({});
-  const [extended, setExtended] = useState(snapshot.series);
+  // Fetched curve extension, keyed to the snapshot it was computed for —
+  // a stale tail (from a previous snapshot) is simply ignored by the
+  // memo below instead of being reset synchronously in the effect.
+  const [tail, setTail] = useState<{
+    forSnapshot: SnapshotV1;
+    points: SnapshotV1["series"];
+  } | null>(null);
+  const extended = useMemo(
+    () =>
+      tail && tail.forSnapshot === snapshot && tail.points.length > 0
+        ? [...snapshot.series.slice(0, -1), ...tail.points]
+        : snapshot.series,
+    [snapshot, tail],
+  );
 
   // Live quotes, keyed back to display symbols (the app-wide pattern).
   useEffect(() => {
@@ -72,7 +85,6 @@ export function SnapshotPortfolioView({
 
   // Extend the normalized curve from asOf → today with public closes.
   useEffect(() => {
-    setExtended(snapshot.series);
     if (snapshot.series.length === 0) return;
     const lastDate = snapshot.series[snapshot.series.length - 1].date;
     const fromMs = new Date(lastDate).getTime() - 14 * 24 * 60 * 60 * 1000;
@@ -92,10 +104,10 @@ export function SnapshotPortfolioView({
       if (cancelled) return;
       const priceMap: Record<string, HistoricalPoint[]> = {};
       for (const [sym, pts] of symbolPts) priceMap[sym] = pts;
-      const tail = extendSeries(snapshot, priceMap, { SPY, QQQ });
-      if (tail.length > 0) {
-        setExtended([...snapshot.series.slice(0, -1), ...tail]);
-      }
+      setTail({
+        forSnapshot: snapshot,
+        points: extendSeries(snapshot, priceMap, { SPY, QQQ }),
+      });
     });
     return () => {
       cancelled = true;

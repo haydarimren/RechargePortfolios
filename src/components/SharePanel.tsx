@@ -36,6 +36,33 @@ import {
 import type { Holding } from "@/lib/types";
 import { InitialChip } from "@/components/InitialChip";
 
+/**
+ * Resolve the portfolio's link doc + displayable URL (when the owner's
+ * master secret is unlocked). Plain async helper shared by the panel's
+ * mount effect and the create/revoke handlers.
+ */
+async function fetchLinkState(
+  portfolioId: string,
+  ownerUid: string,
+): Promise<{ link: ShareLinkDoc | null; url: string | null }> {
+  try {
+    const link = await getShareLinkDocForOwner(portfolioId);
+    if (!link) return { link: null, url: null };
+    const unlocked = getUnlocked(ownerUid);
+    if (!unlocked) return { link, url: null };
+    const token = await unwrapTokenForOwner(
+      link.ownerTokenWrap,
+      unlocked.masterSecret,
+    );
+    return {
+      link,
+      url: shareLinkUrl(window.location.origin, portfolioId, token),
+    };
+  } catch {
+    return { link: null, url: null };
+  }
+}
+
 interface SharePanelProps {
   portfolioId: string;
   ownerUid: string;
@@ -88,29 +115,23 @@ export function SharePanel({
   const [copied, setCopied] = useState(false);
 
   const loadLink = useCallback(async () => {
-    try {
-      const docu = await getShareLinkDocForOwner(portfolioId);
-      setLink(docu);
-      if (docu) {
-        const unlocked = getUnlocked(ownerUid);
-        if (unlocked) {
-          const token = await unwrapTokenForOwner(
-            docu.ownerTokenWrap,
-            unlocked.masterSecret,
-          );
-          setLinkUrl(shareLinkUrl(window.location.origin, portfolioId, token));
-        }
-      } else {
-        setLinkUrl(null);
-      }
-    } catch {
-      setLink(null);
-    }
+    const state = await fetchLinkState(portfolioId, ownerUid);
+    setLink(state.link);
+    setLinkUrl(state.url);
   }, [portfolioId, ownerUid]);
 
   useEffect(() => {
-    void loadLink();
-  }, [loadLink]);
+    let cancelled = false;
+    (async () => {
+      const state = await fetchLinkState(portfolioId, ownerUid);
+      if (cancelled) return;
+      setLink(state.link);
+      setLinkUrl(state.url);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [portfolioId, ownerUid]);
 
   const handleCreateLink = async () => {
     const unlocked = getUnlocked(ownerUid);
