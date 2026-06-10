@@ -1117,5 +1117,26 @@ export async function reconcileSharedWrappedKeys(
     );
     added++;
   }
+
+  // Consume follow requests (share-links feature): a request whose uid
+  // now has a wrappedKey — just wrapped above, or wrapped on an earlier
+  // pass — has served its purpose. Best-effort — a missed delete is
+  // retried on the next reconcile and grants nothing by itself.
+  try {
+    const reqs = await getDocs(
+      collection(db, "portfolios", portfolioId, "followRequests"),
+    );
+    for (const r of reqs.docs) {
+      const wk = await getDoc(
+        doc(db, "portfolios", portfolioId, "wrappedKeys", r.id),
+      );
+      if (wk.exists()) {
+        await deleteDoc(r.ref).catch(() => {});
+      }
+    }
+  } catch {
+    // Owner-only list; transient failures are fine.
+  }
+
   return { added, pending };
 }
