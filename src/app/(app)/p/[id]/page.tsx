@@ -65,6 +65,13 @@ import {
   touchPortfolioView,
 } from "@/lib/views";
 import { useShareLinkPublisher } from "@/lib/use-share-link-publisher";
+import {
+  clearPendingLinkToken,
+  getPendingLinkToken,
+  readSnapshotByToken,
+} from "@/lib/share-links";
+import type { SnapshotV1 } from "@/lib/share-links-math";
+import { SnapshotPortfolioView } from "@/components/SnapshotPortfolioView";
 import { ArrowLeft, ArrowUpRight, ChevronRight, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   AreaChart,
@@ -143,6 +150,17 @@ export default function PortfolioPage({
     () => getCachedPortfolioKey(id),
   );
   const [migrationError, setMigrationError] = useState("");
+  // Snapshot-tier fallback for a follower awaiting their key wrap (set
+  // from the key-resolution catch below; cleared once the key lands).
+  const [pendingSnapshot, setPendingSnapshot] = useState<SnapshotV1 | null>(
+    null,
+  );
+  useEffect(() => {
+    if (portfolioKey) {
+      clearPendingLinkToken(id);
+      setPendingSnapshot(null);
+    }
+  }, [portfolioKey, id]);
 
   // Whether `secrets/credentials` exists for this portfolio. We only need
   // the boolean — the broker identity comes from `lockedBroker` (derived
@@ -270,11 +288,34 @@ export default function PortfolioPage({
           }
         } catch (err) {
           if (!cancelled) {
-            setMigrationError(
-              isPortfolioOwner
-                ? "Couldn't unlock your portfolio key — try refreshing."
-                : "This portfolio is encrypted but the owner hasn't shared the key with you yet.",
-            );
+            if (isPortfolioOwner) {
+              setMigrationError(
+                "Couldn't unlock your portfolio key — try refreshing.",
+              );
+            } else {
+              // New follower whose key the owner hasn't wrapped yet:
+              // fall back to the snapshot tier via the pending token
+              // saved at redeem time. No token (or revoked link) →
+              // keep the legacy message.
+              const tok = getPendingLinkToken(id);
+              let snapped = false;
+              if (tok) {
+                try {
+                  const snap = await readSnapshotByToken(id, tok);
+                  if (!cancelled) {
+                    setPendingSnapshot(snap);
+                    snapped = true;
+                  }
+                } catch {
+                  // fall through to the message below
+                }
+              }
+              if (!snapped && !cancelled) {
+                setMigrationError(
+                  "This portfolio is encrypted but the owner hasn't shared the key with you yet.",
+                );
+              }
+            }
           }
           console.warn("loadPortfolioKeyWithRetry failed", err);
         }
@@ -1272,6 +1313,29 @@ export default function PortfolioPage({
         >
           <ArrowLeft className="w-4 h-4" aria-hidden /> Back
         </Link>
+      </div>
+    );
+  }
+
+  // Snapshot-tier fallback: a follower whose wrappedKey hasn't been
+  // written yet (owner hasn't been online since they followed) sees the
+  // same percent-only view the share link gave them, plus a pending
+  // note — instead of an error.
+  if (!isOwner && pendingSnapshot && !portfolioKey) {
+    return (
+      <div className="min-h-screen">
+        <main className="max-w-4xl mx-auto px-6 lg:px-10 py-10">
+          <SnapshotPortfolioView
+            snapshot={pendingSnapshot}
+            banner={
+              <div className="border border-line bg-bg-3 text-fg-dim text-xs rounded-md p-3">
+                Following — you&apos;ll get the full view (trade history,
+                live holdings) automatically the next time the owner opens
+                the app.
+              </div>
+            }
+          />
+        </main>
       </div>
     );
   }
