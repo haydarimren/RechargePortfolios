@@ -26,6 +26,7 @@ import {
   loadPortfolioKeyWithRetry,
   subscribeHoldings,
 } from "@/lib/holdings-repo";
+import { useShareLinkPublisher } from "@/lib/use-share-link-publisher";
 import { ArrowDown, ArrowLeft, ArrowUp, ChevronRight, Plus, Trash2, X } from "lucide-react";
 import {
   AreaChart,
@@ -52,6 +53,9 @@ export default function TickerPage({
   const [user, setUser] = useState<User | null>(null);
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [lots, setLots] = useState<Holding[]>([]);
+  // Unfiltered holdings — the share-link publisher needs the whole
+  // portfolio, not just this symbol's lots.
+  const [allRows, setAllRows] = useState<Holding[]>([]);
   const [quote, setQuote] = useState<StockQuote | null>(null);
   const [history, setHistory] = useState<HistoricalPoint[]>([]);
   const [loading, setLoading] = useState(true);
@@ -132,11 +136,15 @@ export default function TickerPage({
       id,
       portfolioKey,
       (rows) => {
+        setAllRows(rows);
         const filtered = rows.filter((h) => h.symbol === symbol);
         filtered.sort((a, b) => a.purchaseDate.localeCompare(b.purchaseDate));
         setLots(filtered);
       },
-      () => setLots([]),
+      () => {
+        setAllRows([]);
+        setLots([]);
+      },
     );
 
     return () => {
@@ -232,6 +240,15 @@ export default function TickerPage({
   usePublishPortfolioOwnership(
     !user || !portfolio ? null : portfolio.ownerId === user.uid,
   );
+  // Lot adds/deletes on this page mutate holdings — keep the share-link
+  // snapshot fresh here too.
+  useShareLinkPublisher({
+    portfolioId: id,
+    enabled: isOwner,
+    ownerUid: user?.uid ?? null,
+    portfolioName: portfolio?.name ?? "",
+    holdings: allRows,
+  });
 
   // True for the brief window between page mount/nav-back and the key
   // resolution settling. During this window `lots` is empty for an

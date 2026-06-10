@@ -31,7 +31,13 @@ import { seedPortfolioView } from "@/lib/views";
 import { PortfolioCard, PortfolioCardSummary } from "@/components/PortfolioCard";
 import { EmptyCardSlot } from "@/components/EmptyCardSlot";
 import { SharePanel } from "@/components/SharePanel";
-import { useDisplayNamesForUids } from "@/lib/users";
+import { useDisplayName, useDisplayNamesForUids } from "@/lib/users";
+import {
+  buildSnapshotForPortfolio,
+  deleteShareArtifacts,
+  getShareLinkDocForOwner,
+  republishSnapshotIfChanged,
+} from "@/lib/share-links";
 
 export default function MinePage() {
   // 1. Auth state (just the user object — redirect handled by (app)/layout.tsx)
@@ -41,6 +47,7 @@ export default function MinePage() {
   }, []);
 
   const encryption = useEncryption();
+  const myDisplayName = useDisplayName(user?.uid ?? null);
 
   // 2. Owned portfolios subscription
   // `undefined` means the first Firestore snapshot hasn't arrived yet —
@@ -348,6 +355,10 @@ export default function MinePage() {
 
   const handleDelete = async (p: Portfolio) => {
     if (!confirm(`Delete "${p.name}"? All holdings will be lost.`)) return;
+    // Sweep share-link artifacts first: once the parent doc is gone the
+    // owner can't list these subcollections anymore (rules read the
+    // parent), and an orphaned shareLink would otherwise linger.
+    await deleteShareArtifacts(p.id);
     await deleteDoc(doc(db, "portfolios", p.id));
   };
 
@@ -385,6 +396,28 @@ export default function MinePage() {
     const newName = renameValue.trim();
     const portfolioRef = doc(db, "portfolios", renameTarget.id);
     await updateDoc(portfolioRef, { name: newName });
+    // Keep the share-link snapshot's embedded name fresh (no-op if no
+    // link exists). Best-effort — the publisher hook self-heals on the
+    // next detail-page visit anyway.
+    try {
+      const unlocked = getUnlocked(user.uid);
+      const link = await getShareLinkDocForOwner(renameTarget.id);
+      if (unlocked && link) {
+        const fresh = await buildSnapshotForPortfolio({
+          holdings: holdingsByPortfolio[renameTarget.id] ?? [],
+          name: newName,
+          ownerName: myDisplayName || "A friend",
+        });
+        await republishSnapshotIfChanged(
+          renameTarget.id,
+          link,
+          unlocked.masterSecret,
+          fresh,
+        );
+      }
+    } catch (err) {
+      console.warn("share-link rename republish failed", err);
+    }
     setRenameTarget(null);
     setRenameValue("");
   };

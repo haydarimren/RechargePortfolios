@@ -64,6 +64,7 @@ import {
   touchLogbookView,
   touchPortfolioView,
 } from "@/lib/views";
+import { useShareLinkPublisher } from "@/lib/use-share-link-publisher";
 import { ArrowLeft, ArrowUpRight, ChevronRight, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   AreaChart,
@@ -482,6 +483,15 @@ export default function PortfolioPage({
   // the full pipeline (real-world: user clicked 5x, got 5 duplicate
   // SnapTrade lots). This ref blocks re-entry synchronously.
   const syncInFlightRef = useRef(false);
+  // Keep the share-link snapshot in lock-step with holdings. No link →
+  // cheap no-op (one list read per debounce window).
+  useShareLinkPublisher({
+    portfolioId: id,
+    enabled: isOwner,
+    ownerUid: user?.uid ?? null,
+    portfolioName: portfolio?.name ?? "",
+    holdings,
+  });
   // Publish ownership to the AppShell so the right tab (Mine vs Friends)
   // highlights while we're on this route. Pass `null` until the portfolio
   // doc has loaded so we don't wrongly flash the owner state.
