@@ -59,6 +59,14 @@ export default function ShareLinkPage({
         return;
       }
       try {
+        // Wait for Firebase to restore any persisted session before
+        // deciding whether to create an anonymous one. On a cold page
+        // load `auth.currentUser` is synchronously null even when a real
+        // session exists in IndexedDB (persistence restore is async) —
+        // without this, a logged-in user opening a share link would be
+        // clobbered into a fresh anonymous session and never get the
+        // member redirect below.
+        await auth.authStateReady();
         if (!auth.currentUser) await signInAnonymously(auth);
         // Membership probe for real accounts: owner/followers can read
         // the portfolio doc; anyone else gets permission-denied. Members
