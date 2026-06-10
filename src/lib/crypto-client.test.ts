@@ -27,6 +27,7 @@ import {
   encryptBrokerCredential,
   decryptBrokerCredential,
   inspectBrokerCredential,
+  deriveAesKeyFromSecret,
   __testOnlyEncryptLegacyBareCredential,
 } from "./crypto-client";
 
@@ -375,3 +376,22 @@ describe("broker credential encryption", () => {
 // and Alpaca, exercised through encryptBrokerCredential /
 // decryptBrokerCredential above. Nothing SnapTrade-specific to test
 // in the crypto layer.
+
+describe("deriveAesKeyFromSecret", () => {
+  it("derives a key that round-trips JSON for the same secret+info", async () => {
+    const secret = new Uint8Array(16).fill(7);
+    const k1 = await deriveAesKeyFromSecret(secret, "share-link-snapshot");
+    const ct = await encryptJson({ hello: "world" }, k1);
+    const k2 = await deriveAesKeyFromSecret(secret, "share-link-snapshot");
+    const back = await decryptJson<{ hello: string }>(ct, k2);
+    expect(back.hello).toBe("world");
+  });
+
+  it("different info strings produce incompatible keys", async () => {
+    const secret = new Uint8Array(16).fill(7);
+    const k1 = await deriveAesKeyFromSecret(secret, "share-link-snapshot");
+    const k2 = await deriveAesKeyFromSecret(secret, "share-link-token");
+    const ct = await encryptJson({ a: 1 }, k1);
+    await expect(decryptJson(ct, k2)).rejects.toThrow();
+  });
+});
