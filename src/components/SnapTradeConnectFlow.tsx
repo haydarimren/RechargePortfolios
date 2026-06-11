@@ -45,13 +45,13 @@ type Step =
   | {
       kind: "picker";
       accounts: SnapTradeAccountSummary[];
-      selected: string | null;
+      selected: Set<string>;
     };
 
 interface Props {
-  /** Called when the user picks an account. Argument is the final
+  /** Called when the user picks account(s). Argument is the final
    *  JSON-encoded `{clientId, consumerKey, snaptradeUserId,
-   *  snaptradeUserSecret, snaptradeAccountId}` credential. Parent
+   *  snaptradeUserSecret, snaptradeAccountIds}` credential. Parent
    *  runs `handleSync` with this and handles the atomic rollback. */
   onSubmit: (credential: string) => Promise<void>;
   /** Called when the user cancels (Disclosure step or empty picker).
@@ -60,19 +60,18 @@ interface Props {
   /** Disable submit while a parent action (handleSync) is in flight. */
   syncLoading: boolean;
   /**
-   * If the locked broker is SnapTrade, the user can only attach the
-   * already-locked account id. The picker filters its options to
-   * just that id (after fetching the full account list, since we
-   * still need the live data to show the account label).
+   * Accounts the portfolio is locked to (it already holds their data).
+   * They render pre-checked and can't be deselected; additional
+   * accounts may be added on top. Empty for a first connect.
    */
-  lockedSnaptradeAccountId: string | null;
+  lockedSnaptradeAccountIds: string[];
 }
 
 export function SnapTradeConnectFlow({
   onSubmit,
   onCancel,
   syncLoading,
-  lockedSnaptradeAccountId,
+  lockedSnaptradeAccountIds,
 }: Props) {
   const [step, setStep] = useState<Step>(() => ({
     kind: snapTradeDisclosureAcknowledged() ? "form" : "disclosure",
@@ -97,13 +96,14 @@ export function SnapTradeConnectFlow({
     try {
       const credential = snaptradeAdapter.buildCredential(fields);
       const accounts = await listSnapTradeAccounts(credential);
-      // If portfolio is locked to a specific account, refuse early
-      // when the user's SnapTrade doesn't have that account anymore.
-      if (lockedSnaptradeAccountId) {
-        const match = accounts.find((a) => a.id === lockedSnaptradeAccountId);
-        if (!match) {
+      // If the portfolio is locked to accounts, refuse early when any
+      // of them no longer exists in the user's SnapTrade.
+      if (lockedSnaptradeAccountIds.length > 0) {
+        const live = new Set(accounts.map((a) => a.id));
+        const missing = lockedSnaptradeAccountIds.filter((id) => !live.has(id));
+        if (missing.length > 0) {
           setError(
-            "Your portfolio is locked to a SnapTrade account that's no longer in your SnapTrade user. Reconnect that account first.",
+            "Your portfolio is locked to SnapTrade accounts that are no longer in your SnapTrade user. Reconnect them first.",
           );
           setStep({ kind: "form" });
           return;
@@ -112,7 +112,13 @@ export function SnapTradeConnectFlow({
       setStep({
         kind: "picker",
         accounts,
-        selected: lockedSnaptradeAccountId ?? accounts[0]?.id ?? null,
+        selected: new Set(
+          lockedSnaptradeAccountIds.length > 0
+            ? lockedSnaptradeAccountIds
+            : accounts[0]
+              ? [accounts[0].id]
+              : [],
+        ),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load accounts");
@@ -123,15 +129,17 @@ export function SnapTradeConnectFlow({
   /** Picker submit → bubble final credential up to parent. */
   const submitAccountPick = async () => {
     if (step.kind !== "picker") return;
-    if (!step.selected) {
-      setError("Pick an account first.");
+    if (step.selected.size === 0) {
+      setError("Pick at least one account.");
       return;
     }
-    if (
-      lockedSnaptradeAccountId
-      && step.selected !== lockedSnaptradeAccountId
-    ) {
-      setError("This portfolio is locked to a different SnapTrade account.");
+    const missingLocked = lockedSnaptradeAccountIds.filter(
+      (id) => !step.selected.has(id),
+    );
+    if (missingLocked.length > 0) {
+      setError(
+        "Locked accounts can't be deselected — this portfolio already holds their data.",
+      );
       return;
     }
     const credential = JSON.stringify({
@@ -139,7 +147,7 @@ export function SnapTradeConnectFlow({
       consumerKey: (fields.consumerKey ?? "").trim(),
       snaptradeUserId: (fields.snaptradeUserId ?? "").trim(),
       snaptradeUserSecret: (fields.snaptradeUserSecret ?? "").trim(),
-      snaptradeAccountId: step.selected,
+      snaptradeAccountIds: Array.from(step.selected),
     });
     try {
       await onSubmit(credential);
@@ -225,7 +233,8 @@ export function SnapTradeConnectFlow({
   return (
     <div className="space-y-3">
       <div className="text-sm text-fg-dim">
-        Pick the brokerage account to attach to this portfolio:
+        Pick the brokerage account(s) to attach to this portfolio —
+        they&apos;ll be merged into one view:
       </div>
       {step.accounts.length === 0 ? (
         <div className="text-xs text-fg-fade text-center py-4">
@@ -235,26 +244,34 @@ export function SnapTradeConnectFlow({
       ) : (
         <ul className="space-y-2">
           {step.accounts.map((a) => {
-            const disabled =
-              !!lockedSnaptradeAccountId && lockedSnaptradeAccountId !== a.id;
+            // Locked accounts: pre-checked, can't be deselected — the
+            // portfolio already holds their data. New accounts are
+            // freely addable.
+            const locked = lockedSnaptradeAccountIds.includes(a.id);
             return (
               <li key={a.id}>
                 <label
                   className={`flex items-center gap-2 bg-bg-3 border border-line rounded-lg px-3 py-2.5 ${
-                    disabled
-                      ? "opacity-40 cursor-not-allowed"
+                    locked
+                      ? "cursor-not-allowed"
                       : "cursor-pointer hover:border-accent transition"
                   }`}
                 >
                   <input
-                    type="radio"
+                    type="checkbox"
                     name="snaptrade-account"
                     value={a.id}
-                    checked={step.selected === a.id}
+                    checked={step.selected.has(a.id)}
                     onChange={() =>
-                      setStep({ ...step, selected: a.id })
+                      setStep((s) => {
+                        if (s.kind !== "picker") return s;
+                        const next = new Set(s.selected);
+                        if (next.has(a.id)) next.delete(a.id);
+                        else next.add(a.id);
+                        return { ...s, selected: next };
+                      })
                     }
-                    disabled={syncLoading || disabled}
+                    disabled={syncLoading || locked}
                   />
                   <span className="text-sm flex-1">
                     <span className="font-medium">{a.name}</span>
@@ -266,7 +283,7 @@ export function SnapTradeConnectFlow({
                         ({a.number})
                       </span>
                     )}
-                    {disabled && (
+                    {locked && (
                       <span className="text-xs text-fg-fade ml-1">(locked)</span>
                     )}
                   </span>
@@ -293,7 +310,9 @@ export function SnapTradeConnectFlow({
         <button
           type="button"
           onClick={() => void submitAccountPick()}
-          disabled={syncLoading || !step.selected || step.accounts.length === 0}
+          disabled={
+            syncLoading || step.selected.size === 0 || step.accounts.length === 0
+          }
           className="btn-primary px-3 py-2 text-sm disabled:opacity-50"
         >
           {syncLoading ? "Connecting…" : "Connect & Sync"}

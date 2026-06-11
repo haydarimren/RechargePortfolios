@@ -2102,7 +2102,9 @@ export default function PortfolioPage({
                     <div className="mt-3">
                       <SnapTradeConnectFlow
                         syncLoading={syncLoading === "snaptrade"}
-                        lockedSnaptradeAccountId={lockedSnaptradeAccountId}
+                        lockedSnaptradeAccountIds={
+                          lockedSnaptradeAccountId ? [lockedSnaptradeAccountId] : []
+                        }
                         onCancel={() => {
                           // For locked portfolios, close the modal
                           // (no other broker is selectable anyway).
