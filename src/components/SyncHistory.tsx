@@ -230,6 +230,7 @@ function SyncLogRow({
                 <thead className="text-fg-fade label">
                   <tr>
                     <th className="text-left pr-3 py-1">sym</th>
+                    <th className="text-left pr-3">acct</th>
                     <th className="text-left pr-3">action</th>
                     <th className="text-left pr-3">status</th>
                     <th className="text-left pr-3">qty±</th>
@@ -241,6 +242,8 @@ function SyncLogRow({
                   {d.orders.map((o, i) => (
                     <tr key={i}>
                       <td className="pr-3 py-0.5">{o.symbolToken ?? "—"}</td>
+                      {/* v1 traces (single-account era) lack the token. */}
+                      <td className="pr-3">{o.accountToken ?? "—"}</td>
                       <td className="pr-3">{o.action ?? "—"}</td>
                       <td className="pr-3">{o.status ?? "—"}</td>
                       <td className="pr-3">{o.filledQtySign}</td>
@@ -277,6 +280,7 @@ function SyncLogRow({
                 <thead className="text-fg-fade label">
                   <tr>
                     <th className="text-left pr-3 py-1">sym</th>
+                    <th className="text-left pr-3">acct</th>
                     <th className="text-left pr-3">units?</th>
                     <th className="text-left pr-3">price?</th>
                     <th className="text-left">decision</th>
@@ -286,6 +290,8 @@ function SyncLogRow({
                   {d.positions.map((p, i) => (
                     <tr key={i}>
                       <td className="pr-3 py-0.5">{p.symbolToken ?? "—"}</td>
+                      {/* v1 traces (single-account era) lack the token. */}
+                      <td className="pr-3">{p.accountToken ?? "—"}</td>
                       <td className="pr-3">{p.hasUnits ? "y" : "n"}</td>
                       <td className="pr-3">{p.hasPrice ? "y" : "n"}</td>
                       <td
