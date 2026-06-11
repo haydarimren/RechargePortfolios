@@ -18,12 +18,14 @@
  *
  * The credential string passed to `fetchSnapTradeOrders` is JSON-encoded
  * `{ clientId, consumerKey, snaptradeUserId, snaptradeUserSecret,
- * snaptradeAccountId }`. The server-side proxy auth builder reads
- * `clientId` + `consumerKey` for HMAC signing; this module reads
- * `snaptradeUserId` + `snaptradeUserSecret` for the URL query
- * (SnapTrade's own user-auth check) and `snaptradeAccountId` to build
- * the path. Packaging them together lets one credential string carry
- * everything sync needs.
+ * snaptradeAccountIds: string[] }` (legacy single `snaptradeAccountId`
+ * lifts to a one-element set on read). The server-side proxy auth
+ * builder reads `clientId` + `consumerKey` for HMAC signing; this
+ * module reads `snaptradeUserId` + `snaptradeUserSecret` for the URL
+ * query (SnapTrade's own user-auth check) and the account ids to build
+ * the per-account paths. Multi-account syncs fetch every account
+ * all-or-nothing and hand the page MERGED positions (units summed,
+ * price unit-weighted) — see the 2026-06-11 multi-account design doc.
  */
 
 import { proxyFetch } from "../proxy-fetch";
@@ -121,7 +123,39 @@ interface ParsedCredential {
   consumerKey: string;
   snaptradeUserId: string;
   snaptradeUserSecret: string;
-  snaptradeAccountId: string;
+  snaptradeAccountIds: string[]; // ≥ 1
+}
+
+/**
+ * Extract the account-id set from a SnapTrade credential JSON —
+ * canonical plural (`snaptradeAccountIds`) or legacy singular
+ * (`snaptradeAccountId`, lifted to a one-element set; same
+ * accept-both-on-read pattern as t212OrderId → brokerOrderId).
+ * Non-throwing: returns [] for garbage so callers (the page's C ⊇ L
+ * checks) can defer real error surfacing to the adapter. Exported for
+ * the page and for unit tests.
+ */
+export function parseSnaptradeAccountIds(credentialJson: string): string[] {
+  try {
+    const parsed = JSON.parse(credentialJson) as {
+      snaptradeAccountIds?: unknown;
+      snaptradeAccountId?: unknown;
+    };
+    if (Array.isArray(parsed.snaptradeAccountIds)) {
+      return parsed.snaptradeAccountIds.filter(
+        (v): v is string => typeof v === "string" && v.length > 0,
+      );
+    }
+    if (
+      typeof parsed.snaptradeAccountId === "string"
+      && parsed.snaptradeAccountId.length > 0
+    ) {
+      return [parsed.snaptradeAccountId];
+    }
+  } catch {
+    // fall through
+  }
+  return [];
 }
 
 interface ParsedConnectCredential {
@@ -145,11 +179,21 @@ function parseCredential(credential: string): ParsedCredential {
     || typeof (parsed as { consumerKey?: unknown }).consumerKey !== "string"
     || typeof (parsed as { snaptradeUserId?: unknown }).snaptradeUserId !== "string"
     || typeof (parsed as { snaptradeUserSecret?: unknown }).snaptradeUserSecret !== "string"
-    || typeof (parsed as { snaptradeAccountId?: unknown }).snaptradeAccountId !== "string"
   ) {
     throw new Error("SnapTrade credential missing required fields");
   }
-  return parsed as ParsedCredential;
+  const obj = parsed as Record<string, unknown>;
+  const accountIds = parseSnaptradeAccountIds(credential);
+  if (accountIds.length === 0) {
+    throw new Error("SnapTrade credential has no accounts selected");
+  }
+  return {
+    clientId: obj.clientId as string,
+    consumerKey: obj.consumerKey as string,
+    snaptradeUserId: obj.snaptradeUserId as string,
+    snaptradeUserSecret: obj.snaptradeUserSecret as string,
+    snaptradeAccountIds: accountIds,
+  };
 }
 
 /**
@@ -393,14 +437,14 @@ function buildAuthCredential(cred: ParsedConnectCredential): string {
  * found unusable for fresh / paper-trading accounts).
  */
 async function fetchSnaptradeHoldings(
-  cred: ParsedCredential,
+  cred: ParsedConnectCredential,
+  accountId: string,
 ): Promise<SnaptradeHoldings> {
   const params = new URLSearchParams({
     userId: cred.snaptradeUserId,
     userSecret: cred.snaptradeUserSecret,
   });
-  const accountId = encodeURIComponent(cred.snaptradeAccountId);
-  const path = `/api/v1/accounts/${accountId}/holdings?${params.toString()}`;
+  const path = `/api/v1/accounts/${encodeURIComponent(accountId)}/holdings?${params.toString()}`;
   const res = await proxyFetch("snaptrade", buildAuthCredential(cred), path);
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
@@ -473,7 +517,26 @@ export async function fetchSnapTradeOrders(
   isOrderKnown?: IsOrderKnownFn,
 ): Promise<ImportResult> {
   const cred = parseCredential(credential);
-  const holdings = await fetchSnaptradeHoldings(cred);
+
+  // Fetch phase — ALL-OR-NOTHING. Every selected account must respond
+  // before anything is mapped. A partial sync would let the page's
+  // fully-sold sweep wrongly zero symbols held only in the failed
+  // account, so any failure aborts the whole run with nothing written.
+  const perAccount: Array<{ accountId: string; holdings: SnaptradeHoldings }> = [];
+  for (let i = 0; i < cred.snaptradeAccountIds.length; i++) {
+    const accountId = cred.snaptradeAccountIds[i];
+    try {
+      perAccount.push({
+        accountId,
+        holdings: await fetchSnaptradeHoldings(cred, accountId),
+      });
+    } catch (err) {
+      const base = err instanceof Error ? err.message : "fetch failed";
+      throw new Error(
+        `SnapTrade sync aborted (account ${i + 1} of ${cred.snaptradeAccountIds.length}): ${base}`,
+      );
+    }
+  }
 
   const mapped: ImportedOrder[] = [];
   let sellsImported = 0;
@@ -485,17 +548,22 @@ export async function fetchSnapTradeOrders(
 
   // --- Redacted diagnostics accumulators (no holdings data) ---
   const tokenFor = makeSymbolTokenizer();
+  // Opaque per-sync account tokens — correlation without identity,
+  // same pattern as the symbol tokenizer.
+  const accountTokens = new Map<string, string>();
+  const accFor = (accountId: string): string => {
+    const existing = accountTokens.get(accountId);
+    if (existing) return existing;
+    const token = `ACC_${accountTokens.size + 1}`;
+    accountTokens.set(accountId, token);
+    return token;
+  };
   const orderDiags: SnapTradeOrderDiag[] = [];
   const positionDiags: SnapTradePositionDiag[] = [];
   // Net signed order shares + position units per token, kept ONLY to
   // derive a boolean; the numbers themselves never enter the trace.
   const ordersNetByToken = new Map<string, number>();
   const positionUnitsByToken = new Map<string, number>();
-  // The broker's authoritative current positions, handed to the page
-  // so it can reconcile stored holdings to them with the UI's own
-  // pooling function (reconciliation can't live here — the adapter
-  // can't see what's already stored).
-  const reconcilePositions: ReconcilePosition[] = [];
   const ordersSkipped: Partial<Record<SkipReason, number>> = {};
   const positionsSkipped: Partial<Record<SkipReason, number>> = {};
   let ordersKept = 0;
@@ -505,6 +573,8 @@ export async function fetchSnapTradeOrders(
   // Positions are no longer dedup-imported as lots (the page reconciles
   // them), so this stays 0 — kept in the trace shape for stability.
   const positionsDeduped = 0;
+  let rawOrderCount = 0;
+  let rawPositionCount = 0;
   const bump = (
     acc: Partial<Record<SkipReason, number>>,
     r: SkipReason,
@@ -512,132 +582,157 @@ export async function fetchSnapTradeOrders(
     acc[r] = (acc[r] ?? 0) + 1;
   };
 
-  // Primary: real orders. Each executed BUY/SELL leg becomes its own
-  // lot with the broker-side timestamp + execution price.
-  const orderRecords = holdings.orders ?? [];
-  for (const raw of orderRecords) {
-    const out = mapSnaptradeOrder(raw);
-    const rawOrderSymbol = raw.universal_symbol?.symbol;
-    const normSymbol =
-      typeof rawOrderSymbol === "string" && rawOrderSymbol.length > 0
-        ? snaptradeSymbolToYahoo(rawOrderSymbol)
-        : null;
-    const symbolToken = tokenFor(normSymbol);
-    let decision: DiagDecision;
-    let skipReason: SkipReason | null = null;
+  // Merged positions: symbol → accumulator. Units sum across accounts;
+  // price is the unit-weighted average of per-account mapped prices.
+  // The page reconciles each symbol's Section-104 pool against this
+  // MERGED target — per-account targets would fight each other when
+  // the same ticker is held in two accounts.
+  const mergedPositions = new Map<
+    string,
+    { units: number; weighted: number; currency?: string; yahooSymbol?: string }
+  >();
 
-    if (out.kind === "skip") {
-      decision = "skipped";
-      skipReason = out.reason;
-      bump(ordersSkipped, out.reason);
-    } else {
-      symbolsCoveredByOrders.add(out.order.symbol);
-      const known =
-        !!isOrderKnown
-        && isOrderKnown({
-          orderId: out.order.id,
-          rawTicker: out.order.symbol,
-          purchaseDate: out.order.purchaseDate,
-          shares: out.order.shares,
-        });
-      // Net over all mappable orders in the window (kept OR already
-      // imported), token-keyed, ONLY to derive the redacted perSymbol
-      // "orders vs position units" boolean for the diagnostics trace.
-      if (symbolToken) {
-        const signed =
-          (out.order.side === "SELL" ? -1 : 1) * out.order.shares;
-        ordersNetByToken.set(
-          symbolToken,
-          (ordersNetByToken.get(symbolToken) ?? 0) + signed,
-        );
-      }
-      if (known) {
-        decision = "deduped";
-        ordersDeduped += 1;
+  for (const { accountId, holdings } of perAccount) {
+    const accountToken = accFor(accountId);
+
+    // Primary: real orders. Each executed BUY/SELL leg becomes its own
+    // lot with the broker-side timestamp + execution price, tagged with
+    // its source account.
+    const orderRecords = holdings.orders ?? [];
+    rawOrderCount += orderRecords.length;
+    for (const raw of orderRecords) {
+      const out = mapSnaptradeOrder(raw);
+      const rawOrderSymbol = raw.universal_symbol?.symbol;
+      const normSymbol =
+        typeof rawOrderSymbol === "string" && rawOrderSymbol.length > 0
+          ? snaptradeSymbolToYahoo(rawOrderSymbol)
+          : null;
+      const symbolToken = tokenFor(normSymbol);
+      let decision: DiagDecision;
+      let skipReason: SkipReason | null = null;
+
+      if (out.kind === "skip") {
+        decision = "skipped";
+        skipReason = out.reason;
+        bump(ordersSkipped, out.reason);
       } else {
-        decision = "kept";
-        ordersKept += 1;
-        mapped.push(out.order);
-        if (out.order.side === "SELL") sellsImported++;
+        symbolsCoveredByOrders.add(out.order.symbol);
+        const known =
+          !!isOrderKnown
+          && isOrderKnown({
+            orderId: out.order.id,
+            rawTicker: out.order.symbol,
+            purchaseDate: out.order.purchaseDate,
+            shares: out.order.shares,
+          });
+        // Net over all mappable orders in the window (kept OR already
+        // imported), token-keyed, ONLY to derive the redacted perSymbol
+        // "orders vs position units" boolean for the diagnostics trace.
+        if (symbolToken) {
+          const signed =
+            (out.order.side === "SELL" ? -1 : 1) * out.order.shares;
+          ordersNetByToken.set(
+            symbolToken,
+            (ordersNetByToken.get(symbolToken) ?? 0) + signed,
+          );
+        }
+        if (known) {
+          decision = "deduped";
+          ordersDeduped += 1;
+        } else {
+          decision = "kept";
+          ordersKept += 1;
+          mapped.push({ ...out.order, snaptradeAccountId: accountId });
+          if (out.order.side === "SELL") sellsImported++;
+        }
       }
-    }
 
-    orderDiags.push({
-      action: typeof raw.action === "string" ? raw.action : null,
-      status: typeof raw.status === "string" ? raw.status : null,
-      hasOrderId: !!raw.brokerage_order_id,
-      hasTimeExecuted: !!raw.time_executed,
-      hasExecutionPrice:
-        raw.execution_price !== null && raw.execution_price !== undefined,
-      hasFilledQty: !!raw.filled_quantity,
-      filledQtySign: filledQtySign(raw.filled_quantity),
-      rawKeys: Object.keys(raw as Record<string, unknown>).sort(),
-      symbolToken,
-      decision,
-      skipReason,
-    });
-  }
-
-  // Fill the gaps from positions: any position whose symbol isn't
-  // already represented in the orders we just imported gets a
-  // synthesized BUY (today-dated, at average purchase price). Common
-  // case: brokerage order history doesn't cover the position
-  // (transferred-in stock, very old buy, broker hasn't backfilled
-  // the order yet). The deterministic id `pos-{accountId}-{symbol}`
-  // means resync dedups against itself; the same position won't get
-  // re-imported as duplicate.
-  const today = todayIso();
-  const positions = holdings.positions ?? [];
-  for (const raw of positions) {
-    const out = mapSnaptradePosition(raw, cred.snaptradeAccountId, today);
-    const rawPosSymbol = raw.symbol?.symbol?.symbol;
-    const normSymbol =
-      typeof rawPosSymbol === "string" && rawPosSymbol.length > 0
-        ? snaptradeSymbolToYahoo(rawPosSymbol)
-        : null;
-    const symbolToken = tokenFor(normSymbol);
-    let decision: DiagDecision;
-    let skipReason: SkipReason | null = null;
-
-    if (out.kind === "skip") {
-      decision = "skipped";
-      skipReason = out.reason;
-      bump(positionsSkipped, out.reason);
-    } else {
-      // Position mapped with real units. This is the broker's
-      // authoritative CURRENT holding for the symbol — it already
-      // reflects every sale. We do NOT turn it into a lot here:
-      // reconciliation against what's actually stored must happen on
-      // the page (it owns the stored holdings + the UI pooling fn).
-      // Surface it for the page to reconcile.
-      if (symbolToken) positionUnitsByToken.set(symbolToken, out.order.shares);
-      reconcilePositions.push({
-        symbol: out.order.symbol,
-        units: out.order.shares,
-        price: out.order.purchasePrice,
-        currency: out.order.currency,
-        yahooSymbol: out.order.yahooSymbol,
+      orderDiags.push({
+        action: typeof raw.action === "string" ? raw.action : null,
+        status: typeof raw.status === "string" ? raw.status : null,
+        hasOrderId: !!raw.brokerage_order_id,
+        hasTimeExecuted: !!raw.time_executed,
+        hasExecutionPrice:
+          raw.execution_price !== null && raw.execution_price !== undefined,
+        hasFilledQty: !!raw.filled_quantity,
+        filledQtySign: filledQtySign(raw.filled_quantity),
+        rawKeys: Object.keys(raw as Record<string, unknown>).sort(),
+        symbolToken,
+        accountToken,
+        decision,
+        skipReason,
       });
-      // The decision label is purely diagnostic — it records the
-      // orders↔position relationship, not what we imported.
-      if (symbolsCoveredByOrders.has(out.order.symbol)) {
-        decision = "suppressed-by-orders";
-        positionsSuppressed += 1;
-      } else {
-        decision = "kept";
-        positionsKept += 1;
-      }
     }
 
-    positionDiags.push({
-      symbolToken,
-      hasUnits: raw.units !== null && raw.units !== undefined,
-      hasPrice:
-        (raw.average_purchase_price ?? raw.price ?? null) !== null,
-      decision,
-      skipReason,
-    });
+    // Positions: the broker's authoritative CURRENT holdings per
+    // account. Accumulated into the merged map; the page reconciles
+    // against the cross-account sums.
+    const today = todayIso();
+    const positions = holdings.positions ?? [];
+    rawPositionCount += positions.length;
+    for (const raw of positions) {
+      const out = mapSnaptradePosition(raw, accountId, today);
+      const rawPosSymbol = raw.symbol?.symbol?.symbol;
+      const normSymbol =
+        typeof rawPosSymbol === "string" && rawPosSymbol.length > 0
+          ? snaptradeSymbolToYahoo(rawPosSymbol)
+          : null;
+      const symbolToken = tokenFor(normSymbol);
+      let decision: DiagDecision;
+      let skipReason: SkipReason | null = null;
+
+      if (out.kind === "skip") {
+        decision = "skipped";
+        skipReason = out.reason;
+        bump(positionsSkipped, out.reason);
+      } else {
+        if (symbolToken) {
+          positionUnitsByToken.set(
+            symbolToken,
+            (positionUnitsByToken.get(symbolToken) ?? 0) + out.order.shares,
+          );
+        }
+        const acc = mergedPositions.get(out.order.symbol) ?? {
+          units: 0,
+          weighted: 0,
+          currency: out.order.currency,
+          yahooSymbol: out.order.yahooSymbol,
+        };
+        acc.units += out.order.shares;
+        acc.weighted += out.order.shares * out.order.purchasePrice;
+        mergedPositions.set(out.order.symbol, acc);
+        // The decision label is purely diagnostic — it records the
+        // orders↔position relationship, not what we imported.
+        if (symbolsCoveredByOrders.has(out.order.symbol)) {
+          decision = "suppressed-by-orders";
+          positionsSuppressed += 1;
+        } else {
+          decision = "kept";
+          positionsKept += 1;
+        }
+      }
+
+      positionDiags.push({
+        symbolToken,
+        accountToken,
+        hasUnits: raw.units !== null && raw.units !== undefined,
+        hasPrice:
+          (raw.average_purchase_price ?? raw.price ?? null) !== null,
+        decision,
+        skipReason,
+      });
+    }
   }
+
+  const reconcilePositions: ReconcilePosition[] = Array.from(
+    mergedPositions.entries(),
+  ).map(([symbol, acc]) => ({
+    symbol,
+    units: acc.units,
+    price: acc.units > 0 ? acc.weighted / acc.units : 0,
+    currency: acc.currency,
+    yahooSymbol: acc.yahooSymbol,
+  }));
 
   const tokens = new Set<string>([
     ...ordersNetByToken.keys(),
@@ -656,10 +751,10 @@ export async function fetchSnapTradeOrders(
   });
 
   const diagnostics: SnapTradeDiagnostics = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     httpOk: true,
-    rawOrderCount: orderRecords.length,
-    rawPositionCount: positions.length,
+    rawOrderCount,
+    rawPositionCount,
     orders: orderDiags,
     positions: positionDiags,
     perSymbol,
