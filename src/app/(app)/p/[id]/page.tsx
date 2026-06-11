@@ -41,6 +41,7 @@ import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { TabBar } from "@/components/TabBar";
 import { SyncHistory } from "@/components/SyncHistory";
 import { cleanT212Symbol } from "@/lib/brokers/trading212/symbols";
+import { parseSnaptradeAccountIds } from "@/lib/brokers/snaptrade/sync";
 import { BROKERS, SUPPORTED_BROKERS } from "@/lib/brokers/registry";
 import type { BrokerId } from "@/lib/brokers/ids";
 import type { ImportResult, SnapTradeDiagnostics } from "@/lib/brokers/types";
@@ -474,24 +475,24 @@ export default function PortfolioPage({
     }
     return null;
   }, [holdings]);
-  // For SnapTrade-locked portfolios, additionally pin the SnapTrade
-  // account id from the first holding that carries one. A user with
-  // two SnapTrade-connected portfolios shouldn't be able to mix
-  // accounts; the picker filter (and the runtime check inside
-  // handleSync) require any future SnapTrade reconnect to use the
-  // same account id.
-  const lockedSnaptradeAccountId = useMemo<string | null>(() => {
-    if (lockedBroker !== "snaptrade") return null;
+  // For SnapTrade-locked portfolios, the lock is the SET of account ids
+  // tagged on holdings (L). Sorted for stable identity. The credential
+  // set C must satisfy C ⊇ L at sync time — that's what keeps the
+  // fully-sold sweep safe (no held symbol can belong to an unsynced
+  // account). Merged reconciler lots are untagged and don't contribute.
+  const lockedSnaptradeAccountIds = useMemo<string[]>(() => {
+    if (lockedBroker !== "snaptrade") return [];
+    const set = new Set<string>();
     for (const h of holdings) {
       if (
         h.importSource === "snaptrade"
         && typeof h.snaptradeAccountId === "string"
         && h.snaptradeAccountId.length > 0
       ) {
-        return h.snaptradeAccountId;
+        set.add(h.snaptradeAccountId);
       }
     }
-    return null;
+    return Array.from(set).sort();
   }, [lockedBroker, holdings]);
   // Forward-compat safety: if a holding's `importSource` names a
   // broker this build of the app doesn't know about (e.g. portfolio
@@ -749,42 +750,36 @@ export default function PortfolioPage({
       );
       return;
     }
-    // SnapTrade gets a second-tier lock: the same broker, different
-    // account is also a violation. Re-derive from the live ref so we
+    // SnapTrade gets a second-tier lock: the credential's account set C
+    // must be a SUPERSET of the live lock set L (every account that
+    // contributed lots must be synced — that's what keeps the
+    // fully-sold sweep safe). Re-derive L from the live ref so we
     // catch any holdings added between this handler being created and
     // being called. The picker UI in SnapTradeConnectFlow already
     // enforces this for the happy path; this is defense-in-depth so
     // any future caller (retry button, scripted invocation, refactor
     // that bypasses the picker) can't slip past the lock.
-    const liveLockedSnaptradeAccountId = (() => {
-      if (provider !== "snaptrade") return null;
+    const liveLockedSnaptradeSet = (() => {
+      if (provider !== "snaptrade") return [] as string[];
+      const set = new Set<string>();
       for (const h of holdingsRef.current) {
         if (
           h.importSource === "snaptrade"
           && typeof h.snaptradeAccountId === "string"
           && h.snaptradeAccountId.length > 0
         ) {
-          return h.snaptradeAccountId;
+          set.add(h.snaptradeAccountId);
         }
       }
-      return null;
+      return Array.from(set);
     })();
-    if (provider === "snaptrade" && keyOverride && liveLockedSnaptradeAccountId) {
-      try {
-        const incoming = JSON.parse(keyOverride) as {
-          snaptradeAccountId?: string;
-        };
-        if (
-          typeof incoming.snaptradeAccountId !== "string"
-          || incoming.snaptradeAccountId !== liveLockedSnaptradeAccountId
-        ) {
-          setSyncError(
-            "This portfolio is locked to a different SnapTrade account.",
-          );
-          return;
-        }
-      } catch {
-        setSyncError("Malformed SnapTrade credential.");
+    if (provider === "snaptrade" && keyOverride && liveLockedSnaptradeSet.length > 0) {
+      const incoming = new Set(parseSnaptradeAccountIds(keyOverride));
+      const missing = liveLockedSnaptradeSet.filter((id) => !incoming.has(id));
+      if (missing.length > 0) {
+        setSyncError(
+          "This portfolio contains accounts missing from the selected set. Manage accounts to add or remove them.",
+        );
         return;
       }
     }
@@ -858,44 +853,22 @@ export default function PortfolioPage({
     // can persist the redacted SnapTrade decision trace (encrypted
     // under the portfolio key). Null for non-SnapTrade brokers.
     let syncDiagnostics: SnapTradeDiagnostics | null = null;
-    // For SnapTrade, the keyOverride / decrypted credential is JSON
-    // containing `snaptradeAccountId`. Pull it out so each newly
-    // imported holding can be tagged with the source account id —
-    // that's how `lockedSnaptradeAccountId` enforces account-level
-    // lock on subsequent reconnects. Other brokers leave this null.
-    //
     // Belt-and-braces re-sync check: if we read a stored credential
-    // (no keyOverride) and its accountId doesn't match the live lock
-    // derived from holdings, refuse rather than silently rebind. The
-    // picker can't reach this state, but if a stored credential ever
-    // drifted from the holdings (corruption, partial migration,
-    // future bug), we'd rather surface than tag new holdings with the
-    // wrong account.
-    let snaptradeAccountIdForWrites: string | null = null;
-    if (provider === "snaptrade") {
-      let parsedAccountId: string | null = null;
-      try {
-        const parsed = JSON.parse(plaintextKey) as {
-          snaptradeAccountId?: string;
-        };
-        if (typeof parsed.snaptradeAccountId === "string") {
-          parsedAccountId = parsed.snaptradeAccountId;
-        }
-      } catch {
-        // Adapter will surface the JSON parse error itself.
-      }
-      if (
-        !keyOverride
-        && liveLockedSnaptradeAccountId
-        && parsedAccountId
-        && parsedAccountId !== liveLockedSnaptradeAccountId
-      ) {
+    // (no keyOverride) and its account set doesn't cover the live lock
+    // set derived from holdings, refuse rather than silently sync a
+    // subset (which would let the fully-sold sweep zero positions held
+    // in the uncovered accounts). The per-holding account tag now comes
+    // from each ImportedOrder (the adapter stamps the source account
+    // per leg), not from a single credential-level id.
+    if (provider === "snaptrade" && !keyOverride && liveLockedSnaptradeSet.length > 0) {
+      const stored = new Set(parseSnaptradeAccountIds(plaintextKey));
+      const missing = liveLockedSnaptradeSet.filter((id) => !stored.has(id));
+      if (missing.length > 0) {
         setSyncError(
-          "Stored SnapTrade credentials don't match this portfolio's locked account. Disconnect and reconnect.",
+          "This portfolio contains accounts missing from the stored credential set. Manage accounts to add or remove them.",
         );
         return;
       }
-      snaptradeAccountIdForWrites = parsedAccountId;
     }
     try {
       if (needsWriteBack) {
@@ -1028,12 +1001,11 @@ export default function PortfolioPage({
         if (order.currency) plaintextShape.currency = order.currency;
         if (order.isin) plaintextShape.isin = order.isin;
         if (order.yahooSymbol) plaintextShape.yahooSymbol = order.yahooSymbol;
-        // SnapTrade-locked holdings carry the SnapTrade account id
-        // they came from, so future syncs can verify the lock at
-        // account granularity (one-account-one-portfolio) — not just
-        // at broker granularity. Only stamped for SnapTrade.
-        if (snaptradeAccountIdForWrites) {
-          plaintextShape.snaptradeAccountId = snaptradeAccountIdForWrites;
+        // SnapTrade holdings carry the account id of the leg's SOURCE
+        // account (adapter-stamped, per leg) so the lock set and
+        // account-removal cleanup can be derived from holdings.
+        if (order.snaptradeAccountId) {
+          plaintextShape.snaptradeAccountId = order.snaptradeAccountId;
         }
 
         if (portfolioKey) {
@@ -1054,8 +1026,8 @@ export default function PortfolioPage({
               yahooSymbol: order.yahooSymbol,
               importSource: provider,
               brokerOrderId: order.id,
-              ...(snaptradeAccountIdForWrites
-                ? { snaptradeAccountId: snaptradeAccountIdForWrites }
+              ...(order.snaptradeAccountId
+                ? { snaptradeAccountId: order.snaptradeAccountId }
                 : {}),
             },
             portfolioKey,
@@ -1097,7 +1069,7 @@ export default function PortfolioPage({
       // reconciles; same optimistic contract as the rest of sync).
       try {
         const recPositions = result.positions ?? [];
-        if (recPositions.length > 0 && snaptradeAccountIdForWrites) {
+        if (recPositions.length > 0 && provider === "snaptrade") {
           const today = new Date().toISOString().split("T")[0];
           // Lots written THIS sync aren't in `decodedCurrent` yet (the
           // snapshot is async) — project them in memory so the pool is
@@ -1116,17 +1088,37 @@ export default function PortfolioPage({
           });
           const positionSymbols = new Set(recPositions.map((p) => p.symbol));
 
+          // Legacy migration: per-account reconcilers
+          // (pos-recon-{accountId}-{symbol}) predate the merged scheme.
+          // Delete them outright (synthetic lots; deletion avoids
+          // permanent 0-share artifacts) and exclude them from the
+          // pooling below so fresh merged adjustments are computed
+          // against real lots only. Targets are now cross-account sums,
+          // so per-account reconcilers would fight each other when the
+          // same ticker is held in two accounts.
+          const isLegacyRecon = (h: Holding) =>
+            h.importSource === provider
+            && !!h.brokerOrderId
+            && h.brokerOrderId.startsWith("pos-recon-")
+            && !h.brokerOrderId.startsWith("pos-recon-merged-");
+          const legacyRecons = decodedCurrent.filter(isLegacyRecon);
+          for (const legacy of legacyRecons) {
+            await deleteDoc(
+              doc(db, "portfolios", id, "holdings", legacy.id),
+            ).catch(() => {});
+          }
+          const current = decodedCurrent.filter((h) => !isLegacyRecon(h));
+
           for (const pos of recPositions) {
-            const reconId =
-              `pos-recon-${snaptradeAccountIdForWrites}-${pos.symbol}`;
-            const existingRecon = decodedCurrent.find(
+            const reconId = `pos-recon-merged-${pos.symbol}`;
+            const existingRecon = current.find(
               (h) =>
                 h.importSource === provider && h.brokerOrderId === reconId,
             );
             // Pool everything for this symbol EXCEPT a prior reconciler
             // (recompute fresh) plus this sync's new legs.
             const lots: Holding[] = [
-              ...decodedCurrent.filter(
+              ...current.filter(
                 (h) =>
                   h.symbol === pos.symbol && h.id !== existingRecon?.id,
               ),
@@ -1154,7 +1146,9 @@ export default function PortfolioPage({
                 brokerOrderId: reconId,
                 ...(pos.currency ? { currency: pos.currency } : {}),
                 ...(pos.yahooSymbol ? { yahooSymbol: pos.yahooSymbol } : {}),
-                snaptradeAccountId: snaptradeAccountIdForWrites,
+                // Deliberately NO snaptradeAccountId: the merged
+                // reconciler spans accounts, so the lock-set derivation
+                // and account-removal cleanup must ignore it.
               };
               if (portfolioKey) {
                 const ct = await encryptHolding(plain, portfolioKey);
@@ -1181,8 +1175,10 @@ export default function PortfolioPage({
 
           // A symbol the broker no longer reports (fully sold) won't be
           // in recPositions — neutralize any leftover reconciler so it
-          // can't keep a closed position visible.
-          for (const h of decodedCurrent) {
+          // can't keep a closed position visible. Safe under
+          // multi-account because sync requires C ⊇ L: every held
+          // symbol's source account was part of this sync.
+          for (const h of current) {
             if (
               h.importSource === provider &&
               h.brokerOrderId?.startsWith("pos-recon-") &&
@@ -1967,6 +1963,13 @@ export default function PortfolioPage({
                       <li key={lockedBroker} className="flex items-center gap-2 bg-bg-3 border border-line rounded-lg px-3 py-2.5">
                         <span className="text-sm font-medium flex-1">
                           {BROKERS[lockedBroker].displayName}
+                          {lockedBroker === "snaptrade"
+                            && lockedSnaptradeAccountIds.length > 0 && (
+                            <span className="text-xs text-fg-fade ml-1.5">
+                              · {lockedSnaptradeAccountIds.length} account
+                              {lockedSnaptradeAccountIds.length === 1 ? "" : "s"}
+                            </span>
+                          )}
                         </span>
                         {result && (
                           <span className="text-xs text-fg-fade">
@@ -2102,9 +2105,7 @@ export default function PortfolioPage({
                     <div className="mt-3">
                       <SnapTradeConnectFlow
                         syncLoading={syncLoading === "snaptrade"}
-                        lockedSnaptradeAccountIds={
-                          lockedSnaptradeAccountId ? [lockedSnaptradeAccountId] : []
-                        }
+                        lockedSnaptradeAccountIds={lockedSnaptradeAccountIds}
                         onCancel={() => {
                           // For locked portfolios, close the modal
                           // (no other broker is selectable anyway).
