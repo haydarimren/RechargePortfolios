@@ -50,6 +50,10 @@ import {
   encryptBrokerCredential,
 } from "@/lib/crypto-client";
 import { SnapTradeConnectFlow } from "@/components/SnapTradeConnectFlow";
+import {
+  SnapTradeManageAccounts,
+  type ManageAccountsResult,
+} from "@/components/SnapTradeManageAccounts";
 import { useEncryption } from "@/lib/use-encryption";
 import { getCachedPortfolioKey, getUnlocked } from "@/lib/key-store";
 import {
@@ -140,6 +144,10 @@ export default function PortfolioPage({
   const [syncResults, setSyncResults] = useState<Record<string, { buys: number; sells: number; skipped: number; partialFillsSkipped: number }>>({});
   const [syncLoading, setSyncLoading] = useState<string | null>(null);
   const [syncError, setSyncError] = useState("");
+  // SnapTrade manage-accounts flow: non-null = panel open, holding the
+  // decrypted stored credential JSON.
+  const [manageCredentialJson, setManageCredentialJson] = useState<string | null>(null);
+  const [manageBusy, setManageBusy] = useState(false);
 
   const encryption = useEncryption();
   // Unwrapped K_portfolio for the active portfolio. Set once per portfolio
@@ -1281,6 +1289,96 @@ export default function PortfolioPage({
     }
   };
 
+  const openManageAccounts = async () => {
+    if (!user) return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) {
+      setSyncError("Unlock your portfolio first.");
+      return;
+    }
+    try {
+      const secretSnap = await getDoc(
+        doc(db, "portfolios", id, "secrets", "credentials"),
+      );
+      const data = secretSnap.exists() ? secretSnap.data() : null;
+      if (
+        !data
+        || typeof data.payload !== "string"
+        || typeof data.iv !== "string"
+      ) {
+        setSyncError("No credentials — reconnect.");
+        return;
+      }
+      const decoded = await decryptBrokerCredential(
+        { payload: data.payload, iv: data.iv },
+        unlocked.masterSecret,
+      );
+      if (decoded.brokerId !== "snaptrade") {
+        setSyncError(
+          `Stored credentials are for ${decoded.brokerId}, not snaptrade.`,
+        );
+        return;
+      }
+      setManageCredentialJson(decoded.credential);
+    } catch {
+      setSyncError("Stored credentials are corrupt — reconnect.");
+    }
+  };
+
+  const handleManageApply = async ({
+    newAccountIds,
+    removedAccountIds,
+  }: ManageAccountsResult) => {
+    if (!user) return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked || !manageCredentialJson) return;
+    setManageBusy(true);
+    try {
+      // Order is load-bearing (see the multi-account design doc):
+      // credential FIRST — if the flow dies after this write, the next
+      // sync is BLOCKED by the C ⊇ L check instead of a stale
+      // credential silently re-importing an account the user removed.
+      const base = JSON.parse(manageCredentialJson) as Record<string, unknown>;
+      delete base.snaptradeAccountId; // retire the legacy singular field
+      const newCredential = JSON.stringify({
+        ...base,
+        snaptradeAccountIds: newAccountIds,
+      });
+      const env = await encryptBrokerCredential(
+        { brokerId: "snaptrade", credential: newCredential },
+        unlocked.masterSecret,
+      );
+      await setDoc(doc(db, "portfolios", id, "secrets", "credentials"), {
+        payload: env.payload,
+        iv: env.iv,
+        updatedAt: Date.now(),
+      });
+      // Delete removed accounts' lots (provenance-tagged; merged
+      // reconcilers are untagged and survive — the chained sync below
+      // re-targets or neutralizes them).
+      if (removedAccountIds.length > 0) {
+        const removedSet = new Set(removedAccountIds);
+        const toDelete = holdingsRef.current.filter(
+          (h) =>
+            h.importSource === "snaptrade"
+            && typeof h.snaptradeAccountId === "string"
+            && removedSet.has(h.snaptradeAccountId),
+        );
+        const batch = writeBatch(db);
+        for (const h of toDelete) {
+          batch.delete(doc(db, "portfolios", id, "holdings", h.id));
+        }
+        await batch.commit();
+      }
+      setManageCredentialJson(null);
+      // Chained sync: imports added accounts' history and re-targets
+      // every merged reconciler against the remaining set.
+      await handleSync("snaptrade");
+    } finally {
+      setManageBusy(false);
+    }
+  };
+
   const handleDisconnect = async () => {
     // Generic credentials doc; the broker id is stamped inside the
     // encrypted payload, not the path. No portfolio-doc field to update
@@ -1997,6 +2095,16 @@ export default function PortfolioPage({
                             )}
                           </span>
                         )}
+                        {lockedBroker === "snaptrade" && (
+                          <button
+                            onClick={() => void openManageAccounts()}
+                            disabled={!!syncLoading || manageBusy}
+                            className="text-xs btn-ghost px-2.5 py-1 disabled:opacity-40"
+                            title="Add or remove SnapTrade accounts"
+                          >
+                            Accounts
+                          </button>
+                        )}
                         <button
                           onClick={() => handleSync(lockedBroker)}
                           disabled={!!syncLoading}
@@ -2016,6 +2124,31 @@ export default function PortfolioPage({
                     );
                   })()}
                 </ul>
+              </div>
+            )}
+
+            {/* SnapTrade manage-accounts panel — opened from the
+                Accounts button on the connected-broker row. */}
+            {manageCredentialJson && lockedBroker === "snaptrade" && (
+              <div className="mb-5">
+                <div className="label mb-3">Manage accounts</div>
+                <SnapTradeManageAccounts
+                  credentialJson={manageCredentialJson}
+                  currentAccountIds={parseSnaptradeAccountIds(manageCredentialJson)}
+                  holdingsAccountIds={lockedSnaptradeAccountIds}
+                  countLotsFor={(ids) => {
+                    const set = new Set(ids);
+                    return holdings.filter(
+                      (h) =>
+                        h.importSource === "snaptrade"
+                        && typeof h.snaptradeAccountId === "string"
+                        && set.has(h.snaptradeAccountId),
+                    ).length;
+                  }}
+                  busy={manageBusy || !!syncLoading}
+                  onApply={handleManageApply}
+                  onClose={() => setManageCredentialJson(null)}
+                />
               </div>
             )}
 
