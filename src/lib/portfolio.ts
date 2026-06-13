@@ -313,14 +313,23 @@ export function buildComparisonSeries(
 
     for (const lot of openLots) {
       const prices = pricesBySymbol[lot.symbol];
-      if (prices && prices.length > 0) {
-        const c = closeOnOrBefore(prices, bp.date);
-        if (c != null) port += lot.remainingShares * c;
-      }
+      const c =
+        prices && prices.length > 0 ? closeOnOrBefore(prices, bp.date) : null;
+      // Skip any holding we can't price (e.g. an option contract
+      // SnapTrade reports but Yahoo has no equity quote for). It must be
+      // excluded from ALL three sums — portfolio value, deployed cost,
+      // and the benchmark "hypothetical" — to keep them consistent.
+      // Counting an un-priceable lot's cost in the benchmark sum while
+      // the portfolio value (which needs a price) skipped it made the
+      // benchmark line spike by that lot's full cost whenever such a
+      // position was briefly held (see the regression test). Excluding it
+      // everywhere keeps the comparison equities-only and consistent.
+      if (c == null) continue;
+      port += lot.remainingShares * c;
       const lotCostStillOpen = lot.remainingShares * lot.purchasePrice;
       // Deployed capital this day — the denominator for the
-      // return-on-invested-capital normalization. Summed over every open
-      // lot so it tracks the actual cost basis at risk.
+      // return-on-invested-capital normalization. Over the same priced
+      // lots as `port` so the two stay consistent.
       cost += lotCostStillOpen;
       for (const key of benchKeys) {
         const basis = closeOnOrBefore(benchmarks[key], lot.purchaseDate);

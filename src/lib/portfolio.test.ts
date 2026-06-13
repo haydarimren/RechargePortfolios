@@ -204,6 +204,40 @@ describe("buildComparisonSeries", () => {
     expect(series[4].SPY).toBeCloseTo(1050 + (550 * 420) / 410);
   });
 
+  it("excludes un-priceable holdings (e.g. options) from BOTH portfolio and benchmark sums", () => {
+    // Regression: a holding whose symbol has no Yahoo price data (an
+    // option contract SnapTrade reports, etc.) was skipped from the
+    // portfolio value but still counted in the benchmark "hypothetical"
+    // cost sum. A large such position held briefly spiked the benchmark
+    // line by its full cost (~$900k in the reported chart) while the
+    // portfolio line stayed flat, then snapped back when it was sold.
+    const day = (d: string, c: number): HistoricalPoint => ({ date: d, close: c });
+    const flat = (c: number) =>
+      ["2026-04-14", "2026-04-15", "2026-04-16", "2026-04-17", "2026-04-18", "2026-04-19", "2026-04-20", "2026-04-21"].map(
+        (d) => day(d, c)
+      );
+    const holdings: Holding[] = [
+      h("EQ", "AAPL", 1000, 100, "2026-04-14"), // priced equity, held throughout
+      h("OPT", "AAPL260619C", 1000, 800, "2026-04-18"), // big, NO Yahoo price
+      sell("OPTSELL", "AAPL260619C", 1000, "2026-04-20"), // sold two days later
+    ];
+    const series = buildComparisonSeries(
+      holdings,
+      { AAPL: flat(100) }, // note: no AAPL260619C price series
+      { SPY: flat(700) }
+    );
+    const at = (d: string) => series.find((s) => s.date === d)!;
+    // AAPL alone: 1000 × $100 = $100k, benchmark cost 100k × 1 = $100k.
+    // The un-priceable option lot must appear in NEITHER line.
+    expect(at("2026-04-17").SPY).toBeCloseTo(100000);
+    expect(at("2026-04-18").portfolio).toBeCloseTo(100000);
+    expect(at("2026-04-18").SPY).toBeCloseTo(100000); // was $900k before the fix
+    expect(at("2026-04-19").SPY).toBeCloseTo(100000);
+    expect(at("2026-04-21").SPY).toBeCloseTo(100000);
+    // Cost basis denominator likewise excludes the un-priceable lot.
+    expect(at("2026-04-18").cost).toBeCloseTo(100000);
+  });
+
   it("returns empty series when no holdings", () => {
     expect(
       buildComparisonSeries([], {}, { SPY: [{ date: "2024-01-02", close: 400 }] })
