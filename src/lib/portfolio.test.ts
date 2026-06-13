@@ -4,6 +4,7 @@ import {
   closeOnOrBefore,
   fmtShares,
   buildComparisonSeries,
+  normalizeSeries,
   poolPositions,
   reconcileToPositionUnits,
 } from "./portfolio";
@@ -256,6 +257,87 @@ describe("buildComparisonSeries", () => {
     // 01-05: 5 shares @ 130 = 650. SPY: 500 * 410/400 = 512.5
     expect(series[3].portfolio).toBeCloseTo(650);
     expect(series[3].SPY).toBeCloseTo(512.5);
+  });
+});
+
+describe("normalizeSeries — return on deployed capital", () => {
+  // Build a flat daily price series so the math is hand-checkable.
+  const daily = (
+    from: string,
+    to: string,
+    close: number
+  ): HistoricalPoint[] => {
+    const out: HistoricalPoint[] = [];
+    const d = new Date(from);
+    const end = new Date(to);
+    while (d <= end) {
+      out.push({ date: d.toISOString().slice(0, 10), close });
+      d.setDate(d.getDate() + 1);
+    }
+    return out;
+  };
+
+  it("emits per-day deployed cost from buildComparisonSeries", () => {
+    const holdings: Holding[] = [
+      h("L1", "AAPL", 10, 100, "2024-01-02"), // cost 1000
+      h("L2", "MSFT", 5, 200, "2024-01-04"), // cost 1000, opens later
+    ];
+    const series = buildComparisonSeries(
+      holdings,
+      {
+        AAPL: daily("2024-01-02", "2024-01-05", 100),
+        MSFT: daily("2024-01-02", "2024-01-05", 200),
+      },
+      { SPY: daily("2024-01-02", "2024-01-05", 400) }
+    );
+    // 01-02: only AAPL deployed → cost 1000. 01-04 on: both → 2000.
+    expect(series.find((s) => s.date === "2024-01-02")!.cost).toBeCloseTo(1000);
+    expect(series.find((s) => s.date === "2024-01-04")!.cost).toBeCloseTo(2000);
+  });
+
+  it("does NOT explode for a portfolio built up over the window (regression)", () => {
+    // The reported bug: a tiny cash position funded first, equities bought
+    // two weeks later. Normalizing market value against the day-0 value
+    // turned capital inflows into thousands-of-percent 'returns'.
+    const holdings: Holding[] = [
+      h("CASH", "SPAXX", 50, 1, "2026-01-02"), // $50 cash, flat $1
+      h("EQ", "AAPL", 10, 100, "2026-01-16"), // $1000 equity, two weeks later
+    ];
+    const series = buildComparisonSeries(
+      holdings,
+      {
+        SPAXX: daily("2025-12-19", "2026-01-30", 1),
+        AAPL: daily("2025-12-19", "2026-01-30", 110), // +10% vs cost
+      },
+      { SPY: daily("2025-12-19", "2026-01-30", 500) } // flat → 0% benchmark
+    );
+    const norm = normalizeSeries(series);
+    const last = norm[norm.length - 1];
+
+    // Return on deployed capital: cost = 1050, value = 50 + 1100 = 1150.
+    expect(last.portfolio).toBeCloseTo(((1150 - 1050) / 1050) * 100, 4); // ≈ +9.52%
+    // Flat SPY over the window → 0% benchmark return.
+    expect(last.SPY as number).toBeCloseTo(0, 4);
+    // The load-bearing guard: nowhere near the old +2000% explosion.
+    for (const p of norm) {
+      expect(Math.abs(p.portfolio)).toBeLessThan(100);
+    }
+  });
+
+  it("both lines start at 0% on the first invested day", () => {
+    const holdings: Holding[] = [h("L1", "AAPL", 10, 100, "2026-02-02")];
+    const series = buildComparisonSeries(
+      holdings,
+      { AAPL: daily("2026-01-19", "2026-02-10", 100) },
+      { SPY: daily("2026-01-19", "2026-02-10", 400) }
+    );
+    const norm = normalizeSeries(series);
+    expect(norm[0].portfolio).toBeCloseTo(0, 6);
+    expect(norm[0].SPY as number).toBeCloseTo(0, 6);
+  });
+
+  it("returns [] for an empty series", () => {
+    expect(normalizeSeries([])).toEqual([]);
   });
 });
 
