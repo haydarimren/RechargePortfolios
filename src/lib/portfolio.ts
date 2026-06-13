@@ -213,7 +213,14 @@ export function closeOnOrBefore(
 export interface SeriesPoint {
   date: string;
   portfolio: number;
-  [benchKey: string]: number | string;
+  /**
+   * Deployed cost basis of the lots open on this day (Σ remainingShares
+   * × purchasePrice). The denominator for `normalizeSeries`'s
+   * return-on-invested-capital math. Present on the absolute series from
+   * `buildComparisonSeries`; stripped from the normalized output.
+   */
+  cost?: number;
+  [benchKey: string]: number | string | undefined;
 }
 
 interface LotWithSymbol extends PooledLot {
@@ -300,6 +307,7 @@ export function buildComparisonSeries(
     }
 
     let port = 0;
+    let cost = 0;
     const benchValues: Record<string, number> = {};
     for (const key of benchKeys) benchValues[key] = 0;
 
@@ -310,6 +318,10 @@ export function buildComparisonSeries(
         if (c != null) port += lot.remainingShares * c;
       }
       const lotCostStillOpen = lot.remainingShares * lot.purchasePrice;
+      // Deployed capital this day — the denominator for the
+      // return-on-invested-capital normalization. Summed over every open
+      // lot so it tracks the actual cost basis at risk.
+      cost += lotCostStillOpen;
       for (const key of benchKeys) {
         const basis = closeOnOrBefore(benchmarks[key], lot.purchaseDate);
         if (!basis || basis <= 0) continue;
@@ -318,7 +330,7 @@ export function buildComparisonSeries(
         benchValues[key] += lotCostStillOpen * (bClose / basis);
       }
     }
-    out.push({ date: bp.date, portfolio: port, ...benchValues });
+    out.push({ date: bp.date, portfolio: port, cost, ...benchValues });
   }
   return out;
 }
@@ -403,38 +415,51 @@ export function buildTradeLog(holdings: Holding[]): TradeLogEntry[] {
 }
 
 /**
- * Convert an absolute-value comparison series into %-return-from-base
- * form. Each line (portfolio, SPY, QQQ) finds its own first positive
- * base independently so a temporary zero on day 0 for one benchmark
- * doesn't hide its line for the whole chart. This is the exact math the
- * shared-viewer chart has always used — the share-link snapshot stores
- * its output, so the public page inherits identical behavior.
+ * Convert an absolute-value comparison series into %-return form, as
+ * **return on deployed capital**: each day's portfolio market value (and
+ * each benchmark's same-cost-deployed value) is divided by that day's
+ * cost basis, minus one.
+ *
+ *   portfolio%(t) = (marketValue(t) / costDeployed(t) − 1) × 100
+ *   benchmark%(t) = (sameCostInBenchmark(t) / costDeployed(t) − 1) × 100
+ *
+ * Why per-day cost and not a fixed first-day base: a portfolio is built
+ * up over the charted window (deposits, staggered buys), so its market
+ * value grows from *capital inflows*, not just returns. Dividing by the
+ * value on a single early day — when maybe one small lot or a cash
+ * position was all that was held — turns those inflows into nonsense
+ * thousand-percent "returns" (the share-link chart bug). Normalizing
+ * against deployed capital makes every line start at 0%, immune to
+ * deposits, and apples-to-apples with the benchmark's "same dollars into
+ * SPY" framing — the same basis as the "vs cost" headline.
+ *
+ * Used by the shared-viewer chart (owner's friend view) and stored into
+ * the share-link snapshot, so both inherit identical behavior.
  */
 export function normalizeSeries(series: SeriesPoint[]): SeriesPoint[] {
-  if (series.length === 0) return [];
-  const baseIdx = series.findIndex((p) => p.portfolio > 0);
-  if (baseIdx === -1) return [];
-  const baseP = series[baseIdx].portfolio;
-  const findBase = (key: "SPY" | "QQQ"): number | null => {
-    for (let i = baseIdx; i < series.length; i++) {
-      const v = series[i][key];
-      if (typeof v === "number" && v > 0) return v;
+  const out: SeriesPoint[] = [];
+  let started = false;
+  for (const p of series) {
+    const cost = typeof p.cost === "number" ? p.cost : 0;
+    // Skip leading days before any capital is both deployed AND priced
+    // (e.g. a cash-only or not-yet-priced opening stretch) so the line
+    // doesn't begin with a spurious −100% dip.
+    if (!started) {
+      if (cost <= EPS || p.portfolio <= EPS) continue;
+      started = true;
     }
-    return null;
-  };
-  const baseSPY = findBase("SPY");
-  const baseQQQ = findBase("QQQ");
-  return series.slice(baseIdx).map((p) => {
-    const spy = typeof p.SPY === "number" && p.SPY > 0 ? p.SPY : null;
-    const qqq = typeof p.QQQ === "number" && p.QQQ > 0 ? p.QQQ : null;
+    if (cost <= EPS) continue;
     const point: SeriesPoint = {
       date: p.date,
-      portfolio: (p.portfolio / baseP - 1) * 100,
+      portfolio: (p.portfolio / cost - 1) * 100,
     };
-    if (baseSPY && spy !== null) point.SPY = (spy / baseSPY - 1) * 100;
-    if (baseQQQ && qqq !== null) point.QQQ = (qqq / baseQQQ - 1) * 100;
-    return point;
-  });
+    const spy = typeof p.SPY === "number" ? p.SPY : null;
+    const qqq = typeof p.QQQ === "number" ? p.QQQ : null;
+    if (spy !== null) point.SPY = (spy / cost - 1) * 100;
+    if (qqq !== null) point.QQQ = (qqq / cost - 1) * 100;
+    out.push(point);
+  }
+  return out;
 }
 
 /**

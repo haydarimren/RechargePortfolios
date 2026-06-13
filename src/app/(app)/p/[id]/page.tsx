@@ -1610,12 +1610,18 @@ export default function PortfolioPage({
                   const v = benchGain.values[b] ?? 0;
                   const diff = benchGain.portfolio - v;
                   const diffPct = v > 0 ? (diff / v) * 100 : 0;
+                  // `diff > 0` means the real portfolio is worth more than
+                  // this hypothetical-benchmark value — i.e. the PORTFOLIO
+                  // is ahead. The subject is the portfolio, not the
+                  // benchmark, so phrase it that way ("Portfolio ahead X%")
+                  // — the old "vs portfolio +X%" read backwards (as if the
+                  // benchmark were the one outperforming).
                   return (
                     <SmallStat
                       key={b}
                       label={`Hypothetical ${b}`}
                       value={fmtMoney(v)}
-                      sub={`vs portfolio ${fmtPct(diffPct)}`}
+                      sub={`Portfolio ${diff >= 0 ? "ahead" : "behind"} ${Math.abs(diffPct).toFixed(2)}%`}
                       tone={diff >= 0 ? "pos" : "neg"}
                     />
                   );
