@@ -5,6 +5,9 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signInWithPopup,
+  linkWithPopup,
+  linkWithCredential,
+  EmailAuthProvider,
   GoogleAuthProvider,
 } from "firebase/auth";
 import { auth } from "@/lib/firebase";
@@ -24,15 +27,47 @@ export default function LoginPage() {
   // routing to onboarding for unenrolled users, and useEncryption
   // silently auto-unlocks anyone who's already enrolled. Login itself
   // doesn't need to know about encryption state.
+  //
+  // Anonymous sessions (a visitor arriving from a share link) are
+  // UPGRADED in place where possible — linkWithCredential/linkWithPopup
+  // keeps the same UID so nothing about the session is lost. If the
+  // credential already belongs to a real account, fall back to a plain
+  // sign-in (the anonymous session is discarded; it owned nothing).
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError("");
     try {
-      const cred = isRegister
-        ? await createUserWithEmailAndPassword(auth, email, password)
-        : await signInWithEmailAndPassword(auth, email, password);
-      await ensureUserProfile(cred.user);
+      const anon = auth.currentUser?.isAnonymous ? auth.currentUser : null;
+      let user;
+      if (isRegister) {
+        if (anon) {
+          try {
+            const cred = await linkWithCredential(
+              anon,
+              EmailAuthProvider.credential(email, password),
+            );
+            user = cred.user;
+          } catch (err: unknown) {
+            const code = (err as { code?: string }).code;
+            if (
+              code === "auth/email-already-in-use" ||
+              code === "auth/credential-already-in-use"
+            ) {
+              user = (await signInWithEmailAndPassword(auth, email, password))
+                .user;
+            } else {
+              throw err;
+            }
+          }
+        } else {
+          user = (await createUserWithEmailAndPassword(auth, email, password))
+            .user;
+        }
+      } else {
+        user = (await signInWithEmailAndPassword(auth, email, password)).user;
+      }
+      await ensureUserProfile(user);
       router.push("/");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to authenticate");
@@ -45,8 +80,26 @@ export default function LoginPage() {
     setLoading(true);
     setError("");
     try {
-      const cred = await signInWithPopup(auth, new GoogleAuthProvider());
-      await ensureUserProfile(cred.user);
+      const anon = auth.currentUser?.isAnonymous ? auth.currentUser : null;
+      let user;
+      if (anon) {
+        try {
+          user = (await linkWithPopup(anon, new GoogleAuthProvider())).user;
+        } catch (err: unknown) {
+          const code = (err as { code?: string }).code;
+          if (
+            code === "auth/credential-already-in-use" ||
+            code === "auth/email-already-in-use"
+          ) {
+            user = (await signInWithPopup(auth, new GoogleAuthProvider())).user;
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        user = (await signInWithPopup(auth, new GoogleAuthProvider())).user;
+      }
+      await ensureUserProfile(user);
       router.push("/");
     } catch (err: unknown) {
       setError(

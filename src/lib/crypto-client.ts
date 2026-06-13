@@ -132,11 +132,18 @@ async function importMasterSecretAsHkdf(
   );
 }
 
-async function deriveAesKeyFromMaster(
-  masterSecret: Uint8Array,
+/**
+ * Derive a purpose-bound AES-GCM-256 key from any high-entropy secret
+ * via HKDF-SHA-256 (empty salt, caller-supplied info string). Used with
+ * the user's master secret (credential wrap, private-key wrap) and with
+ * share-link tokens (snapshot key — see share-links.ts). The info
+ * string is the domain separator — never reuse one across purposes.
+ */
+export async function deriveAesKeyFromSecret(
+  secret: Uint8Array,
   info: string,
 ): Promise<CryptoKey> {
-  const base = await importMasterSecretAsHkdf(masterSecret);
+  const base = await importMasterSecretAsHkdf(secret);
   return SUBTLE().deriveKey(
     {
       name: "HKDF",
@@ -150,6 +157,9 @@ async function deriveAesKeyFromMaster(
     ["encrypt", "decrypt"],
   );
 }
+
+// Internal alias so existing master-secret call sites read naturally.
+const deriveAesKeyFromMaster = deriveAesKeyFromSecret;
 
 // ---------- device-bound local wrap key ----------------------------------
 

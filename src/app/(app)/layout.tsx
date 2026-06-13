@@ -8,6 +8,12 @@ import { collection, onSnapshot, query, where } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useEncryption } from "@/lib/use-encryption";
 import { getUnlocked } from "@/lib/key-store";
+import {
+  clearFollowIntent,
+  readFollowIntent,
+  redeemFollow,
+  setPendingLinkToken,
+} from "@/lib/share-links";
 import { UnlockModal } from "@/components/UnlockModal";
 import { AppShell } from "@/components/AppShell";
 import { Portfolio } from "@/lib/types";
@@ -23,7 +29,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
-      if (!u) {
+      if (!u || u.isAnonymous) {
+        // Anonymous sessions exist only for /s/ share-link pages — the
+        // app shell (and everything behind it, incl. encryption
+        // enrollment) requires a real account.
         router.push("/login");
         return;
       }
@@ -64,6 +73,32 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     });
     return () => unsub();
   }, [user, encryption.state.kind]);
+
+  // Complete a share-link follow stashed before the signup funnel.
+  // Runs once the user is fully enrolled + unlocked so the owner's
+  // reconcile can wrap K_portfolio for them on its next pass. The stash
+  // survives until redeem fully succeeds (both writes), so an
+  // interrupted attempt retries on the next app load.
+  const redeemRanRef = useRef(false);
+  useEffect(() => {
+    if (!user) return;
+    if (encryption.state.kind !== "unlocked") return;
+    if (redeemRanRef.current) return;
+    const intent = readFollowIntent();
+    if (!intent) return;
+    redeemRanRef.current = true;
+    void (async () => {
+      try {
+        await redeemFollow(intent.pid, intent.token, user.uid);
+        setPendingLinkToken(intent.pid, intent.token);
+        clearFollowIntent();
+        router.push(`/p/${intent.pid}`);
+      } catch (err) {
+        console.warn("follow redeem failed; will retry next load", err);
+        redeemRanRef.current = false;
+      }
+    })();
+  }, [user, encryption.state.kind, router]);
 
   if (!authResolved) {
     return <div className="min-h-screen bg-bg" aria-busy />;

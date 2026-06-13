@@ -972,11 +972,11 @@ export async function revokeFromUser(
     ownerPublicKeyHex: string;
     remainingSharerUids: string[];
   },
-): Promise<void> {
+): Promise<CryptoKey | null> {
   const portfolioRef = doc(db, "portfolios", portfolioId);
   if (!ctx) {
     await updateDoc(portfolioRef, { sharedWith: arrayRemove(removeUid) });
-    return;
+    return null;
   }
 
   // Look up remaining sharers' public keys before any writes — that way
@@ -1075,6 +1075,16 @@ export async function revokeFromUser(
   await deleteDoc(
     doc(db, "portfolios", portfolioId, "wrappedKeys", removeUid),
   ).catch(() => {});
+
+  // Refresh the owner's in-tab key to the rotated key. Holdings are now
+  // ciphertext under `newKey`; the module-level cache (and the calling
+  // page's React state, via the returned key) still hold `oldKey`, so
+  // without this the owner's live holdings subscription would decrypt
+  // every row to null and the portfolio would appear EMPTY until a full
+  // page reload cleared the cache. Update the cache here and hand the
+  // new key back so the caller can re-seed its component state.
+  setCachedPortfolioKey(portfolioId, newKey);
+  return newKey;
 }
 
 /**
@@ -1117,5 +1127,26 @@ export async function reconcileSharedWrappedKeys(
     );
     added++;
   }
+
+  // Consume follow requests (share-links feature): a request whose uid
+  // now has a wrappedKey — just wrapped above, or wrapped on an earlier
+  // pass — has served its purpose. Best-effort — a missed delete is
+  // retried on the next reconcile and grants nothing by itself.
+  try {
+    const reqs = await getDocs(
+      collection(db, "portfolios", portfolioId, "followRequests"),
+    );
+    for (const r of reqs.docs) {
+      const wk = await getDoc(
+        doc(db, "portfolios", portfolioId, "wrappedKeys", r.id),
+      );
+      if (wk.exists()) {
+        await deleteDoc(r.ref).catch(() => {});
+      }
+    }
+  } catch {
+    // Owner-only list; transient failures are fine.
+  }
+
   return { added, pending };
 }

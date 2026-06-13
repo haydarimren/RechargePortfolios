@@ -73,6 +73,13 @@ export default function EncryptionOnboardingPage() {
         router.replace("/login");
         return;
       }
+      if (u.isAnonymous) {
+        // Share-link visitors must create a real account before
+        // encryption enrollment — an enrolled anonymous account would
+        // be orphaned on sign-out with no way back in.
+        router.replace("/login");
+        return;
+      }
       // If the user already enrolled (e.g. they navigated here directly),
       // bounce them back to the home page rather than re-enrolling and
       // wiping their existing key state.

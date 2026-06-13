@@ -35,7 +35,14 @@ const ONBOARDING_PATH = "/onboarding/encryption";
 function isPublicPath(pathname: string): boolean {
   // /login is a separate auth flow with its own redirect logic.
   // /onboarding/... is where unenrolled users go — gating it would loop.
-  return pathname === "/login" || pathname.startsWith("/onboarding/");
+  // /s/... is the public share-link page: anonymous visitors are
+  // "uninitialized" by definition and must never be bounced into
+  // encryption onboarding from there.
+  return (
+    pathname === "/login" ||
+    pathname.startsWith("/onboarding/") ||
+    pathname.startsWith("/s/")
+  );
 }
 
 export function EnrollmentGate({ children }: { children: React.ReactNode }) {

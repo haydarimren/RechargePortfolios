@@ -24,6 +24,7 @@ import {
   buildComparisonSeries,
   buildTradeLog,
   fmtShares,
+  normalizeSeries,
   poolPositions,
   reconcileToPositionUnits,
   SeriesPoint,
@@ -63,6 +64,14 @@ import {
   touchLogbookView,
   touchPortfolioView,
 } from "@/lib/views";
+import { useShareLinkPublisher } from "@/lib/use-share-link-publisher";
+import {
+  clearPendingLinkToken,
+  getPendingLinkToken,
+  readSnapshotByToken,
+} from "@/lib/share-links";
+import type { SnapshotV1 } from "@/lib/share-links-math";
+import { SnapshotPortfolioView } from "@/components/SnapshotPortfolioView";
 import { ArrowLeft, ArrowUpRight, ChevronRight, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import {
   AreaChart,
@@ -141,6 +150,17 @@ export default function PortfolioPage({
     () => getCachedPortfolioKey(id),
   );
   const [migrationError, setMigrationError] = useState("");
+  // Snapshot-tier fallback for a follower awaiting their key wrap (set
+  // from the key-resolution catch below; cleared once the key lands).
+  const [pendingSnapshot, setPendingSnapshot] = useState<SnapshotV1 | null>(
+    null,
+  );
+  useEffect(() => {
+    if (portfolioKey) {
+      clearPendingLinkToken(id);
+      setPendingSnapshot(null);
+    }
+  }, [portfolioKey, id]);
 
   // Whether `secrets/credentials` exists for this portfolio. We only need
   // the boolean — the broker identity comes from `lockedBroker` (derived
@@ -268,11 +288,34 @@ export default function PortfolioPage({
           }
         } catch (err) {
           if (!cancelled) {
-            setMigrationError(
-              isPortfolioOwner
-                ? "Couldn't unlock your portfolio key — try refreshing."
-                : "This portfolio is encrypted but the owner hasn't shared the key with you yet.",
-            );
+            if (isPortfolioOwner) {
+              setMigrationError(
+                "Couldn't unlock your portfolio key — try refreshing.",
+              );
+            } else {
+              // New follower whose key the owner hasn't wrapped yet:
+              // fall back to the snapshot tier via the pending token
+              // saved at redeem time. No token (or revoked link) →
+              // keep the legacy message.
+              const tok = getPendingLinkToken(id);
+              let snapped = false;
+              if (tok) {
+                try {
+                  const snap = await readSnapshotByToken(id, tok);
+                  if (!cancelled) {
+                    setPendingSnapshot(snap);
+                    snapped = true;
+                  }
+                } catch {
+                  // fall through to the message below
+                }
+              }
+              if (!snapped && !cancelled) {
+                setMigrationError(
+                  "This portfolio is encrypted but the owner hasn't shared the key with you yet.",
+                );
+              }
+            }
           }
           console.warn("loadPortfolioKeyWithRetry failed", err);
         }
@@ -481,6 +524,15 @@ export default function PortfolioPage({
   // the full pipeline (real-world: user clicked 5x, got 5 duplicate
   // SnapTrade lots). This ref blocks re-entry synchronously.
   const syncInFlightRef = useRef(false);
+  // Keep the share-link snapshot in lock-step with holdings. No link →
+  // cheap no-op (one list read per debounce window).
+  useShareLinkPublisher({
+    portfolioId: id,
+    enabled: isOwner,
+    ownerUid: user?.uid ?? null,
+    portfolioName: portfolio?.name ?? "",
+    holdings,
+  });
   // Publish ownership to the AppShell so the right tab (Mine vs Friends)
   // highlights while we're on this route. Pass `null` until the portfolio
   // doc has loaded so we don't wrongly flash the owner state.
@@ -583,35 +635,9 @@ export default function PortfolioPage({
   }, [series]);
 
   // Normalized series for the non-owner view — % return from each series'
-  // own first-valid day. Each line (portfolio, SPY, QQQ) finds its own base
-  // independently, so a temporary zero on day 0 for one benchmark doesn't
-  // hide its line for the entire chart.
-  const normalizedSeries = useMemo(() => {
-    if (series.length === 0) return [];
-    const baseIdx = series.findIndex((p) => p.portfolio > 0);
-    if (baseIdx === -1) return [];
-    const baseP = series[baseIdx].portfolio;
-    const findBase = (key: "SPY" | "QQQ"): number | null => {
-      for (let i = baseIdx; i < series.length; i++) {
-        const v = series[i][key];
-        if (typeof v === "number" && v > 0) return v;
-      }
-      return null;
-    };
-    const baseSPY = findBase("SPY");
-    const baseQQQ = findBase("QQQ");
-    return series.slice(baseIdx).map((p) => {
-      const spy = typeof p.SPY === "number" && p.SPY > 0 ? p.SPY : null;
-      const qqq = typeof p.QQQ === "number" && p.QQQ > 0 ? p.QQQ : null;
-      const point: SeriesPoint = {
-        date: p.date,
-        portfolio: (p.portfolio / baseP - 1) * 100,
-      };
-      if (baseSPY && spy !== null) point.SPY = (spy / baseSPY - 1) * 100;
-      if (baseQQQ && qqq !== null) point.QQQ = (qqq / baseQQQ - 1) * 100;
-      return point;
-    });
-  }, [series]);
+  // own first-valid day. Shared with the share-link snapshot builder so
+  // the public page inherits identical chart math.
+  const normalizedSeries = useMemo(() => normalizeSeries(series), [series]);
 
   // Non-owner per-position stats: allocation % + gain %.
   const nonOwnerRows = useMemo(() => {
@@ -1287,6 +1313,29 @@ export default function PortfolioPage({
         >
           <ArrowLeft className="w-4 h-4" aria-hidden /> Back
         </Link>
+      </div>
+    );
+  }
+
+  // Snapshot-tier fallback: a follower whose wrappedKey hasn't been
+  // written yet (owner hasn't been online since they followed) sees the
+  // same percent-only view the share link gave them, plus a pending
+  // note — instead of an error.
+  if (!isOwner && pendingSnapshot && !portfolioKey) {
+    return (
+      <div className="min-h-screen">
+        <main className="max-w-4xl mx-auto px-6 lg:px-10 py-10">
+          <SnapshotPortfolioView
+            snapshot={pendingSnapshot}
+            banner={
+              <div className="border border-line bg-bg-3 text-fg-dim text-xs rounded-md p-3">
+                Following — you&apos;ll get the full view (trade history,
+                live holdings) automatically the next time the owner opens
+                the app.
+              </div>
+            }
+          />
+        </main>
       </div>
     );
   }
@@ -2148,6 +2197,8 @@ export default function PortfolioPage({
             <SharePanel
               portfolioId={id}
               ownerUid={portfolio.ownerId}
+              portfolioName={portfolio.name}
+              holdings={holdings}
               sharedWith={portfolio.sharedWith}
               onClose={() => setShowShare(false)}
               encryption={
@@ -2163,6 +2214,7 @@ export default function PortfolioPage({
                     }
                   : undefined
               }
+              onKeyRotated={(k) => setPortfolioKey(k)}
             />
           </div>
         </div>
