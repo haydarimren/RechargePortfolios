@@ -5,6 +5,7 @@ import {
   mapSnaptradePosition,
   fetchSnapTradeOrders,
   listSnapTradeAccounts,
+  parseSnaptradeAccountIds,
   type SnaptradeActivity,
   type SnaptradeOrder,
   type SnaptradePosition,
@@ -562,5 +563,155 @@ describe("listSnapTradeAccounts", () => {
     );
     vi.stubGlobal("fetch", fetchSpy);
     await expect(listSnapTradeAccounts(validCred)).rejects.toThrow(/403/);
+  });
+});
+
+describe("fetchSnapTradeOrders multi-account", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const multiCred = JSON.stringify({
+    clientId: "C",
+    consumerKey: "K",
+    snaptradeUserId: "u",
+    snaptradeUserSecret: "s",
+    snaptradeAccountIds: ["ACC-ONE-SECRET", "ACC-TWO-SECRET"],
+  });
+
+  /** Route the proxy fetch by which account's holdings path is requested. */
+  function stubPerAccount(
+    bodies: Record<string, unknown>,
+    failFor?: { accountId: string; status: number },
+  ) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const req = JSON.parse((init?.body as string) ?? "{}");
+        const path: string = req.path ?? "";
+        if (failFor && path.includes(`/accounts/${encodeURIComponent(failFor.accountId)}/holdings`)) {
+          return new Response("boom", { status: failFor.status });
+        }
+        const accountId = Object.keys(bodies).find((id) =>
+          path.includes(`/accounts/${encodeURIComponent(id)}/holdings`),
+        );
+        if (!accountId) return new Response("not found", { status: 404 });
+        return new Response(JSON.stringify(bodies[accountId]), { status: 200 });
+      }),
+    );
+  }
+
+  it("fetches every account and tags each order leg with its source account", async () => {
+    stubPerAccount({
+      "ACC-ONE-SECRET": {
+        orders: [order({ brokerage_order_id: "o1", universal_symbol: { symbol: "AAPL" } })],
+        positions: [],
+      },
+      "ACC-TWO-SECRET": {
+        orders: [order({ brokerage_order_id: "o2", universal_symbol: { symbol: "MSFT" } })],
+        positions: [],
+      },
+    });
+    const res = await fetchSnapTradeOrders(multiCred);
+    expect(res.orders).toHaveLength(2);
+    expect(res.orders.find((o) => o.id === "o1")?.snaptradeAccountId).toBe("ACC-ONE-SECRET");
+    expect(res.orders.find((o) => o.id === "o2")?.snaptradeAccountId).toBe("ACC-TWO-SECRET");
+  });
+
+  it("merges same-symbol positions across accounts: summed units, unit-weighted price", async () => {
+    stubPerAccount({
+      "ACC-ONE-SECRET": {
+        orders: [],
+        positions: [{ units: 40, average_purchase_price: 50, symbol: { symbol: { symbol: "REC" } } }],
+      },
+      "ACC-TWO-SECRET": {
+        orders: [],
+        positions: [
+          { units: 10, average_purchase_price: 100, symbol: { symbol: { symbol: "REC" } } },
+          { units: 3, average_purchase_price: 12, symbol: { symbol: { symbol: "ONLY2" } } },
+        ],
+      },
+    });
+    const res = await fetchSnapTradeOrders(multiCred);
+    const rec = (res.positions ?? []).find((p) => p.symbol === "REC");
+    expect(rec?.units).toBe(50);
+    expect(rec?.price).toBeCloseTo((40 * 50 + 10 * 100) / 50, 6); // 60
+    expect((res.positions ?? []).find((p) => p.symbol === "ONLY2")?.units).toBe(3);
+  });
+
+  it("is all-or-nothing: any account failing aborts the whole sync", async () => {
+    stubPerAccount(
+      {
+        "ACC-ONE-SECRET": { orders: [order()], positions: [] },
+        "ACC-TWO-SECRET": { orders: [], positions: [] },
+      },
+      { accountId: "ACC-TWO-SECRET", status: 500 },
+    );
+    await expect(fetchSnapTradeOrders(multiCred)).rejects.toThrow(/account 2 of 2/);
+  });
+
+  it("lifts a legacy single-account credential to a one-element set", async () => {
+    const legacy = JSON.stringify({
+      clientId: "C",
+      consumerKey: "K",
+      snaptradeUserId: "u",
+      snaptradeUserSecret: "s",
+      snaptradeAccountId: "ACC-ONE-SECRET",
+    });
+    stubPerAccount({ "ACC-ONE-SECRET": { orders: [order()], positions: [] } });
+    const res = await fetchSnapTradeOrders(legacy);
+    expect(res.orders).toHaveLength(1);
+    expect(res.orders[0].snaptradeAccountId).toBe("ACC-ONE-SECRET");
+  });
+
+  it("parseSnaptradeAccountIds: plural, legacy lift, garbage → []", () => {
+    expect(
+      parseSnaptradeAccountIds(JSON.stringify({ snaptradeAccountIds: ["a", "b"] })),
+    ).toEqual(["a", "b"]);
+    expect(
+      parseSnaptradeAccountIds(JSON.stringify({ snaptradeAccountId: "solo" })),
+    ).toEqual(["solo"]);
+    expect(parseSnaptradeAccountIds("not-json")).toEqual([]);
+    expect(parseSnaptradeAccountIds(JSON.stringify({}))).toEqual([]);
+    expect(
+      parseSnaptradeAccountIds(JSON.stringify({ snaptradeAccountIds: ["", 3, "x"] })),
+    ).toEqual(["x"]);
+  });
+
+  it("rejects a credential with an empty account set", async () => {
+    const empty = JSON.stringify({
+      clientId: "C",
+      consumerKey: "K",
+      snaptradeUserId: "u",
+      snaptradeUserSecret: "s",
+      snaptradeAccountIds: [],
+    });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    await expect(fetchSnapTradeOrders(empty)).rejects.toThrow(/account/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("diagnostics: opaque ACC tokens, no raw account ids, schemaVersion 2", async () => {
+    stubPerAccount({
+      "ACC-ONE-SECRET": {
+        orders: [order({ universal_symbol: { symbol: "ZZSECRETSYMZZ" } })],
+        positions: [],
+      },
+      "ACC-TWO-SECRET": {
+        orders: [],
+        positions: [{ units: 5, average_purchase_price: 10, symbol: { symbol: { symbol: "ZZSECRETSYMZZ" } } }],
+      },
+    });
+    const res = await fetchSnapTradeOrders(multiCred);
+    const d = res.diagnostics;
+    expect(d?.schemaVersion).toBe(2);
+    expect(d?.orders[0].accountToken).toBe("ACC_1");
+    expect(d?.positions[0].accountToken).toBe("ACC_2");
+    const blob = JSON.stringify(d);
+    expect(blob).not.toContain("ACC-ONE-SECRET");
+    expect(blob).not.toContain("ACC-TWO-SECRET");
+    expect(blob).not.toContain("ZZSECRETSYM");
   });
 });

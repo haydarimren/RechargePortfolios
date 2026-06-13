@@ -21,6 +21,12 @@ export interface ImportedOrder {
   isin?: string;
   yahooSymbol?: string;
   side: "BUY" | "SELL";
+  /**
+   * SnapTrade-only: which connected brokerage account this leg came
+   * from. Multi-account portfolios persist it per holding so the lock
+   * set and account-removal cleanup can be derived from holdings.
+   */
+  snaptradeAccountId?: string;
 }
 
 /**
@@ -68,6 +74,9 @@ export interface SnapTradeOrderDiag {
   rawKeys: string[];
   /** Stable opaque token (`SYM_1`, …) — never the real ticker. */
   symbolToken: string | null;
+  /** Opaque per-sync account token (`ACC_1`, …) — never the real id.
+   *  Absent on v1 traces (single-account era). */
+  accountToken?: string | null;
   decision: DiagDecision;
   skipReason: SkipReason | null;
 }
@@ -75,6 +84,9 @@ export interface SnapTradeOrderDiag {
 /** Per-position diagnostic. Same redaction guarantees as orders. */
 export interface SnapTradePositionDiag {
   symbolToken: string | null;
+  /** Opaque per-sync account token (`ACC_1`, …) — never the real id.
+   *  Absent on v1 traces (single-account era). */
+  accountToken?: string | null;
   hasUnits: boolean;
   hasPrice: boolean;
   decision: DiagDecision;
@@ -89,7 +101,8 @@ export interface SnapTradePositionDiag {
  * account ids, or order ids.
  */
 export interface SnapTradeDiagnostics {
-  schemaVersion: 1;
+  /** 1 = single-account era (no accountToken fields); 2 = multi-account. */
+  schemaVersion: 1 | 2;
   httpOk: boolean;
   rawOrderCount: number;
   rawPositionCount: number;
