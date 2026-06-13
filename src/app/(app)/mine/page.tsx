@@ -31,6 +31,7 @@ import { seedPortfolioView } from "@/lib/views";
 import { PortfolioCard, PortfolioCardSummary } from "@/components/PortfolioCard";
 import { EmptyCardSlot } from "@/components/EmptyCardSlot";
 import { SharePanel } from "@/components/SharePanel";
+import { PortfolioActionsMenu } from "@/components/PortfolioActionsMenu";
 import { useDisplayName, useDisplayNamesForUids } from "@/lib/users";
 import {
   buildSnapshotForPortfolio,
@@ -468,7 +469,7 @@ export default function MinePage() {
           {summaries.map((s) => {
             const p = mine.find((m) => m.id === s.id)!;
             return (
-              <div key={s.id} className="relative group">
+              <div key={s.id} className="relative">
                 <PortfolioCard
                   summary={enrichWithNames(s, displayNames)}
                   href={`/p/${s.id}`}
@@ -478,40 +479,16 @@ export default function MinePage() {
                     !keyResolutionAttempted.has(p.id)
                   }
                 />
-                {/* action buttons — visible on hover, positioned inside the card area */}
-                <div className="absolute bottom-4 right-4 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
-                  <button
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setRenameTarget(p);
-                      setRenameValue(p.name);
-                    }}
-                    className="px-2.5 py-1 rounded-md text-xs font-medium bg-bg-3 border border-line text-fg-dim hover:text-accent hover:border-accent transition"
-                    title="Rename"
-                  >
-                    Rename
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setShareTarget(p);
-                    }}
-                    className="px-2.5 py-1 rounded-md text-xs font-medium bg-bg-3 border border-line text-fg-dim hover:text-accent hover:border-accent transition"
-                    title="Share"
-                  >
-                    Share
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.preventDefault();
-                      void handleDelete(p);
-                    }}
-                    className="px-2.5 py-1 rounded-md text-xs font-medium bg-bg-3 border border-line text-fg-dim hover:text-neg hover:border-neg transition"
-                    title="Delete"
-                  >
-                    Delete
-                  </button>
-                </div>
+                {/* Always-visible kebab menu — identical on touch + desktop.
+                    (The old hover-reveal buttons were unreachable on mobile.) */}
+                <PortfolioActionsMenu
+                  onRename={() => {
+                    setRenameTarget(p);
+                    setRenameValue(p.name);
+                  }}
+                  onShare={() => setShareTarget(p)}
+                  onDelete={() => void handleDelete(p)}
+                />
               </div>
             );
           })}
