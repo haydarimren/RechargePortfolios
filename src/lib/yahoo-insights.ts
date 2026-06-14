@@ -37,9 +37,20 @@ async function getSession(): Promise<Session | null> {
       headers: { "User-Agent": "Mozilla/5.0" },
       next: { revalidate: DAY },
     });
-    const setCookie = seed.headers.get("set-cookie");
-    if (!setCookie) return null;
-    const cookie = setCookie.split(";")[0]; // first name=value pair
+    // Forward ALL of Yahoo's seed cookies (it sets A1 + A3; the crumb
+    // endpoint can need both). `getSetCookie()` returns them un-collapsed;
+    // `get("set-cookie")` comma-joins them, so prefer the former and fall
+    // back. Keep just the `name=value` head of each.
+    const headers = seed.headers as Headers & { getSetCookie?(): string[] };
+    const raw = headers.getSetCookie?.() ?? (() => {
+      const joined = seed.headers.get("set-cookie");
+      return joined ? [joined] : [];
+    })();
+    const cookie = raw
+      .map((c) => c.split(";")[0].trim())
+      .filter(Boolean)
+      .join("; ");
+    if (!cookie) return null;
     const res = await fetch("https://query1.finance.yahoo.com/v1/test/getcrumb", {
       headers: { "User-Agent": "Mozilla/5.0", Cookie: cookie },
       next: { revalidate: DAY },
