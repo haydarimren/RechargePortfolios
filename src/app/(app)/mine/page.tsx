@@ -263,25 +263,27 @@ export default function MinePage() {
     [yahooBySymbol],
   );
 
+  // Fetch quotes PER PORTFOLIO and update state as each batch resolves, so
+  // every card lights up as soon as ITS holdings are priced — instead of
+  // waiting for one global batch over every symbol, which froze the whole
+  // grid until the slowest symbol landed (~30s on large accounts; Yahoo
+  // caps us at ~5 concurrent fetches). Each portfolio fetches only when its
+  // symbol set first appears or changes (the `sig` guard); Yahoo's 30s
+  // server cache makes a symbol shared across portfolios essentially free.
+  // Results merge additively, so a late-arriving batch is harmless and no
+  // per-run cancellation is needed.
+  const fetchedSymsRef = useRef<Record<string, string>>({});
   useEffect(() => {
-    const symbols = Array.from(
-      new Set(
-        Object.values(holdingsByPortfolio)
-          .flat()
-          .map((h) => h.symbol),
-      ),
-    );
-    const missing = symbols.filter((s) => !(s in quotes));
-    if (missing.length === 0) return;
-    let cancelled = false;
-    fetchQuotesFor(missing).then((map) => {
-      if (cancelled) return;
-      setQuotes((prev) => ({ ...prev, ...map }));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [holdingsByPortfolio, quotes, fetchQuotesFor]);
+    for (const [pid, holdings] of Object.entries(holdingsByPortfolio)) {
+      const symbols = Array.from(new Set(holdings.map((h) => h.symbol))).sort();
+      const sig = symbols.join(",");
+      if (!sig || fetchedSymsRef.current[pid] === sig) continue;
+      fetchedSymsRef.current[pid] = sig;
+      fetchQuotesFor(symbols).then((map) => {
+        setQuotes((prev) => ({ ...prev, ...map }));
+      });
+    }
+  }, [holdingsByPortfolio, fetchQuotesFor]);
 
   // Retry failed (null) quotes once after 30s to avoid a tight retry loop.
   const quotesRef = useRef(quotes);
