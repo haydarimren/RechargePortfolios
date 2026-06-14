@@ -36,6 +36,7 @@ import {
   deleteField,
   doc,
   getDoc,
+  getDocFromCache,
   getDocs,
   onSnapshot,
   setDoc,
@@ -132,7 +133,17 @@ export async function loadPortfolioKey(
   userPrivateKey: CryptoKey,
 ): Promise<CryptoKey> {
   const ref = doc(db, "portfolios", portfolioId, "wrappedKeys", uid);
-  const snap = await getDoc(ref);
+  // Cache-first. With the persistent IndexedDB cache, a reopened tab finds
+  // the wrapped key locally and resolves it instantly — instead of blocking
+  // on the cold-open Firestore WebChannel handshake (~30s on some networks)
+  // before the holdings can decrypt. `getDoc` (server-preferred) doesn't
+  // serve from cache while "online but the channel is still coming up", so
+  // we ask the cache explicitly first and only hit the server when it's a
+  // miss (first-ever load, or a freshly shared portfolio not yet cached).
+  let snap = await getDocFromCache(ref).catch(() => null);
+  if (!snap || !snap.exists()) {
+    snap = await getDoc(ref);
+  }
   if (!snap.exists()) {
     throw new Error("no wrapped key for this user on this portfolio");
   }

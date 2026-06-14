@@ -1,6 +1,11 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore, initializeFirestore } from "firebase/firestore";
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+} from "firebase/firestore";
 import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
 
 const firebaseConfig = {
@@ -41,6 +46,17 @@ if (
 ) {
   try {
     initializeFirestore(app, {
+      // Persist Firestore's cache to IndexedDB so a REOPENED tab serves data
+      // from local disk instantly, instead of re-running the cold-open
+      // WebChannel handshake (which stalls ~30s on some networks/browsers)
+      // before the first read lands. The cache holds the same CIPHERTEXT the
+      // server does — holdings stay encrypted on disk, decryptable only with
+      // the in-memory keys — so this adds no plaintext-holdings exposure;
+      // only already-public portfolio names land in IndexedDB. Multi-tab
+      // manager so several open tabs share one cache without conflicting.
+      localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager(),
+      }),
       experimentalAutoDetectLongPolling: true,
       experimentalLongPollingOptions: { timeoutSeconds: 5 },
     });
