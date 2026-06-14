@@ -18,6 +18,7 @@ import { UnlockModal } from "@/components/UnlockModal";
 import { AppShell } from "@/components/AppShell";
 import { Portfolio } from "@/lib/types";
 import { runEagerMigrations } from "@/lib/holdings-repo";
+import { syncAllOwned } from "@/lib/brokers/auto-sync";
 import { PortfolioRouteProvider } from "@/lib/portfolio-route";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -26,6 +27,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [authResolved, setAuthResolved] = useState(false);
   const migrationsRanRef = useRef(false);
+  const autoSyncRanRef = useRef(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -60,6 +62,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       const unlocked = getUnlocked(user.uid);
       if (!unlocked) return;
       migrationsRanRef.current = true;
+      const ownedIds = owned.map((p) => ({ id: p.id }));
       void runEagerMigrations(
         user.uid,
         owned.map((p) => ({ id: p.id, encrypted: p.encrypted })),
@@ -67,9 +70,19 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         unlocked.publicKey,
         unlocked.publicKeyHex,
         unlocked.masterSecret,
-      ).catch(() => {
-        migrationsRanRef.current = false;
-      });
+      )
+        .then(() => {
+          // App-open auto-sync: once migrations have settled, sync every
+          // owned broker-linked portfolio. The coordinator filters to
+          // broker-linked ones and throttles to 15 min, so this is a no-op
+          // for recently-synced portfolios. Fire-and-forget (no React state).
+          if (autoSyncRanRef.current) return;
+          autoSyncRanRef.current = true;
+          void syncAllOwned(ownedIds, { uid: user.uid, unlocked });
+        })
+        .catch(() => {
+          migrationsRanRef.current = false;
+        });
     });
     return () => unsub();
   }, [user, encryption.state.kind]);
