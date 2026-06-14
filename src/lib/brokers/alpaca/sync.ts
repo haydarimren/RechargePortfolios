@@ -110,6 +110,30 @@ export function mapAlpacaOrder(raw: AlpacaOrder): MapAlpacaOrderResult {
   };
 }
 
+/**
+ * A page is "fully imported" iff it has ≥1 importable order (kind ===
+ * "keep") and every importable order is known. Non-importable orders
+ * (skips, partial-fill-cancelled) no longer block the stop.
+ */
+export function alpacaPageFullyImported(
+  items: AlpacaOrder[],
+  isOrderKnown?: IsOrderKnownFn,
+): boolean {
+  if (!isOrderKnown) return false;
+  const importable = items.filter((it) => mapAlpacaOrder(it).kind === "keep");
+  if (importable.length === 0) return false;
+  return importable.every((it) =>
+    isOrderKnown({
+      orderId: it.id,
+      rawTicker: it.symbol,
+      purchaseDate: it.filled_at!.split("T")[0],
+      // Number (not parseFloat) per this module's convention — "10abc" →
+      // NaN rather than a silently-truncated 10. See mapAlpacaOrder.
+      shares: Number(it.filled_qty),
+    }),
+  );
+}
+
 async function fetchPage(
   credential: string,
   until?: string,
@@ -156,17 +180,7 @@ export async function fetchAlpacaOrders(
 
     for (const item of items) collected.push(item);
 
-    const pageFullyExisting =
-      !!isOrderKnown
-      && items.every((item) => {
-        if (!item.filled_at) return false;
-        return isOrderKnown({
-          orderId: item.id,
-          rawTicker: item.symbol,
-          purchaseDate: item.filled_at.split("T")[0],
-          shares: parseFloat(item.filled_qty),
-        });
-      });
+    const pageFullyExisting = alpacaPageFullyImported(items, isOrderKnown);
     if (pageFullyExisting || items.length < PAGE_LIMIT) break;
 
     // Cursor for next page: oldest order's submitted_at on this page.

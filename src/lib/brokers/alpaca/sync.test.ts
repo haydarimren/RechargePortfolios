@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { fetchAlpacaOrders, mapAlpacaOrder } from "./sync";
+import { alpacaPageFullyImported, fetchAlpacaOrders, mapAlpacaOrder } from "./sync";
 
 // Hoisted mock — vi.mock must be top-level so it runs before any imports.
 // `proxy-fetch` calls `auth.currentUser?.getIdToken()`; in tests we never
@@ -155,5 +155,35 @@ describe("fetchAlpacaOrders", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     await expect(fetchAlpacaOrders("PKABC:SECRET")).rejects.toThrow(/403/);
+  });
+});
+
+describe("alpacaPageFullyImported", () => {
+  const knownAll = () => true;
+  const knownNone = () => false;
+  it("returns false without a predicate", () => {
+    expect(alpacaPageFullyImported([rawOrder()] as never, undefined)).toBe(false);
+  });
+  it("STOPS on [cancelled, known-filled] — the bug fix", () => {
+    const page = [
+      rawOrder({ id: "a", status: "canceled", filled_qty: "0", filled_at: null }),
+      rawOrder({ id: "b", status: "filled" }),
+    ];
+    expect(alpacaPageFullyImported(page as never, knownAll)).toBe(true);
+  });
+  it("STOPS despite a partial-fill-cancelled order (filled_at present but not importable)", () => {
+    const page = [
+      rawOrder({ id: "a", status: "canceled", filled_qty: "3" }),
+      rawOrder({ id: "b", status: "filled" }),
+    ];
+    expect(alpacaPageFullyImported(page as never, knownAll)).toBe(true);
+  });
+  it("keeps paginating when an importable order is new", () => {
+    const page = [rawOrder({ id: "b", status: "filled" })];
+    expect(alpacaPageFullyImported(page as never, knownNone)).toBe(false);
+  });
+  it("does NOT stop on an all-non-importable page", () => {
+    const page = [rawOrder({ id: "a", status: "canceled", filled_qty: "0", filled_at: null })];
+    expect(alpacaPageFullyImported(page as never, knownAll)).toBe(false);
   });
 });
