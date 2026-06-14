@@ -41,6 +41,7 @@ import { FriendStack } from "@/components/FriendStack";
 import { PerformancePill } from "@/components/PerformancePill";
 import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { TabBar } from "@/components/TabBar";
+import { InsightsTab } from "@/components/InsightsTab";
 import { SyncHistory } from "@/components/SyncHistory";
 import { parseSnaptradeAccountIds } from "@/lib/brokers/snaptrade/sync";
 import { BROKERS, SUPPORTED_BROKERS } from "@/lib/brokers/registry";
@@ -605,8 +606,8 @@ export default function PortfolioPage({
     touchPortfolioView(user.uid, id);
   }, [user, isOwner, portfolio, id]);
 
-  const [tab, setTabState] = useState<"positions" | "logbook" | "allocation">("positions");
-  const setTab = (next: "positions" | "logbook" | "allocation") => {
+  const [tab, setTabState] = useState<"positions" | "logbook" | "allocation" | "insights">("positions");
+  const setTab = (next: "positions" | "logbook" | "allocation" | "insights") => {
     setTabState(next);
     if (next === "logbook" && user && !isOwner) {
       touchLogbookView(user.uid, id);
@@ -1276,13 +1277,16 @@ export default function PortfolioPage({
               { id: "positions", label: "Positions", count: positionsCount },
               { id: "logbook", label: "Logbook", count: logbookCount },
               { id: "allocation", label: "Allocation" },
+              { id: "insights", label: "Insights" },
             ]}
             active={tab}
-            onSelect={(id) => setTab(id as "positions" | "logbook" | "allocation")}
+            onSelect={(id) => setTab(id as "positions" | "logbook" | "allocation" | "insights")}
             className="mb-4"
           />
 
-          {tab === "allocation" ? (
+          {tab === "insights" ? (
+            <InsightsTab portfolioId={id} positions={positions} quotes={quotes} />
+          ) : tab === "allocation" ? (
             <div className="bg-bg-2 border border-line rounded-card p-4 md:p-5">
               <AllocationTreemap
                 positions={positions}
