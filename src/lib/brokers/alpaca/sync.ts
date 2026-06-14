@@ -163,6 +163,7 @@ export async function fetchAlpacaOrders(
   isOrderKnown?: IsOrderKnownFn,
 ): Promise<ImportResult> {
   validateCredential(credential);
+  const startedAt = Date.now();
 
   const collected: AlpacaOrder[] = [];
   let until: string | undefined;
@@ -207,5 +208,6 @@ export async function fetchAlpacaOrders(
     sellsSkipped: 0,
     sellsImported,
     partialFillsSkipped,
+    timing: { pages: pageCount, elapsedMs: Date.now() - startedAt },
   };
 }

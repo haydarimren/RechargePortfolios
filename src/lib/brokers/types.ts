@@ -144,6 +144,16 @@ export interface ReconcilePosition {
   yahooSymbol?: string;
 }
 
+/**
+ * Lightweight per-sync timing, recorded in the encrypted syncLog so the
+ * dedup-fix speedup is verifiable (pages should drop to ~1 on a no-op
+ * repeat sync). No symbols or amounts — safe to record.
+ */
+export interface SyncTiming {
+  pages: number;
+  elapsedMs: number;
+}
+
 export interface ImportResult {
   orders: ImportedOrder[];
   sellsSkipped: number;
@@ -168,6 +178,12 @@ export interface ImportResult {
    * like `partialFillsSkipped`; other adapters leave it undefined.
    */
   diagnostics?: SnapTradeDiagnostics;
+  /**
+   * Pages fetched + wall-clock elapsed for this sync run. Populated by
+   * T212 and Alpaca adapters so the dedup-fix speedup is verifiable in
+   * the encrypted syncLog. Safe to record: no symbols or amounts.
+   */
+  timing?: SyncTiming;
 }
 
 /**

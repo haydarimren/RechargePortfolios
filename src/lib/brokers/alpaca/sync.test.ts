@@ -125,6 +125,7 @@ describe("fetchAlpacaOrders", () => {
       sellsImported: 0,
       sellsSkipped: 0,
       partialFillsSkipped: 0,
+      timing: { pages: 1, elapsedMs: expect.any(Number) },
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });

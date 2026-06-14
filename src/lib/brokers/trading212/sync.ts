@@ -184,6 +184,7 @@ export async function fetchTrading212Orders(
   isOrderKnown?: IsOrderKnownFn,
 ): Promise<ImportResult> {
   validateApiKey(apiKey);
+  const startedAt = Date.now();
 
   const openTickers = await fetchOpenPositionTickers(apiKey);
   const isinToSymbol = await fetchIsinToSymbol(apiKey);
@@ -261,5 +262,11 @@ export async function fetchTrading212Orders(
     if (isSell) sellsImported++;
   }
 
-  return { orders: mapped, sellsSkipped: 0, sellsImported, partialFillsSkipped: 0 };
+  return {
+    orders: mapped,
+    sellsSkipped: 0,
+    sellsImported,
+    partialFillsSkipped: 0,
+    timing: { pages: pageCount, elapsedMs: Date.now() - startedAt },
+  };
 }

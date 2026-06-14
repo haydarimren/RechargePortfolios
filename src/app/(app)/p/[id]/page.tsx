@@ -44,7 +44,7 @@ import { cleanT212Symbol } from "@/lib/brokers/trading212/symbols";
 import { parseSnaptradeAccountIds } from "@/lib/brokers/snaptrade/sync";
 import { BROKERS, SUPPORTED_BROKERS } from "@/lib/brokers/registry";
 import type { BrokerId } from "@/lib/brokers/ids";
-import type { ImportResult, SnapTradeDiagnostics } from "@/lib/brokers/types";
+import type { ImportResult, SnapTradeDiagnostics, SyncTiming } from "@/lib/brokers/types";
 import {
   decryptBrokerCredential,
   encryptBrokerCredential,
@@ -861,6 +861,7 @@ export default function PortfolioPage({
     // can persist the redacted SnapTrade decision trace (encrypted
     // under the portfolio key). Null for non-SnapTrade brokers.
     let syncDiagnostics: SnapTradeDiagnostics | null = null;
+    let syncTiming: SyncTiming | null = null;
     // Belt-and-braces re-sync check: if we read a stored credential
     // (no keyOverride) and its account set doesn't cover the live lock
     // set derived from holdings, refuse rather than silently sync a
@@ -932,6 +933,7 @@ export default function PortfolioPage({
         isOrderKnown,
       });
       syncDiagnostics = result.diagnostics ?? null;
+      syncTiming = result.timing ?? null;
 
       // Use the already-decoded `holdings` state from the live
       // subscription. handleSync is recreated on every render, so the
@@ -1273,6 +1275,7 @@ export default function PortfolioPage({
           // Redacted SnapTrade decision trace (no symbols/amounts/ids).
           // Encrypted under K_portfolio along with the rest of the log.
           diagnostics: syncDiagnostics,
+          timing: syncTiming,
         };
         if (portfolioKey) {
           const ct = await encryptJson(payload, portfolioKey);
