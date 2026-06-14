@@ -5,13 +5,18 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged, User } from "firebase/auth";
 import {
+  collection,
   doc,
   onSnapshot,
+  orderBy,
+  limit,
+  query,
   writeBatch,
   setDoc,
   getDoc,
   deleteDoc,
 } from "firebase/firestore";
+import { requestSync, subscribeSyncState } from "@/lib/brokers/auto-sync";
 import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
 import { getQuotes, StockQuote } from "@/lib/finnhub";
@@ -90,6 +95,16 @@ const BENCHMARKS = ["SPY", "QQQ"] as const;
 // over `SUPPORTED_BROKERS` (alphabetical) and uses each adapter's
 // `displayName`, `credentialFields`, and `credentialHint` to render
 // itself.
+
+function relativeTime(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
 
 export default function PortfolioPage({
   params,
@@ -236,6 +251,31 @@ export default function PortfolioPage({
       () => setHasCredential(false),
     );
   }, [user, id]);
+
+  // On-view auto-sync: refresh this portfolio when opened, throttled.
+  useEffect(() => {
+    if (!user || !hasCredential) return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) return;
+    void requestSync(id, { uid: user.uid, unlocked });
+  }, [user, hasCredential, id]);
+
+  const [autoSyncing, setAutoSyncing] = useState(false);
+  useEffect(() => subscribeSyncState(id, setAutoSyncing), [id]);
+
+  const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(
+        collection(db, "portfolios", id, "syncLogs"),
+        orderBy("createdAt", "desc"),
+        limit(1),
+      ),
+      (snap) => setLastSyncAt(snap.docs[0]?.data()?.createdAt ?? null),
+      () => setLastSyncAt(null),
+    );
+    return unsub;
+  }, [id]);
 
   // Resolve K_portfolio when the portfolio is loaded + user is unlocked.
   // For owners viewing a not-yet-encrypted portfolio, also kick off the
@@ -1545,7 +1585,7 @@ export default function PortfolioPage({
                 <ul className="space-y-2">
                   {(() => {
                     const result = syncResults[lockedBroker];
-                    const isLoading = syncLoading === lockedBroker;
+                    const isLoading = syncLoading === lockedBroker || autoSyncing;
                     return (
                       <li key={lockedBroker} className="flex items-center gap-2 bg-bg-3 border border-line rounded-lg px-3 py-2.5">
                         <span className="text-sm font-medium flex-1">
@@ -1596,7 +1636,7 @@ export default function PortfolioPage({
                         )}
                         <button
                           onClick={() => handleSync(lockedBroker)}
-                          disabled={!!syncLoading}
+                          disabled={!!syncLoading || autoSyncing}
                           className="text-xs btn-ghost px-2.5 py-1 disabled:opacity-40"
                         >
                           {isLoading ? "Syncing…" : "Sync"}
@@ -1613,6 +1653,9 @@ export default function PortfolioPage({
                     );
                   })()}
                 </ul>
+                {lastSyncAt && (
+                  <p className="mt-2 text-fg-fade label">synced {relativeTime(lastSyncAt)}</p>
+                )}
               </div>
             )}
 
