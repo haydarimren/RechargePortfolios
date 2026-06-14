@@ -8,12 +8,15 @@ import {
   collection,
   doc,
   onSnapshot,
-  addDoc,
+  orderBy,
+  limit,
+  query,
   writeBatch,
   setDoc,
   getDoc,
   deleteDoc,
 } from "firebase/firestore";
+import { requestSync, subscribeSyncState } from "@/lib/brokers/auto-sync";
 import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
 import { getQuotes, StockQuote } from "@/lib/finnhub";
@@ -26,7 +29,6 @@ import {
   fmtShares,
   normalizeSeries,
   poolPositions,
-  reconcileToPositionUnits,
   SeriesPoint,
 } from "@/lib/portfolio";
 import { useChartColors } from "@/lib/theme";
@@ -40,11 +42,10 @@ import { PerformancePill } from "@/components/PerformancePill";
 import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { TabBar } from "@/components/TabBar";
 import { SyncHistory } from "@/components/SyncHistory";
-import { cleanT212Symbol } from "@/lib/brokers/trading212/symbols";
 import { parseSnaptradeAccountIds } from "@/lib/brokers/snaptrade/sync";
 import { BROKERS, SUPPORTED_BROKERS } from "@/lib/brokers/registry";
+import { runBrokerSync, type SyncReason } from "@/lib/brokers/run-sync";
 import type { BrokerId } from "@/lib/brokers/ids";
-import type { ImportResult, SnapTradeDiagnostics } from "@/lib/brokers/types";
 import {
   decryptBrokerCredential,
   encryptBrokerCredential,
@@ -62,9 +63,7 @@ import {
   migratePortfolioToEncrypted,
   reconcileSharedWrappedKeys,
   subscribeHoldings,
-  updateHoldingFields,
 } from "@/lib/holdings-repo";
-import { encryptHolding, encryptJson } from "@/lib/crypto-client";
 import {
   touchLogbookView,
   touchPortfolioView,
@@ -96,6 +95,16 @@ const BENCHMARKS = ["SPY", "QQQ"] as const;
 // over `SUPPORTED_BROKERS` (alphabetical) and uses each adapter's
 // `displayName`, `credentialFields`, and `credentialHint` to render
 // itself.
+
+function relativeTime(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
 
 export default function PortfolioPage({
   params,
@@ -242,6 +251,31 @@ export default function PortfolioPage({
       () => setHasCredential(false),
     );
   }, [user, id]);
+
+  // On-view auto-sync: refresh this portfolio when opened, throttled.
+  useEffect(() => {
+    if (!user || !hasCredential) return;
+    const unlocked = getUnlocked(user.uid);
+    if (!unlocked) return;
+    void requestSync(id, { uid: user.uid, unlocked });
+  }, [user, hasCredential, id]);
+
+  const [autoSyncing, setAutoSyncing] = useState(false);
+  useEffect(() => subscribeSyncState(id, setAutoSyncing), [id]);
+
+  const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(
+        collection(db, "portfolios", id, "syncLogs"),
+        orderBy("createdAt", "desc"),
+        limit(1),
+      ),
+      (snap) => setLastSyncAt(snap.docs[0]?.data()?.createdAt ?? null),
+      () => setLastSyncAt(null),
+    );
+    return unsub;
+  }, [id]);
 
   // Resolve K_portfolio when the portfolio is loaded + user is unlocked.
   // For owners viewing a not-yet-encrypted portfolio, also kick off the
@@ -733,559 +767,48 @@ export default function PortfolioPage({
 
   const runHandleSync = async (provider: BrokerId, keyOverride?: string) => {
     if (!portfolio || !user) return;
-    const adapter = BROKERS[provider];
-    if (!adapter) {
-      setSyncError(`Unsupported broker: ${provider}`);
-      return;
-    }
-    // Lock enforcement (UX rail; server can't see broker identity to
-    // enforce). Re-derive from the always-current `holdingsRef` so we
-    // catch any holdings added between this handler being created
-    // (during render) and being called (on click) — e.g. a concurrent
-    // sync in another tab. The render-closure `lockedBroker` is fine
-    // for the picker UI; the runtime check needs to be live.
-    const liveLocked = (() => {
-      for (const h of holdingsRef.current) {
-        if (h.importSource && h.importSource in BROKERS) {
-          return h.importSource as BrokerId;
-        }
-      }
-      return null;
-    })();
-    if (liveLocked && liveLocked !== provider) {
-      setSyncError(
-        `This portfolio is locked to ${BROKERS[liveLocked].displayName}.`,
-      );
-      return;
-    }
-    // SnapTrade gets a second-tier lock: the credential's account set C
-    // must be a SUPERSET of the live lock set L (every account that
-    // contributed lots must be synced — that's what keeps the
-    // fully-sold sweep safe). Re-derive L from the live ref so we
-    // catch any holdings added between this handler being created and
-    // being called. The picker UI in SnapTradeConnectFlow already
-    // enforces this for the happy path; this is defense-in-depth so
-    // any future caller (retry button, scripted invocation, refactor
-    // that bypasses the picker) can't slip past the lock.
-    const liveLockedSnaptradeSet = (() => {
-      if (provider !== "snaptrade") return [] as string[];
-      const set = new Set<string>();
-      for (const h of holdingsRef.current) {
-        if (
-          h.importSource === "snaptrade"
-          && typeof h.snaptradeAccountId === "string"
-          && h.snaptradeAccountId.length > 0
-        ) {
-          set.add(h.snaptradeAccountId);
-        }
-      }
-      return Array.from(set);
-    })();
-    if (provider === "snaptrade" && keyOverride && liveLockedSnaptradeSet.length > 0) {
-      const incoming = new Set(parseSnaptradeAccountIds(keyOverride));
-      const missing = liveLockedSnaptradeSet.filter((id) => !incoming.has(id));
-      if (missing.length > 0) {
-        setSyncError(
-          "This portfolio contains accounts missing from the selected set. Manage accounts to add or remove them.",
-        );
-        return;
-      }
-    }
-    // Single generic secrets doc per portfolio. The provider name (e.g.
-    // "trading212") is stamped inside the encrypted payload, never on
-    // the doc path.
-    const secretRef = doc(db, "portfolios", id, "secrets", "credentials");
-
-    // Under the E2E model, broker credentials are encrypted with the user's
-    // master secret on the client. The server can't read them at rest. To
-    // store/retrieve we need the user to be unlocked.
     const unlocked = getUnlocked(user.uid);
     if (!unlocked) {
       setSyncError("Unlock your portfolio first.");
       return;
     }
-
-    // Resolve a plaintext API key for this sync.
-    //   - Fresh paste (`keyOverride`): plaintext in hand, write ciphertext.
-    //   - Stored `secrets/credentials` doc: `{ payload, iv }` envelope —
-    //     decrypt under master secret. The eager migration on home-page
-    //     load already renamed any legacy `secrets/trading212` to this
-    //     path, so by the time sync runs we shouldn't see the old name.
-    let plaintextKey: string;
-    let needsWriteBack = false;
-    if (keyOverride) {
-      plaintextKey = keyOverride;
-      needsWriteBack = true;
-    } else {
-      const secretSnap = await getDoc(secretRef);
-      const data = secretSnap.exists() ? secretSnap.data() : null;
-      if (
-        data &&
-        typeof data.payload === "string" &&
-        typeof data.iv === "string"
-      ) {
-        try {
-          // decryptBrokerCredential returns `{brokerId, credential}`.
-          // For T212/Alpaca the credential is the bare `key:secret`
-          // string. For SnapTrade it's the JSON-encoded 5-field BYO
-          // blob. The adapter knows how to parse its own shape.
-          const decoded = await decryptBrokerCredential(
-            { payload: data.payload, iv: data.iv },
-            unlocked.masterSecret,
-          );
-          // Sanity: doc says it's broker X, picker says Y → refuse.
-          if (decoded.brokerId !== provider) {
-            setSyncError(
-              `Stored credentials are for ${decoded.brokerId}, not ${provider}.`,
-            );
-            return;
-          }
-          plaintextKey = decoded.credential;
-        } catch {
-          setSyncError("Stored credentials are corrupt — reconnect.");
-          return;
-        }
-      } else {
-        setSyncError("No credentials — reconnect.");
-        return;
-      }
-    }
-
-    // Note: setSyncLoading/setSyncError already fired in the
-    // `handleSync` wrapper before any await. Don't duplicate here.
-    const errors: string[] = [];
-    let buys = 0;
-    let sells = 0;
-    let skipped = 0;
-    // Captured from the adapter result so the `finally` syncLog write
-    // can persist the redacted SnapTrade decision trace (encrypted
-    // under the portfolio key). Null for non-SnapTrade brokers.
-    let syncDiagnostics: SnapTradeDiagnostics | null = null;
-    // Belt-and-braces re-sync check: if we read a stored credential
-    // (no keyOverride) and its account set doesn't cover the live lock
-    // set derived from holdings, refuse rather than silently sync a
-    // subset (which would let the fully-sold sweep zero positions held
-    // in the uncovered accounts). The per-holding account tag now comes
-    // from each ImportedOrder (the adapter stamps the source account
-    // per leg), not from a single credential-level id.
-    if (provider === "snaptrade" && !keyOverride && liveLockedSnaptradeSet.length > 0) {
-      const stored = new Set(parseSnaptradeAccountIds(plaintextKey));
-      const missing = liveLockedSnaptradeSet.filter((id) => !stored.has(id));
-      if (missing.length > 0) {
-        setSyncError(
-          "This portfolio contains accounts missing from the stored credential set. Manage accounts to add or remove them.",
-        );
-        return;
-      }
-    }
-    try {
-      if (needsWriteBack) {
-        // Client-side encrypt under master secret. The brokerId stamped
-        // INSIDE the encrypted payload tells future readers (us, on
-        // re-sync) which broker the credential is for; the doc top
-        // level stays generic so the server can't infer broker
-        // identity from at-rest data.
-        const env = await encryptBrokerCredential(
-          { brokerId: provider, credential: plaintextKey },
-          unlocked.masterSecret,
-        );
-        await setDoc(secretRef, {
-          payload: env.payload,
-          iv: env.iv,
-          updatedAt: Date.now(),
-        });
-      }
-      // The `isOrderKnown` predicate stops pagination as soon as a full
-      // page of orders is already imported — adapters return orders
-      // newest-first, so once we hit a fully-known page everything older
-      // is also already imported. Repeat syncs drop from N pages to 1-2.
-      //
-      // Match BOTH on `brokerOrderId` (preferred — exact identity) AND
-      // on shape (symbol + purchaseDate + shares) for legacy holdings
-      // that predate broker-id tracking. The shape match uses a per-
-      // broker symbol normalizer for `rawTicker` so that broker-specific
-      // suffixes (T212's `_EQ`, etc.) are stripped before comparing
-      // against the holding's normalized `symbol`.
-      const normalizeRawTicker = (raw: string) =>
-        provider === "trading212" ? cleanT212Symbol(raw) : raw;
-      const isOrderKnown = (args: {
-        orderId: string;
-        rawTicker: string;
-        purchaseDate: string;
-        shares: number;
-      }) => {
-        for (const h of holdings) {
-          if (h.brokerOrderId === args.orderId) return true;
-        }
-        const cleaned = normalizeRawTicker(args.rawTicker);
-        for (const h of holdings) {
-          if (h.brokerOrderId) continue; // covered by id check above
-          if (h.symbol !== cleaned) continue;
-          if (h.purchaseDate !== args.purchaseDate) continue;
-          if (Math.abs(h.shares - args.shares) > 0.0001) continue;
-          return true;
-        }
-        return false;
+    const outcome = await runBrokerSync({
+      portfolioId: id,
+      uid: user.uid,
+      unlocked,
+      brokerIdHint: provider,
+      credentialOverride: keyOverride,
+    });
+    if (!outcome.ran && outcome.reason !== "ok") {
+      const msgByReason: Partial<Record<SyncReason, string>> = {
+        "no-key": "Unlock your portfolio first.",
+        "no-credentials": "No credentials — reconnect.",
+        "corrupt-credentials": "Stored credentials are corrupt — reconnect.",
+        "broker-mismatch": "Stored credentials are for a different broker.",
+        "lock-mismatch": `This portfolio is locked to ${
+          lockedBroker ? BROKERS[lockedBroker]?.displayName ?? lockedBroker : provider
+        }.`,
+        "account-set-mismatch": "This portfolio contains accounts missing from the selected set. Manage accounts to add or remove them.",
       };
-      const result: ImportResult = await adapter.fetchOrders({
-        credential: plaintextKey,
-        isOrderKnown,
-      });
-      syncDiagnostics = result.diagnostics ?? null;
-
-      // Use the already-decoded `holdings` state from the live
-      // subscription. handleSync is recreated on every render, so the
-      // closure captures the latest holdings — no stale-snapshot race.
-      // Crucial that this is the DECODED shape: for v2 docs, the
-      // dedup-by-brokerOrderId check below would always fail against the
-      // raw `getDocs` shape (brokerOrderId lives inside the encrypted
-      // payload there, not at the doc top level). That bug caused
-      // every sync after the first to double-import every order.
-      const decodedCurrent = holdings;
-      // Decisions are sequential (encrypt-then-write) but we can still
-      // batch the Firestore round-trip for the new-doc writes. Backfill
-      // updates of encrypted docs need a read-decrypt-merge-encrypt-write
-      // cycle each, so they're not batchable — issue them serially.
-      const newDocsBuffer: Array<{
-        encryptedShape: Record<string, unknown>;
-        plaintextShape: Record<string, unknown>;
-      }> = [];
-
-      for (const order of result.orders) {
-        const existing = decodedCurrent.find(
-          (h) =>
-            h.importSource === provider &&
-            h.brokerOrderId === order.id
-        );
-        const byShape = existing
-          ? undefined
-          : decodedCurrent.find(
-              (h) =>
-                !h.brokerOrderId &&
-                h.symbol === order.symbol &&
-                h.purchaseDate === order.purchaseDate &&
-                Math.abs(h.shares - order.shares) < 0.0001
-            );
-        const target = existing ?? byShape;
-        if (target) {
-          // Backfill yahooSymbol/isin/symbol corrections — same logic as
-          // before, but routed through updateHoldingFields so encrypted
-          // docs go through decrypt-merge-encrypt rather than naively
-          // updating top-level fields that don't exist on ciphertext docs.
-          //
-          // Also backfill brokerOrderId on holdings that were matched by
-          // shape rather than by id — without this, the dedup-and-stop
-          // optimization stays expensive forever on these holdings
-          // (each shape lookup is O(holdings) instead of O(1)). After
-          // one sync post-this-fix, future syncs are fully on the
-          // cheap id path.
-          const patch: Record<string, string | undefined> = {};
-          if (order.yahooSymbol && target.yahooSymbol !== order.yahooSymbol) {
-            patch.yahooSymbol = order.yahooSymbol;
-          }
-          if (!target.isin && order.isin) patch.isin = order.isin;
-          if (order.symbol && target.symbol !== order.symbol) {
-            patch.symbol = order.symbol;
-          }
-          if (!target.brokerOrderId) patch.brokerOrderId = order.id;
-          if (Object.keys(patch).length > 0) {
-            await updateHoldingFields(id, target.id, portfolioKey, patch);
-          }
-          skipped++;
-          continue;
-        }
-        // New holding. Pre-encrypt now so the write batch can be a single
-        // round-trip at the end.
-        const plaintextShape: Record<string, unknown> = {
-          symbol: order.symbol,
-          shares: order.shares,
-          purchasePrice: order.purchasePrice,
-          purchaseDate: order.purchaseDate,
-          createdAt: Date.now(),
-          importSource: provider,
-          brokerOrderId: order.id,
-          side: order.side,
-        };
-        if (order.currency) plaintextShape.currency = order.currency;
-        if (order.isin) plaintextShape.isin = order.isin;
-        if (order.yahooSymbol) plaintextShape.yahooSymbol = order.yahooSymbol;
-        // SnapTrade holdings carry the account id of the leg's SOURCE
-        // account (adapter-stamped, per leg) so the lock set and
-        // account-removal cleanup can be derived from holdings.
-        if (order.snaptradeAccountId) {
-          plaintextShape.snaptradeAccountId = order.snaptradeAccountId;
-        }
-
-        if (portfolioKey) {
-          // v2 shape: importSource and brokerOrderId go INSIDE the
-          // encrypted payload along with every other field. The
-          // Firestore doc top level only carries the envelope plus
-          // createdAt and schemaVersion — nothing identifying the
-          // broker.
-          const ct = await encryptHolding(
-            {
-              symbol: order.symbol,
-              shares: order.shares,
-              purchasePrice: order.purchasePrice,
-              purchaseDate: order.purchaseDate,
-              side: order.side,
-              currency: order.currency,
-              isin: order.isin,
-              yahooSymbol: order.yahooSymbol,
-              importSource: provider,
-              brokerOrderId: order.id,
-              ...(order.snaptradeAccountId
-                ? { snaptradeAccountId: order.snaptradeAccountId }
-                : {}),
-            },
-            portfolioKey,
-          );
-          newDocsBuffer.push({
-            plaintextShape,
-            encryptedShape: {
-              payload: ct.payload,
-              iv: ct.iv,
-              createdAt: plaintextShape.createdAt,
-              schemaVersion: 2,
-            },
-          });
-        } else {
-          // Legacy path — plaintext doc.
-          newDocsBuffer.push({ plaintextShape, encryptedShape: plaintextShape });
-        }
-        if (order.side === "SELL") sells++;
-        else buys++;
-      }
-      const batch = writeBatch(db);
-      const holdingsCol = collection(db, "portfolios", id, "holdings");
-      for (const item of newDocsBuffer) {
-        batch.set(doc(holdingsCol), item.encryptedShape);
-      }
-      await batch.commit();
-
-      // --- Positions-authoritative reconciliation -------------------
-      // The broker's position snapshot is the truth for CURRENT shares
-      // (it already reflects every sale). SnapTrade's order window is
-      // partial/mis-dated, so the Section-104 pool over stored lots can
-      // disagree (a real sale dropped during import, mis-sided, or a
-      // sync-dated synthetic sorting after — and erasing — an earlier
-      // real sell). For each broker position, pool the actually-stored
-      // holdings (with the UI's own function) and write/maintain ONE
-      // canonical `pos-recon-` adjustment lot so the displayed net lands
-      // exactly on the broker's units. Best-effort: a hiccup here must
-      // not fail an otherwise-successful order import (onSnapshot
-      // reconciles; same optimistic contract as the rest of sync).
-      try {
-        const recPositions = result.positions ?? [];
-        if (recPositions.length > 0 && provider === "snaptrade") {
-          const today = new Date().toISOString().split("T")[0];
-          // Lots written THIS sync aren't in `decodedCurrent` yet (the
-          // snapshot is async) — project them in memory so the pool is
-          // accurate now.
-          const projectedNew: Holding[] = newDocsBuffer.map((b, i) => {
-            const p = b.plaintextShape;
-            return {
-              id: `__new_${i}`,
-              symbol: String(p.symbol),
-              shares: Number(p.shares),
-              purchasePrice: Number(p.purchasePrice),
-              purchaseDate: String(p.purchaseDate),
-              createdAt: Number(p.createdAt ?? 0),
-              side: p.side === "SELL" ? "SELL" : "BUY",
-            };
-          });
-          const positionSymbols = new Set(recPositions.map((p) => p.symbol));
-
-          // Legacy migration: per-account reconcilers
-          // (pos-recon-{accountId}-{symbol}) predate the merged scheme.
-          // Delete them outright (synthetic lots; deletion avoids
-          // permanent 0-share artifacts) and exclude them from the
-          // pooling below so fresh merged adjustments are computed
-          // against real lots only. Targets are now cross-account sums,
-          // so per-account reconcilers would fight each other when the
-          // same ticker is held in two accounts.
-          const isLegacyRecon = (h: Holding) =>
-            h.importSource === provider
-            && !!h.brokerOrderId
-            && h.brokerOrderId.startsWith("pos-recon-")
-            && !h.brokerOrderId.startsWith("pos-recon-merged-");
-          const legacyRecons = decodedCurrent.filter(isLegacyRecon);
-          for (const legacy of legacyRecons) {
-            await deleteDoc(
-              doc(db, "portfolios", id, "holdings", legacy.id),
-            ).catch(() => {});
-          }
-          const current = decodedCurrent.filter((h) => !isLegacyRecon(h));
-
-          for (const pos of recPositions) {
-            const reconId = `pos-recon-merged-${pos.symbol}`;
-            const existingRecon = current.find(
-              (h) =>
-                h.importSource === provider && h.brokerOrderId === reconId,
-            );
-            // Pool everything for this symbol EXCEPT a prior reconciler
-            // (recompute fresh) plus this sync's new legs.
-            const lots: Holding[] = [
-              ...current.filter(
-                (h) =>
-                  h.symbol === pos.symbol && h.id !== existingRecon?.id,
-              ),
-              ...projectedNew.filter((h) => h.symbol === pos.symbol),
-            ];
-            const adj = reconcileToPositionUnits(lots, pos.symbol, pos.units, {
-              price: pos.price,
-              date: today,
-              id: reconId,
-            });
-            if (adj && existingRecon) {
-              await updateHoldingFields(id, existingRecon.id, portfolioKey, {
-                shares: adj.shares,
-                purchasePrice: adj.purchasePrice,
-                side: adj.side,
-              });
-            } else if (adj && !existingRecon) {
-              const plain = {
-                symbol: adj.symbol,
-                shares: adj.shares,
-                purchasePrice: adj.purchasePrice,
-                purchaseDate: today,
-                side: adj.side,
-                importSource: provider,
-                brokerOrderId: reconId,
-                ...(pos.currency ? { currency: pos.currency } : {}),
-                ...(pos.yahooSymbol ? { yahooSymbol: pos.yahooSymbol } : {}),
-                // Deliberately NO snaptradeAccountId: the merged
-                // reconciler spans accounts, so the lock-set derivation
-                // and account-removal cleanup must ignore it.
-              };
-              if (portfolioKey) {
-                const ct = await encryptHolding(plain, portfolioKey);
-                await addDoc(holdingsCol, {
-                  payload: ct.payload,
-                  iv: ct.iv,
-                  createdAt: Date.now(),
-                  schemaVersion: 2,
-                });
-              } else {
-                await addDoc(holdingsCol, {
-                  ...plain,
-                  createdAt: Date.now(),
-                });
-              }
-            } else if (!adj && existingRecon && existingRecon.shares !== 0) {
-              // Lots now reconcile on their own — neutralize the stale
-              // reconciler (0 shares is inert in the pool).
-              await updateHoldingFields(id, existingRecon.id, portfolioKey, {
-                shares: 0,
-              });
-            }
-          }
-
-          // A symbol the broker no longer reports (fully sold) won't be
-          // in recPositions — neutralize any leftover reconciler so it
-          // can't keep a closed position visible. Safe under
-          // multi-account because sync requires C ⊇ L: every held
-          // symbol's source account was part of this sync.
-          for (const h of current) {
-            if (
-              h.importSource === provider &&
-              h.brokerOrderId?.startsWith("pos-recon-") &&
-              !positionSymbols.has(h.symbol) &&
-              h.shares !== 0
-            ) {
-              await updateHoldingFields(id, h.id, portfolioKey, { shares: 0 });
-            }
-          }
-        }
-      } catch (reconErr) {
-        console.warn("snaptrade reconciliation (best-effort) failed", reconErr);
-      }
-
+      const m = msgByReason[outcome.reason];
+      if (m) setSyncError(m);
+    } else if (outcome.errors.length > 0) {
+      setSyncError(outcome.errors[0]);
+    }
+    if (outcome.ran) {
       setSyncResults((prev) => ({
         ...prev,
         [provider]: {
-          buys,
-          sells,
-          skipped,
-          partialFillsSkipped: result.partialFillsSkipped,
+          buys: outcome.buys,
+          sells: outcome.sells,
+          skipped: outcome.skipped,
+          partialFillsSkipped: outcome.partialFillsSkipped,
         },
       }));
       setConnectFields({});
       setShowImport(false);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Sync failed";
-      errors.push(msg);
-      setSyncError(msg);
-      // Wrong creds are the most common reason a fresh-paste sync
-      // fails. Clear the form so a passerby can't read the API
-      // secret off the user's screen, and so a retry-with-different-
-      // creds workflow doesn't have to manually wipe the inputs first.
-      // Only do this when the user just typed credentials in this
-      // attempt (`keyOverride`) — a re-sync of an already-connected
-      // broker has empty form fields anyway.
-      if (keyOverride) {
-        setConnectFields({});
-        // Atomic rollback: if the portfolio still has zero holdings
-        // imported (sync errored before we wrote any), delete the
-        // credential doc we just wrote. Without this we'd leave an
-        // orphaned credential whose broker identity can't be derived
-        // from holdings — a confusing intermediate state.
-        //
-        // We check the LIVE ref (not the render closure) because new
-        // holdings get committed in a single atomic batch downstream;
-        // either ALL of this sync's holdings are present (and the lock
-        // is established) or NONE are. So a fresh re-derivation here
-        // faithfully reflects whether this sync wrote anything before
-        // failing. If you ever split the batch, revisit this — the
-        // assumption breaks.
-        const lockedNow = holdingsRef.current.find(
-          (h) => h.importSource && h.importSource in BROKERS,
-        );
-        if (!lockedNow) {
-          try {
-            await deleteDoc(secretRef);
-          } catch {
-            // best-effort cleanup
-          }
-        }
-      }
-    } finally {
-      // Note: setSyncLoading(null) is now handled in the `handleSync`
-      // wrapper's finally — keeps the in-flight ref + the loading
-      // state lifecycle in one place.
-      try {
-        // syncLog body is encrypted under K_portfolio because `errors`
-        // strings can carry broker-named messages (e.g. "Trading212
-        // API error 429: ..."). Server stores ciphertext only; only
-        // the user with portfolio access can decrypt. Schema mirrors
-        // holdings: `{ payload, iv, createdAt, schemaVersion: 1 }`.
-        // For pre-migration plaintext portfolios (no key) we skip the
-        // write entirely rather than leak — these are rare, and an
-        // unrecorded sync diagnostic is preferable to an at-rest leak.
-        const createdAt = Date.now();
-        const payload = {
-          timestamp: createdAt,
-          imported: buys + sells,
-          buys,
-          sells,
-          skipped,
-          errors,
-          // Redacted SnapTrade decision trace (no symbols/amounts/ids).
-          // Encrypted under K_portfolio along with the rest of the log.
-          diagnostics: syncDiagnostics,
-        };
-        if (portfolioKey) {
-          const ct = await encryptJson(payload, portfolioKey);
-          await addDoc(collection(db, "portfolios", id, "syncLogs"), {
-            payload: ct.payload,
-            iv: ct.iv,
-            createdAt,
-            schemaVersion: 1,
-          });
-        }
-      } catch {
-        // best-effort audit log
-      }
+    } else if (keyOverride) {
+      setConnectFields({}); // clear the secret off-screen on a failed fresh paste
     }
   };
 
@@ -2062,7 +1585,7 @@ export default function PortfolioPage({
                 <ul className="space-y-2">
                   {(() => {
                     const result = syncResults[lockedBroker];
-                    const isLoading = syncLoading === lockedBroker;
+                    const isLoading = syncLoading === lockedBroker || autoSyncing;
                     return (
                       <li key={lockedBroker} className="flex items-center gap-2 bg-bg-3 border border-line rounded-lg px-3 py-2.5">
                         <span className="text-sm font-medium flex-1">
@@ -2113,7 +1636,7 @@ export default function PortfolioPage({
                         )}
                         <button
                           onClick={() => handleSync(lockedBroker)}
-                          disabled={!!syncLoading}
+                          disabled={!!syncLoading || autoSyncing}
                           className="text-xs btn-ghost px-2.5 py-1 disabled:opacity-40"
                         >
                           {isLoading ? "Syncing…" : "Sync"}
@@ -2130,6 +1653,9 @@ export default function PortfolioPage({
                     );
                   })()}
                 </ul>
+                {lastSyncAt && (
+                  <p className="mt-2 text-fg-fade label">synced {relativeTime(lastSyncAt)}</p>
+                )}
               </div>
             )}
 

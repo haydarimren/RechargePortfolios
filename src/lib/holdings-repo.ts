@@ -373,6 +373,22 @@ export function subscribeHoldings(
 }
 
 /**
+ * One-shot read of a portfolio's holdings, decoded. Same decode path as
+ * `subscribeHoldings` but without the live subscription — used by the
+ * sync engine, which runs for portfolios whose detail page isn't mounted.
+ */
+export async function loadHoldingsOnce(
+  portfolioId: string,
+  key: CryptoKey | null,
+): Promise<Holding[]> {
+  const snap = await getDocs(
+    collection(db, "portfolios", portfolioId, "holdings"),
+  );
+  const decoded = await Promise.all(snap.docs.map((d) => decodeHolding(d, key)));
+  return decoded.filter((h): h is Holding => h !== null);
+}
+
+/**
  * Add a new holding. If `key` is provided, writes the v2 encrypted shape
  * (everything except `createdAt` lives inside the encrypted payload).
  * Otherwise writes the legacy plaintext shape — only used for pre-Phase-2

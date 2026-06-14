@@ -17,7 +17,7 @@ import { proxyFetch as sharedProxyFetch } from "../proxy-fetch";
 import type { ImportResult, IsOrderKnownFn } from "../types";
 import { cleanT212Symbol, toYahooSymbol } from "./symbols";
 
-interface T212OrderItem {
+export interface T212OrderItem {
   order: {
     id: number;
     ticker: string;
@@ -37,6 +37,55 @@ interface T212OrderItem {
 interface T212OrdersResponse {
   items: T212OrderItem[];
   nextPagePath?: string;
+}
+
+/**
+ * Would this raw order become a holding? Mirrors the import loop's filter
+ * exactly so the dedup short-circuit can never drift from what's actually
+ * imported. Cancelled/rejected/unfilled orders (fill === null) and
+ * AutoInvest buys not in open positions are NOT importable.
+ */
+export function isImportableT212Order(
+  item: T212OrderItem,
+  openTickers: Set<string> | null,
+): boolean {
+  const { order, fill } = item;
+  if (order.status !== "FILLED") return false;
+  if (order.side !== "BUY" && order.side !== "SELL") return false;
+  if (!fill || !fill.quantity || !fill.price || !fill.filledAt) return false;
+  if (
+    order.side === "BUY" &&
+    openTickers &&
+    order.initiatedFrom === "AUTOINVEST" &&
+    !openTickers.has(order.ticker)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * A page is "fully imported" iff it has at least one importable order and
+ * every importable order is already known. Non-importable orders (e.g.
+ * cancelled) are ignored — they were the bug: they can never be "known",
+ * so they used to block the stop and force full pagination.
+ */
+export function pageFullyImported(
+  items: T212OrderItem[],
+  openTickers: Set<string> | null,
+  isOrderKnown?: IsOrderKnownFn,
+): boolean {
+  if (!isOrderKnown) return false;
+  const importable = items.filter((it) => isImportableT212Order(it, openTickers));
+  if (importable.length === 0) return false;
+  return importable.every((it) =>
+    isOrderKnown({
+      orderId: String(it.order.id),
+      rawTicker: it.order.ticker,
+      purchaseDate: it.fill!.filledAt.split("T")[0],
+      shares: Math.abs(it.fill!.quantity),
+    }),
+  );
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -135,6 +184,7 @@ export async function fetchTrading212Orders(
   isOrderKnown?: IsOrderKnownFn,
 ): Promise<ImportResult> {
   validateApiKey(apiKey);
+  const startedAt = Date.now();
 
   const openTickers = await fetchOpenPositionTickers(apiKey);
   const isinToSymbol = await fetchIsinToSymbol(apiKey);
@@ -166,18 +216,7 @@ export async function fetchTrading212Orders(
     // a window equal to the page size (50). Mixed pages (some new,
     // some old) keep paginating; only a fully-existing page is the
     // signal that we've reached already-known territory.
-    const pageFullyExisting =
-      items.length > 0 &&
-      !!isOrderKnown &&
-      items.every((item) => {
-        if (!item.fill?.filledAt) return false;
-        return isOrderKnown({
-          orderId: String(item.order.id),
-          rawTicker: item.order.ticker,
-          purchaseDate: item.fill.filledAt.split("T")[0],
-          shares: Math.abs(item.fill.quantity),
-        });
-      });
+    const pageFullyExisting = pageFullyImported(items, openTickers, isOrderKnown);
     if (!data.nextPagePath || pageFullyExisting) break;
     path = data.nextPagePath;
     // T212's documented rate limit on /equity/history/orders is 6/min
@@ -192,19 +231,11 @@ export async function fetchTrading212Orders(
   const mapped: ImportResult["orders"] = [];
 
   for (const item of orders) {
+    if (!isImportableT212Order(item, openTickers)) continue;
     const { order, fill } = item;
-    if (order.status !== "FILLED") continue;
     const isSell = order.side === "SELL";
-    const isBuy = order.side === "BUY";
-    if (!isSell && !isBuy) continue;
-    if (!fill || !fill.quantity || !fill.price) continue;
-
-    if (isBuy && openTickers) {
-      const isAutoInvest = order.initiatedFrom === "AUTOINVEST";
-      if (isAutoInvest && !openTickers.has(order.ticker)) continue;
-    }
-
-    const rawPrice = fill.price;
+    // fill is guaranteed non-null by isImportableT212Order
+    const rawPrice = fill!.price;
     const purchasePrice =
       order.instrument?.currency === "GBX" ? rawPrice / 100 : rawPrice;
 
@@ -215,14 +246,14 @@ export async function fetchTrading212Orders(
         ? isinSymbol
         : toYahooSymbol(order.ticker, order.instrument?.currency) ?? undefined;
 
-    const shares = Math.abs(fill.quantity);
+    const shares = Math.abs(fill!.quantity);
 
     mapped.push({
       id: String(order.id),
       symbol,
       shares,
       purchasePrice,
-      purchaseDate: fill.filledAt.split("T")[0],
+      purchaseDate: fill!.filledAt.split("T")[0],
       currency: order.instrument?.currency,
       isin: order.instrument?.isin,
       yahooSymbol,
@@ -231,5 +262,11 @@ export async function fetchTrading212Orders(
     if (isSell) sellsImported++;
   }
 
-  return { orders: mapped, sellsSkipped: 0, sellsImported, partialFillsSkipped: 0 };
+  return {
+    orders: mapped,
+    sellsSkipped: 0,
+    sellsImported,
+    partialFillsSkipped: 0,
+    timing: { pages: pageCount, elapsedMs: Date.now() - startedAt },
+  };
 }
