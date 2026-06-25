@@ -4,6 +4,7 @@ import {
   closeOnOrBefore,
   fmtShares,
   buildComparisonSeries,
+  buildTradeLog,
   normalizeSeries,
   poolPositions,
   reconcileToPositionUnits,
@@ -461,6 +462,34 @@ describe("poolPositions", () => {
     expect(res[0].firstPurchaseDate).toBe("2024-01-05");
   });
 
+  it("same-day buy then sell of equal shares closes the position even when the sell was written first", () => {
+    // Reported bug: T212 stores purchaseDate date-only, so a same-day
+    // BUY and SELL share a date. When the SELL's doc is written first
+    // during sync (smaller createdAt), the old createdAt-only tie-break
+    // replayed SELL (against an empty pool → ignored) then BUY, leaving
+    // the position open. A same-day sale can only dispose of that day's
+    // buys, so the buy must be applied first → net zero → dropped.
+    const sellFirst: Holding = {
+      id: "S",
+      symbol: "QQ3S",
+      shares: 40.824658,
+      purchasePrice: 23.66,
+      purchaseDate: "2026-06-23",
+      createdAt: 1, // written BEFORE the buy
+      side: "SELL",
+    };
+    const buyLater: Holding = {
+      id: "B",
+      symbol: "QQ3S",
+      shares: 40.824658,
+      purchasePrice: 24.5,
+      purchaseDate: "2026-06-23",
+      createdAt: 2, // larger createdAt → would sort last under the old rule
+      side: "BUY",
+    };
+    expect(poolPositions([sellFirst, buyLater])).toEqual([]);
+  });
+
   it("aggregateHoldings shim preserves TickerPosition shape and drops sold-out symbols", () => {
     const holdings: Holding[] = [
       h("1", "AAPL", 10, 100, "2024-01-01"),
@@ -473,6 +502,37 @@ describe("poolPositions", () => {
     expect(res[0].lots).toBeDefined();
     expect(res[0].cost).toBeCloseTo(2000);
     expect(res[0].firstDate).toBe("2024-02-10");
+  });
+});
+
+describe("buildTradeLog", () => {
+  it("same-day sell draws from the same-day buy even when written first", () => {
+    // Same date-only collision as the poolPositions case. The sell must
+    // see the day's buy in the pool so it records a realized result
+    // instead of falling through the empty-pool branch.
+    const sellFirst: Holding = {
+      id: "S",
+      symbol: "QQ3S",
+      shares: 10,
+      purchasePrice: 24,
+      purchaseDate: "2026-06-23",
+      createdAt: 1, // written BEFORE the buy
+      side: "SELL",
+    };
+    const buyLater: Holding = {
+      id: "B",
+      symbol: "QQ3S",
+      shares: 10,
+      purchasePrice: 20,
+      purchaseDate: "2026-06-23",
+      createdAt: 2,
+      side: "BUY",
+    };
+    const log = buildTradeLog([sellFirst, buyLater]);
+    const sellEntry = log.find((e) => e.id === "S")!;
+    // avg cost from the buy is 20; sold 10 @ 24 → realized +40
+    expect(sellEntry.realizedGain).toBeCloseTo(40);
+    expect(sellEntry.realizedPct).toBeCloseTo(0.2);
   });
 });
 
