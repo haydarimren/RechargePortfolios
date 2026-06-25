@@ -80,10 +80,27 @@ function applyToPool(pool: PoolState, h: Holding): void {
   }
 }
 
+/**
+ * Chronological order for pool replay. `purchaseDate` is stored date-only
+ * (broker sync drops the intraday time), so a same-day BUY and SELL collapse
+ * to one date. Within a date we apply BUYs before SELLs: a sale can only
+ * dispose of shares held on that day, including the day's own purchases, and
+ * the createdAt fallback reflects sync *write* order — not execution order —
+ * so it can't be trusted to put the buy first. Without this, a same-day
+ * round-trip whose sell doc was written first would hit the empty pool, get
+ * ignored, and leave the buy as a phantom open position. (This only orders
+ * the day's buys ahead of its sells within the single average-cost pool — it
+ * is NOT HMRC same-day *lot* matching; the pool stays blended.) createdAt
+ * only breaks ties within a side.
+ */
 function sortForPool(holdings: Holding[]): Holding[] {
+  const sideRank = (h: Holding) => ((h.side ?? "BUY") === "SELL" ? 1 : 0);
   return holdings.slice().sort((a, b) => {
     if (a.purchaseDate !== b.purchaseDate) {
       return a.purchaseDate.localeCompare(b.purchaseDate);
+    }
+    if (sideRank(a) !== sideRank(b)) {
+      return sideRank(a) - sideRank(b);
     }
     return (a.createdAt ?? 0) - (b.createdAt ?? 0);
   });
@@ -360,12 +377,7 @@ export function buildComparisonSeries(
 export function buildTradeLog(holdings: Holding[]): TradeLogEntry[] {
   if (holdings.length === 0) return [];
 
-  const sorted = holdings.slice().sort((a, b) => {
-    if (a.purchaseDate !== b.purchaseDate) {
-      return a.purchaseDate.localeCompare(b.purchaseDate);
-    }
-    return (a.createdAt ?? 0) - (b.createdAt ?? 0);
-  });
+  const sorted = sortForPool(holdings);
 
   const pool = new Map<string, { shares: number; cost: number }>();
   let totalCost = 0;
