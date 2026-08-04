@@ -103,6 +103,52 @@ function bail(reason: SyncReason): SyncOutcome {
   };
 }
 
+/**
+ * Propagate a corrected display symbol to every stored lot of the same
+ * instrument, not just the orders this sync happened to fetch.
+ *
+ * The per-order backfill above only touches orders inside the pages the
+ * adapter pulled, and T212's dedup-and-stop deliberately stops after the
+ * first fully-known page. So when a symbol mapping is *fixed* (the
+ * VUAA/VUAG case: one ISIN, two LSE currency lines, and the ISIN map used
+ * to prefer whichever was USD), a plain re-sync would relabel the recent
+ * lots and leave older ones alone — splitting one position into two rows,
+ * which is worse than the consistent-but-wrong label it replaced.
+ *
+ * Instrument identity is (isin, currency): same ISIN in a different
+ * currency is a different trading line and keeps its own symbol.
+ * Best-effort — a failure here must not fail an otherwise-good import.
+ */
+async function relabelSameInstrumentHoldings(
+  portfolioId: string,
+  portfolioKey: CryptoKey | null,
+  stored: Holding[],
+  orders: ImportResult["orders"],
+): Promise<void> {
+  try {
+    const key = (isin?: string, currency?: string) =>
+      isin ? `${isin}|${(currency ?? "").toUpperCase()}` : null;
+    const canonical = new Map<string, string>();
+    for (const o of orders) {
+      const k = key(o.isin, o.currency);
+      if (k && o.symbol) canonical.set(k, o.symbol);
+    }
+    if (canonical.size === 0) return;
+
+    for (const h of stored) {
+      const k = key(h.isin, h.currency);
+      if (!k) continue;
+      const want = canonical.get(k);
+      if (!want || want === h.symbol) continue;
+      await updateHoldingFields(portfolioId, h.id, portfolioKey, {
+        symbol: want,
+      });
+    }
+  } catch (err) {
+    console.warn("Symbol relabel pass failed", err);
+  }
+}
+
 export async function runBrokerSync(ctx: SyncContext): Promise<SyncOutcome> {
   // Resolve K_portfolio up front. The page read this off a non-null
   // React state (`portfolioKey`) that was populated when the portfolio
@@ -317,6 +363,8 @@ export async function runBrokerSync(ctx: SyncContext): Promise<SyncOutcome> {
       encryptedShape: Record<string, unknown>;
       plaintextShape: Record<string, unknown>;
     }> = [];
+    /** Holding ids whose symbol the per-order backfill already fixed. */
+    const alreadyRelabelled = new Set<string>();
 
     for (const order of result.orders) {
       const existing = decodedCurrent.find(
@@ -360,6 +408,12 @@ export async function runBrokerSync(ctx: SyncContext): Promise<SyncOutcome> {
             portfolioKey,
             patch,
           );
+          // `decodedCurrent` is a snapshot taken before these writes, so
+          // the relabel pass below would re-issue an identical update
+          // (a full decrypt-merge-encrypt round-trip) for anything
+          // patched here. Remember the id instead of mutating the
+          // snapshot, which the shape-matching above still reads.
+          if (patch.symbol) alreadyRelabelled.add(target.id);
         }
         skipped++;
         continue;
@@ -432,6 +486,13 @@ export async function runBrokerSync(ctx: SyncContext): Promise<SyncOutcome> {
       batch.set(doc(holdingsCol), item.encryptedShape);
     }
     await batch.commit();
+
+    await relabelSameInstrumentHoldings(
+      ctx.portfolioId,
+      portfolioKey,
+      decodedCurrent.filter((h) => !alreadyRelabelled.has(h.id)),
+      result.orders,
+    );
 
     // --- Positions-authoritative reconciliation -------------------
     // The broker's position snapshot is the truth for CURRENT shares

@@ -15,6 +15,7 @@
 
 import { proxyFetch as sharedProxyFetch } from "../proxy-fetch";
 import { resolveYahooSymbols } from "../../symbol-resolve";
+import { holdingCurrency } from "../../currency";
 import type { ImportResult, IsOrderKnownFn } from "../types";
 import { cleanT212Symbol, toYahooSymbol } from "./symbols";
 
@@ -132,30 +133,80 @@ async function proxyFetch(
   });
 }
 
+export interface T212Instrument {
+  ticker: string;
+  isin: string;
+  shortName: string;
+  currencyCode: string;
+}
+
+/** Map key for a currency-scoped entry. GBX and GBP are one venue. */
+function isinCurrencyKey(isin: string, currency: string): string {
+  return `${isin}|${holdingCurrency(currency)}`;
+}
+
 /**
- * Pull T212's instrument metadata once per sync to build an ISIN→Yahoo-
- * compatible-symbol map. Used to heal stale tickers that T212 still
- * reports as their pre-merger names (ASTS ← NPA, etc.).
+ * Build the ISIN→symbol map, with a currency-scoped entry per listing
+ * alongside the ISIN-only fallback.
+ *
+ * Why currency-scoped: a fund can be listed twice on the *same* exchange
+ * in two currencies under one ISIN. Vanguard's S&P 500 UCITS ETF (Acc) is
+ * `VUAA` on LSE in USD and `VUAG` on LSE in GBP, both `IE00BFMXXD54`. The
+ * ISIN-only map preferred whichever listing was USD, so a GBP VUAG
+ * purchase came back labelled VUAA — a real position renamed to a
+ * different trading line of the same fund.
+ *
+ * The USD preference still applies *within* the ISIN-only fallback,
+ * because that's what heals stale tickers: T212 reports pre-merger names
+ * long after the fact (`NPA` for what is now `ASTS`) and the USD
+ * listing's `shortName` is the canonical current symbol. That case is
+ * unaffected — both the stale order and the healed instrument are USD,
+ * so the currency-scoped lookup finds it too.
  */
-async function fetchIsinToSymbol(apiKey: string): Promise<Map<string, string>> {
-  const res = await proxyFetch(apiKey, "/api/v0/equity/metadata/instruments");
-  if (!res.ok) return new Map();
-  const instruments = (await res.json()) as Array<{
-    ticker: string;
-    isin: string;
-    shortName: string;
-    currencyCode: string;
-  }>;
+export function buildIsinSymbolMap(
+  instruments: T212Instrument[],
+): Map<string, string> {
   const map = new Map<string, string>();
   for (const inst of instruments) {
     if (!inst.isin) continue;
     const symbol =
       inst.currencyCode === "USD" ? inst.shortName : cleanT212Symbol(inst.ticker);
+    const scoped = isinCurrencyKey(inst.isin, inst.currencyCode);
+    // First listing per currency wins; a second listing in the same
+    // currency is a genuine duplicate and either answer is as good.
+    if (!map.has(scoped)) map.set(scoped, symbol);
     if (!map.has(inst.isin) || inst.currencyCode === "USD") {
       map.set(inst.isin, symbol);
     }
   }
   return map;
+}
+
+/**
+ * Canonical display symbol for an order, preferring the listing that
+ * matches the order's own trading currency. Falls back to the ISIN-only
+ * entry (the stale-ticker heal) and then to undefined, which leaves the
+ * caller on the order's own cleaned ticker.
+ */
+export function lookupIsinSymbol(
+  map: Map<string, string>,
+  isin: string | undefined,
+  currency: string | undefined,
+): string | undefined {
+  if (!isin) return undefined;
+  return map.get(isinCurrencyKey(isin, currency ?? "")) ?? map.get(isin);
+}
+
+/**
+ * Pull T212's instrument metadata once per sync to build the ISIN→symbol
+ * map. Heals stale tickers that T212 still reports under their pre-merger
+ * names (ASTS ← NPA, etc.).
+ */
+async function fetchIsinToSymbol(apiKey: string): Promise<Map<string, string>> {
+  const res = await proxyFetch(apiKey, "/api/v0/equity/metadata/instruments");
+  if (!res.ok) return new Map();
+  const instruments = (await res.json()) as T212Instrument[];
+  return buildIsinSymbolMap(instruments);
 }
 
 async function fetchOpenPositionTickers(
@@ -281,7 +332,11 @@ export async function fetchTrading212Orders(
     const purchasePrice =
       order.instrument?.currency === "GBX" ? rawPrice / 100 : rawPrice;
 
-    const isinSymbol = isinToSymbol.get(order.instrument.isin ?? "");
+    const isinSymbol = lookupIsinSymbol(
+      isinToSymbol,
+      order.instrument?.isin,
+      order.instrument?.currency,
+    );
     const symbol = isinSymbol ?? cleanT212Symbol(order.ticker);
     const yahooSymbol =
       order.instrument?.currency === "USD" && isinSymbol
