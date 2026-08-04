@@ -13,11 +13,26 @@ export interface StockInsight {
   analystCount?: number;
 }
 
+/** Finnhub `/stock/recommendation` — one month's bucket counts. */
+export interface AnalystSpread {
+  strongBuy: number; buy: number; hold: number; sell: number; strongSell: number;
+  period: string;            // YYYY-MM-DD, first of the month
+}
+
+export type SpreadKey = "strongBuy" | "buy" | "hold" | "sell" | "strongSell";
+export interface SpreadSegment {
+  key: SpreadKey;
+  count: number;             // always > 0 — empty buckets are dropped
+  pct: number;               // share of the fixed-width track; sums to 100
+  showLabel: boolean;        // wide enough to hold its own count
+}
+
 export type EventKind = "earnings" | "ex-dividend" | "dividend";
 export interface UpcomingDate { symbol: string; kind: EventKind; date: string }
 export interface AnalystRating {
   symbol: string; ratingKey: string; ratingLabel: string;
   target?: number; upsidePct?: number;
+  spread?: AnalystSpread; analystCount?: number;
 }
 export interface MoverRow { symbol: string; pct: number }
 export interface Movers { gainers: MoverRow[]; losers: MoverRow[] }
@@ -63,6 +78,67 @@ export function parseQuoteSummary(json: unknown): StockInsight | null {
   return out;
 }
 
+const SPREAD_KEYS: SpreadKey[] = ["strongBuy", "buy", "hold", "sell", "strongSell"];
+/** Bullish→bearish weights; the mean lands on a Yahoo-style rating key. */
+const SPREAD_WEIGHT: Record<SpreadKey, number> = {
+  strongBuy: 2, buy: 1, hold: 0, sell: -1, strongSell: -2,
+};
+/** A segment narrower than this can't hold a legible count, so it goes bare. */
+const LABEL_MIN_PCT = 12;
+
+/** Parse a Finnhub recommendation array, keeping the latest period. */
+export function parseFinnhubRecommendation(json: unknown): AnalystSpread | null {
+  if (!Array.isArray(json) || json.length === 0) return null;
+  const rows = json.filter(
+    (r): r is Record<string, unknown> => !!r && typeof r === "object",
+  );
+  let best: Record<string, unknown> | null = null;
+  for (const r of rows) {
+    if (typeof r.period !== "string") continue;
+    if (!best || r.period > (best.period as string)) best = r;
+  }
+  if (!best) return null;
+  const out: AnalystSpread = {
+    strongBuy: 0, buy: 0, hold: 0, sell: 0, strongSell: 0,
+    period: best.period as string,
+  };
+  let sawBucket = false;
+  for (const k of SPREAD_KEYS) {
+    const v = best[k];
+    if (typeof v === "number" && isFinite(v)) { out[k] = v; sawBucket = true; }
+  }
+  // A row with a period but no bucket at all isn't a recommendation.
+  return sawBucket ? out : null;
+}
+
+export function spreadTotal(s: AnalystSpread): number {
+  return SPREAD_KEYS.reduce((a, k) => a + s[k], 0);
+}
+
+/** Bar geometry: proportional widths over a fixed-width track, most
+ *  bullish first. Empty buckets are dropped rather than drawn as slivers. */
+export function spreadSegments(s: AnalystSpread): SpreadSegment[] {
+  const total = spreadTotal(s);
+  if (total <= 0) return [];
+  return SPREAD_KEYS.filter((k) => s[k] > 0).map((k) => {
+    const pct = (s[k] / total) * 100;
+    return { key: k, count: s[k], pct, showLabel: pct >= LABEL_MIN_PCT };
+  });
+}
+
+/** Collapse a spread into a single rating key. Used only when Yahoo has no
+ *  `recommendationKey` of its own, so the pill still has a word to show. */
+export function deriveRatingKey(s: AnalystSpread): string {
+  const total = spreadTotal(s);
+  if (total <= 0) return "none";
+  const score = SPREAD_KEYS.reduce((a, k) => a + SPREAD_WEIGHT[k] * s[k], 0) / total;
+  if (score >= 1.5) return "strong_buy";
+  if (score >= 0.5) return "buy";
+  if (score > -0.5) return "hold";
+  if (score > -1.5) return "sell";
+  return "strong_sell";
+}
+
 /** Future-dated events across holdings, flattened + sorted ascending. */
 export function buildUpcomingDates(
   bySymbol: Record<string, StockInsight | null>,
@@ -84,17 +160,27 @@ export function buildAnalystRatings(
   bySymbol: Record<string, StockInsight | null>,
   priceBySymbol: Record<string, number | undefined>,
   weightBySymbol: Record<string, number>,
+  spreadBySymbol: Record<string, AnalystSpread | null> = {},
 ): AnalystRating[] {
   const rows: AnalystRating[] = Object.keys(weightBySymbol).map((symbol) => {
     const ins = bySymbol[symbol] ?? null;
-    const ratingKey = ins?.recommendationKey ?? "none";
+    const spread = spreadBySymbol[symbol] ?? undefined;
+    // Yahoo's own word wins; Finnhub's spread only fills the gap so a symbol
+    // Yahoo doesn't cover still gets a pill instead of a grey "None".
+    const ratingKey = ins?.recommendationKey ?? (spread ? deriveRatingKey(spread) : "none");
+    // The count must agree with the bar it sits next to, so it comes from the
+    // spread whenever there is one.
+    const analystCount = spread ? spreadTotal(spread) : ins?.analystCount;
     const target = ins?.targetMeanPrice;
     const price = priceBySymbol[symbol];
     const upsidePct =
       target !== undefined && price !== undefined && price > 0
         ? ((target - price) / price) * 100
         : undefined;
-    return { symbol, ratingKey, ratingLabel: ratingLabel(ratingKey), target, upsidePct };
+    return {
+      symbol, ratingKey, ratingLabel: ratingLabel(ratingKey),
+      target, upsidePct, spread, analystCount,
+    };
   });
   return rows.sort((a, b) => (weightBySymbol[b.symbol] ?? 0) - (weightBySymbol[a.symbol] ?? 0));
 }
