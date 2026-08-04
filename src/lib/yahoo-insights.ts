@@ -9,25 +9,10 @@
  */
 
 import { parseQuoteSummary, type StockInsight } from "./insights";
+import { mapWithConcurrency } from "./concurrency";
 
 const CONCURRENCY = 5;
 const DAY = 86400;
-
-async function mapWithConcurrency<T, R>(
-  items: T[], limit: number, fn: (x: T) => Promise<R>,
-): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let cursor = 0;
-  const worker = async () => {
-    while (true) {
-      const i = cursor++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
-}
 
 interface Session { cookie: string; crumb: string }
 

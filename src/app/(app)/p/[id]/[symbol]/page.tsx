@@ -33,6 +33,7 @@ import {
   subscribeHoldings,
 } from "@/lib/holdings-repo";
 import { useShareLinkPublisher } from "@/lib/use-share-link-publisher";
+import { TickerInsightsCard } from "@/components/TickerInsightsCard";
 import { ArrowDown, ArrowLeft, ArrowUp, ChevronRight, Plus, Trash2, X } from "lucide-react";
 import {
   AreaChart,
@@ -541,6 +542,11 @@ export default function TickerPage({
             )}
           </div>
         ) : null}
+
+        {/* Market insights — public data, so it renders for shared viewers too */}
+        <div className="animate-fade-up" style={{ animationDelay: "90ms" }}>
+          <TickerInsightsCard symbol={symbol} yahooSymbol={yahooSymbol} price={quote?.c} />
+        </div>
 
         {/* Chart: bg-bg-2 card + legend strip with buy/sell color dots */}
         <section

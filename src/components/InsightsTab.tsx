@@ -5,25 +5,20 @@ import { useRouter } from "next/navigation";
 import type { TickerPosition } from "@/lib/portfolio";
 import type { StockQuote } from "@/lib/finnhub";
 import { getStockInsights } from "@/lib/yahoo-insights";
+import { getAnalystSpreads } from "@/lib/finnhub-recs";
 import {
-  buildUpcomingDates, buildAnalystRatings, topMovers, ratingTone,
-  type StockInsight, type Movers,
+  buildUpcomingDates, buildAnalystRatings, topMovers,
+  type StockInsight, type AnalystSpread, type Movers,
 } from "@/lib/insights";
+import {
+  RatingPill, AnalystSpreadBar, SkeletonRows, Empty, Unavailable,
+  fmtMoney, signed, signedClass,
+} from "./insights-ui";
 
 const EVENT_LABEL: Record<string, string> = {
   earnings: "Earnings", "ex-dividend": "Ex-dividend", dividend: "Dividend pay",
 };
-const TONE_CLASS: Record<string, string> = {
-  pos: "text-pos bg-pos/10", neutral: "text-fg-dim bg-bg-3",
-  neg: "text-neg bg-neg/10", fade: "text-fg-fade bg-bg-3",
-};
 
-function fmtMoney(n: number): string {
-  return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-function signed(n: number): string {
-  return `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(1)}%`;
-}
 
 export function InsightsTab({
   portfolioId, positions, quotes, marketValue,
@@ -49,34 +44,67 @@ export function InsightsTab({
     [positions],
   );
 
-  const [insights, setInsights] = useState<Record<string, StockInsight | null> | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [degraded, setDegraded] = useState(false);
+  // One result object tagged with the symbol set it was fetched for. Loading
+  // and the two degraded flags are then derived rather than stored, which
+  // keeps setState out of the effect body (cascading-render lint rule) and
+  // means a symbol-set change can't briefly show the previous set's data.
+  const [data, setData] = useState<{
+    key: string;
+    insights: Record<string, StockInsight | null>;
+    spreads: Record<string, AnalystSpread | null>;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const syms = symbolKey ? symbolKey.split(",") : [];
-    if (syms.length === 0) { setInsights({}); setLoading(false); setDegraded(false); return; }
+    if (syms.length === 0) return; // nothing to fetch; handled by `loaded` below
     // Map each cleaned symbol to its Yahoo-compatible symbol via the lots.
     const yahooFor = (sym: string) => {
       const pos = positions.find((p) => p.symbol === sym);
       return pos?.lots.find((l) => l.yahooSymbol)?.yahooSymbol ?? sym;
     };
     const apiSymbols = syms.map(yahooFor);
-    setLoading(true); setDegraded(false);
-    getStockInsights(apiSymbols)
-      .then((map) => {
+    Promise.all([
+      getStockInsights(apiSymbols).catch(() => ({} as Record<string, StockInsight | null>)),
+      getAnalystSpreads(apiSymbols).catch(() => ({} as Record<string, AnalystSpread | null>)),
+    ])
+      .then(([insMap, sprMap]) => {
         if (cancelled) return;
-        const rekeyed: Record<string, StockInsight | null> = {};
-        syms.forEach((s, i) => { rekeyed[s] = map[apiSymbols[i]] ?? null; });
-        setInsights(rekeyed);
-        setDegraded(syms.every((s) => rekeyed[s] == null)); // crumb path failed
-        setLoading(false);
-      })
-      .catch(() => { if (!cancelled) { setInsights({}); setDegraded(true); setLoading(false); } });
+        const rekeyedIns: Record<string, StockInsight | null> = {};
+        const rekeyedSpr: Record<string, AnalystSpread | null> = {};
+        syms.forEach((s, i) => {
+          rekeyedIns[s] = insMap[apiSymbols[i]] ?? null;
+          rekeyedSpr[s] = sprMap[apiSymbols[i]] ?? null;
+        });
+        setData({ key: symbolKey, insights: rekeyedIns, spreads: rekeyedSpr });
+      });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scalar dep on purpose
   }, [symbolKey]);
+
+  // Memoized so the empty-portfolio branch doesn't mint a new object identity
+  // on every render and retrigger every downstream memo.
+  const loaded = useMemo(
+    () => (symbolKey === ""
+      ? { key: "", insights: {}, spreads: {} }
+      : data?.key === symbolKey ? data : null),
+    [symbolKey, data],
+  );
+  const loading = loaded === null;
+  const insights = loaded?.insights ?? null;
+  const spreads = useMemo(() => loaded?.spreads ?? {}, [loaded]);
+
+  // Two flags, not one: dates only ever come from Yahoo, but the analyst card
+  // survives a dead crumb handshake as long as Finnhub answered.
+  const { datesDegraded, ratingsDegraded } = useMemo(() => {
+    const syms = symbolKey ? symbolKey.split(",") : [];
+    if (!loaded || syms.length === 0) return { datesDegraded: false, ratingsDegraded: false };
+    const noYahoo = syms.every((s) => loaded.insights[s] == null); // crumb path failed
+    return {
+      datesDegraded: noYahoo,
+      ratingsDegraded: noYahoo && syms.every((s) => loaded.spreads[s] == null),
+    };
+  }, [loaded, symbolKey]);
 
   const todayISO = new Date().toISOString().split("T")[0];
 
@@ -118,8 +146,8 @@ export function InsightsTab({
     [insights, todayISO],
   );
   const ratings = useMemo(
-    () => (insights ? buildAnalystRatings(insights, priceBySymbol, weightBySymbol) : []),
-    [insights, priceBySymbol, weightBySymbol],
+    () => (insights ? buildAnalystRatings(insights, priceBySymbol, weightBySymbol, spreads) : []),
+    [insights, priceBySymbol, weightBySymbol, spreads],
   );
   const movers = useMemo(() => topMovers(moverRows), [moverRows]);
 
@@ -141,7 +169,7 @@ export function InsightsTab({
         <h3 className="label mb-3">Upcoming dates</h3>
         {loading ? (
           <SkeletonRows />
-        ) : degraded ? (
+        ) : datesDegraded ? (
           <Unavailable />
         ) : upcoming.length === 0 ? (
           <Empty>No upcoming events.</Empty>
@@ -163,7 +191,7 @@ export function InsightsTab({
         <h3 className="label mb-3">Analyst ratings</h3>
         {loading ? (
           <SkeletonRows />
-        ) : degraded ? (
+        ) : ratingsDegraded ? (
           <Unavailable />
         ) : ratings.length === 0 ? (
           <Empty>No analyst coverage.</Empty>
@@ -172,16 +200,25 @@ export function InsightsTab({
             {ratings.map((r) => (
               <div key={r.symbol} {...rowProps(r.symbol)}>
                 <span className="font-semibold w-16">{r.symbol}</span>
-                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${TONE_CLASS[ratingTone(r.ratingKey)]}`}>
-                  {r.ratingLabel}
+                {/* Fixed pill column so every bar starts at the same x — a
+                    fixed-width track that floats left/right with the pill's
+                    label length can't be read as a column. */}
+                <span className="w-[92px] shrink-0">
+                  <RatingPill ratingKey={r.ratingKey} label={r.ratingLabel} />
                 </span>
+                {r.spread && <AnalystSpreadBar spread={r.spread} compact />}
+                {r.analystCount !== undefined && r.analystCount > 0 && (
+                  <span className="num text-xs text-fg-fade w-6 text-right shrink-0">
+                    {r.analystCount}
+                  </span>
+                )}
                 <span className="flex-1" />
                 <div className="text-right">
                   {r.target !== undefined && (
                     <div className="num text-sm text-fg-dim">Target ${fmtMoney(r.target)}</div>
                   )}
                   {r.upsidePct !== undefined && (
-                    <div className={`num text-sm ${r.upsidePct >= 0 ? "text-pos" : "text-neg"}`}>
+                    <div className={`num text-sm ${signedClass(r.upsidePct)}`}>
                       {signed(r.upsidePct)}
                     </div>
                   )}
@@ -252,18 +289,3 @@ function MoverList({ title, rows, tone, onPick }: { title: string; rows: Movers[
   );
 }
 
-function SkeletonRows() {
-  return (
-    <div className="space-y-2" aria-hidden>
-      {[0, 1, 2].map((i) => (
-        <div key={i} className="h-6 rounded bg-bg-3 animate-pulse motion-reduce:animate-none" />
-      ))}
-    </div>
-  );
-}
-function Empty({ children }: { children: React.ReactNode }) {
-  return <p className="text-fg-dim text-sm py-2">{children}</p>;
-}
-function Unavailable() {
-  return <p className="text-fg-fade text-sm py-2">Market data unavailable right now.</p>;
-}

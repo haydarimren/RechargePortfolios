@@ -1,8 +1,18 @@
 import { describe, it, expect } from "vitest";
 import {
   parseQuoteSummary, buildUpcomingDates, buildAnalystRatings, topMovers,
-  ratingLabel, ratingTone, type StockInsight,
+  ratingLabel, ratingTone, parseFinnhubRecommendation, spreadTotal,
+  spreadSegments, deriveRatingKey,
+  type StockInsight, type AnalystSpread,
 } from "./insights";
+
+/** Build a spread without spelling out every bucket. */
+function spread(p: Partial<AnalystSpread>): AnalystSpread {
+  return {
+    strongBuy: 0, buy: 0, hold: 0, sell: 0, strongSell: 0,
+    period: "2026-08-01", ...p,
+  };
+}
 
 describe("parseQuoteSummary", () => {
   const sample = {
@@ -67,6 +77,140 @@ describe("buildAnalystRatings", () => {
     expect(out[0]).toEqual({ symbol: "NVDA", ratingKey: "strong_buy", ratingLabel: "Strong Buy", target: 300, upsidePct: 50 });
     expect(out[1]).toMatchObject({ symbol: "MSFT", ratingKey: "none", ratingLabel: "None", target: undefined, upsidePct: undefined });
     expect(out[2]).toMatchObject({ symbol: "LUNR", ratingLabel: "None", upsidePct: undefined });
+  });
+});
+
+describe("parseFinnhubRecommendation", () => {
+  // Finnhub returns newest-first in practice, but the contract is "latest by
+  // period" — so the fixture is deliberately out of order.
+  const sample = [
+    { symbol: "IBM", period: "2026-06-01", strongBuy: 1, buy: 2, hold: 3, sell: 4, strongSell: 5 },
+    { symbol: "IBM", period: "2026-08-01", strongBuy: 5, buy: 10, hold: 4, sell: 2, strongSell: 0 },
+    { symbol: "IBM", period: "2026-07-01", strongBuy: 9, buy: 9, hold: 9, sell: 9, strongSell: 9 },
+  ];
+  it("picks the latest period", () => {
+    expect(parseFinnhubRecommendation(sample)).toEqual({
+      strongBuy: 5, buy: 10, hold: 4, sell: 2, strongSell: 0, period: "2026-08-01",
+    });
+  });
+  it("returns null for an empty array", () => {
+    expect(parseFinnhubRecommendation([])).toBeNull();
+  });
+  it("returns null for malformed payloads", () => {
+    expect(parseFinnhubRecommendation(null)).toBeNull();
+    expect(parseFinnhubRecommendation({ error: "no data" })).toBeNull();
+    expect(parseFinnhubRecommendation([{ period: "2026-08-01" }])).toBeNull();
+  });
+  it("treats missing buckets as zero", () => {
+    const r = parseFinnhubRecommendation([{ period: "2026-08-01", buy: 3, hold: 1 }])!;
+    expect(r).toEqual({ strongBuy: 0, buy: 3, hold: 1, sell: 0, strongSell: 0, period: "2026-08-01" });
+  });
+});
+
+describe("spreadTotal", () => {
+  it("sums every bucket", () => {
+    expect(spreadTotal(spread({ strongBuy: 5, buy: 10, hold: 4, sell: 2 }))).toBe(21);
+    expect(spreadTotal(spread({}))).toBe(0);
+  });
+});
+
+describe("deriveRatingKey", () => {
+  it("maps a lopsided bullish spread to strong_buy", () => {
+    expect(deriveRatingKey(spread({ strongBuy: 20, buy: 1 }))).toBe("strong_buy");
+  });
+  it("maps a lopsided bearish spread to strong_sell", () => {
+    expect(deriveRatingKey(spread({ strongSell: 20, sell: 1 }))).toBe("strong_sell");
+  });
+  // Score = (2·sb + b − s − 2·ss) / total. Cuts at ±0.5 and ±1.5, with the
+  // boundary value falling to the more extreme side; hold is the open
+  // interval between −0.5 and 0.5.
+  it("puts the +1.5 boundary in strong_buy and just below it in buy", () => {
+    expect(deriveRatingKey(spread({ strongBuy: 1, buy: 1 }))).toBe("strong_buy"); // 1.5
+    expect(deriveRatingKey(spread({ strongBuy: 1, buy: 2 }))).toBe("buy");        // 1.33
+  });
+  it("puts the +0.5 boundary in buy and just below it in hold", () => {
+    expect(deriveRatingKey(spread({ buy: 1, hold: 1 }))).toBe("buy");   // 0.5
+    expect(deriveRatingKey(spread({ buy: 1, hold: 2 }))).toBe("hold");  // 0.33
+  });
+  it("puts the −0.5 boundary in sell and just above it in hold", () => {
+    expect(deriveRatingKey(spread({ sell: 1, hold: 1 }))).toBe("sell");  // −0.5
+    expect(deriveRatingKey(spread({ sell: 1, hold: 2 }))).toBe("hold");  // −0.33
+  });
+  it("puts the −1.5 boundary in strong_sell and just above it in sell", () => {
+    expect(deriveRatingKey(spread({ sell: 1, strongSell: 1 }))).toBe("strong_sell"); // −1.5
+    expect(deriveRatingKey(spread({ sell: 2, strongSell: 1 }))).toBe("sell");        // −1.33
+  });
+  it("returns none when nobody covers the symbol", () => {
+    expect(deriveRatingKey(spread({}))).toBe("none");
+  });
+});
+
+describe("spreadSegments", () => {
+  // 5 / 10 / 4 / 2 / 0 out of 21 — the reference case from the design.
+  const s = spread({ strongBuy: 5, buy: 10, hold: 4, sell: 2, strongSell: 0 });
+  it("orders segments most bullish first", () => {
+    expect(spreadSegments(s).map((x) => x.key)).toEqual(["strongBuy", "buy", "hold", "sell"]);
+  });
+  it("drops zero buckets", () => {
+    expect(spreadSegments(s).some((x) => x.key === "strongSell")).toBe(false);
+    expect(spreadSegments(s).every((x) => x.count > 0)).toBe(true);
+  });
+  it("returns percentages of the fixed track that sum to 100", () => {
+    const segs = spreadSegments(s);
+    expect(segs.reduce((a, x) => a + x.pct, 0)).toBeCloseTo(100);
+    expect(segs[1].pct).toBeCloseTo((10 / 21) * 100);
+  });
+  it("normalizes to the track regardless of how many analysts cover it", () => {
+    // Two symbols with wildly different coverage but the same shape must
+    // produce identical geometry — the bar encodes distribution, not size.
+    const small = spreadSegments(spread({ buy: 1, hold: 1 }));
+    const large = spreadSegments(spread({ buy: 50, hold: 50 }));
+    expect(small.map((x) => x.pct)).toEqual(large.map((x) => x.pct));
+  });
+  it("labels only segments at or above 12% of the track", () => {
+    const segs = spreadSegments(s);
+    expect(segs.find((x) => x.key === "hold")!.showLabel).toBe(true);   // 19.0%
+    expect(segs.find((x) => x.key === "sell")!.showLabel).toBe(false);  // 9.5%
+  });
+  it("returns an empty list for a zero total", () => {
+    expect(spreadSegments(spread({}))).toEqual([]);
+  });
+});
+
+describe("buildAnalystRatings with Finnhub spreads", () => {
+  const by: Record<string, StockInsight | null> = {
+    NVDA: { recommendationKey: "strong_buy", targetMeanPrice: 300, analystCount: 42 },
+    MSFT: null,
+  };
+  const price = { NVDA: 200, MSFT: 400 };
+  const weight = { NVDA: 0.6, MSFT: 0.4 };
+  const spreads = {
+    NVDA: spread({ strongBuy: 30, buy: 10 }),
+    MSFT: spread({ buy: 8, hold: 4 }),
+  };
+  it("derives a pill for a symbol Yahoo does not cover", () => {
+    const out = buildAnalystRatings(by, price, weight, spreads);
+    const msft = out.find((r) => r.symbol === "MSFT")!;
+    expect(msft.ratingKey).toBe("buy");
+    expect(msft.ratingLabel).toBe("Buy");
+  });
+  it("keeps Yahoo's own rating when it has one", () => {
+    const out = buildAnalystRatings(by, price, weight, spreads);
+    expect(out.find((r) => r.symbol === "NVDA")!.ratingKey).toBe("strong_buy");
+  });
+  it("counts analysts from the spread it draws, not from Yahoo", () => {
+    const out = buildAnalystRatings(by, price, weight, spreads);
+    // Yahoo says 42, but the bar shows 40 — the number must match the bar.
+    expect(out.find((r) => r.symbol === "NVDA")!.analystCount).toBe(40);
+  });
+  it("falls back to Yahoo's count when there is no spread", () => {
+    const out = buildAnalystRatings(by, price, weight, {});
+    expect(out.find((r) => r.symbol === "NVDA")!.analystCount).toBe(42);
+    expect(out.find((r) => r.symbol === "NVDA")!.spread).toBeUndefined();
+  });
+  it("leaves the weight sort order untouched", () => {
+    expect(buildAnalystRatings(by, price, weight, spreads).map((r) => r.symbol))
+      .toEqual(["NVDA", "MSFT"]);
   });
 });
 
