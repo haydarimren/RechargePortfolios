@@ -14,6 +14,7 @@
  */
 
 import { proxyFetch as sharedProxyFetch } from "../proxy-fetch";
+import { resolveYahooSymbols } from "../../symbol-resolve";
 import type { ImportResult, IsOrderKnownFn } from "../types";
 import { cleanT212Symbol, toYahooSymbol } from "./symbols";
 
@@ -172,6 +173,37 @@ async function fetchOpenPositionTickers(
   }
 }
 
+/**
+ * Replace guessed Yahoo symbols with verified ones, in place.
+ *
+ * Deliberately non-fatal: if Yahoo is unreachable the orders keep their
+ * guessed symbols and the sync completes. A sync that fails because a
+ * price lookup service is down would be a worse trade than a position
+ * that's briefly unpriced — and the quote fetcher self-heals anyway.
+ */
+async function applyResolvedSymbols(
+  mapped: ImportResult["orders"],
+  guessed: Array<{ index: number; bare: string; currency?: string }>,
+): Promise<void> {
+  if (guessed.length === 0) return;
+  try {
+    const resolved = await resolveYahooSymbols(
+      guessed.map((g) => ({
+        bare: g.bare,
+        currency: g.currency,
+        candidate: mapped[g.index].yahooSymbol,
+      })),
+    );
+    for (const g of guessed) {
+      const key = `${g.bare.toUpperCase()}|${(g.currency ?? "").toUpperCase()}`;
+      const hit = resolved[key];
+      if (hit) mapped[g.index].yahooSymbol = hit.symbol;
+    }
+  } catch (err) {
+    console.warn("Yahoo symbol resolution failed; keeping guesses", err);
+  }
+}
+
 export async function fetchTrading212Orders(
   apiKey: string,
   /**
@@ -229,6 +261,16 @@ export async function fetchTrading212Orders(
 
   let sellsImported = 0;
   const mapped: ImportResult["orders"] = [];
+  /**
+   * Non-US listings whose Yahoo symbol we only *guessed*. T212's ticker
+   * carries a venue hint (`VNGA80i_EQ`) but Yahoo doesn't always file the
+   * instrument under that venue's ticker — the Vanguard LifeStrategy ETF
+   * is `VNGA80` on both Amsterdam and Milan, and Yahoo only keeps the
+   * ticker for Milan (`VNGA80.MI`; Amsterdam is `V80A.AS`). A wrong guess
+   * used to mean a permanently unpriced position, so verify the guess
+   * before storing it. Collected here and resolved in one batch below.
+   */
+  const guessed: Array<{ index: number; bare: string; currency?: string }> = [];
 
   for (const item of orders) {
     if (!isImportableT212Order(item, openTickers)) continue;
@@ -259,8 +301,20 @@ export async function fetchTrading212Orders(
       yahooSymbol,
       side: isSell ? "SELL" : "BUY",
     });
+    // `_US_EQ` tickers are unambiguous — the bare symbol is the Yahoo
+    // symbol. Everything else went through the venue heuristic and is
+    // worth verifying.
+    if (yahooSymbol && !/_US_EQ$/.test(order.ticker)) {
+      guessed.push({
+        index: mapped.length - 1,
+        bare: cleanT212Symbol(order.ticker),
+        currency: order.instrument?.currency,
+      });
+    }
     if (isSell) sellsImported++;
   }
+
+  await applyResolvedSymbols(mapped, guessed);
 
   return {
     orders: mapped,

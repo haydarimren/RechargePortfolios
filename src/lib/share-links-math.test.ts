@@ -28,8 +28,8 @@ const HOLDINGS: Holding[] = [
 ];
 
 const QUOTES = {
-  AAPL: { c: 180, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0 },
-  MSFT: { c: 500, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0 },
+  AAPL: { c: 180, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0, currency: "USD" },
+  MSFT: { c: 500, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0, currency: "USD" },
   // VUAA deliberately has no quote — must render as null like the friend view.
 };
 
