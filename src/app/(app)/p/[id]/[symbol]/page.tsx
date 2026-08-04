@@ -13,7 +13,13 @@ import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
 import { getQuote, StockQuote } from "@/lib/finnhub";
 import { HistoricalPoint } from "@/lib/yahoo";
-import { getCachedHistoricalCloses } from "@/lib/historical-cache";
+import { getCachedHistoricalSeries } from "@/lib/historical-cache";
+import {
+  convertHoldingsToUsd,
+  convertPointsToUsd,
+  quoteValueUsd,
+} from "@/lib/currency";
+import { useFxSeries } from "@/lib/use-fx";
 import { closeOnOrBefore, fmtShares, poolPositions } from "@/lib/portfolio";
 import { useChartColors } from "@/lib/theme";
 import { usePublishPortfolioOwnership } from "@/lib/portfolio-route";
@@ -196,6 +202,8 @@ export default function TickerPage({
   // (e.g. ASTS lot with yahooSymbol "NPA") must not leak into the price
   // fetch, or we 404 and the page looks broken. "Plausibly matches" =
   // starts with the route symbol (allows variants like "ASTS.L").
+  const fxSeries = useFxSeries(lots);
+
   const yahooSymbol = useMemo(() => {
     const route = symbol.toUpperCase();
     for (const l of lots) {
@@ -228,10 +236,17 @@ export default function TickerPage({
     const first = lots
       .map((l) => l.purchaseDate)
       .reduce((a, b) => (a < b ? a : b));
-    getCachedHistoricalCloses(yahooSymbol, new Date(first).getTime(), Date.now()).then(
-      setHistory
+    // Closes come back in the venue's own currency; restate them in USD
+    // so the price line, the purchase-date dots and the avg-cost line
+    // (all USD via `usdLots`) are on one scale.
+    getCachedHistoricalSeries(
+      yahooSymbol,
+      new Date(first).getTime(),
+      Date.now(),
+    ).then((ser) =>
+      setHistory(convertPointsToUsd(ser.points, ser.currency, fxSeries)),
     );
-  }, [lots, yahooSymbol]);
+  }, [lots, yahooSymbol, fxSeries]);
 
   const isOwner = !!(user && portfolio && portfolio.ownerId === user.uid);
   // Publish ownership to the AppShell so the right tab (Mine vs Friends)
@@ -262,9 +277,20 @@ export default function TickerPage({
     !keyAttempted &&
     encryption.state.kind === "unlocked";
 
+  /**
+   * Lots with their cost basis in USD, matching the portfolio page. A
+   * single-ticker page can't mix currencies with itself, but showing a
+   * GBP cost basis under a `$` — and a different number from the page
+   * that links here — is its own kind of wrong.
+   */
+  const usdLots = useMemo(
+    () => convertHoldingsToUsd(lots, fxSeries),
+    [lots, fxSeries],
+  );
+
   const pooled = useMemo(
-    () => poolPositions(lots).find((p) => p.symbol === symbol) ?? null,
-    [lots, symbol]
+    () => poolPositions(usdLots).find((p) => p.symbol === symbol) ?? null,
+    [usdLots, symbol]
   );
   const positionClosed = lots.length > 0 && pooled === null;
 
@@ -272,11 +298,17 @@ export default function TickerPage({
     const shares = pooled?.shares ?? 0;
     const avg = pooled?.avgPrice ?? 0;
     const cost = shares * avg;
-    const market = quote && shares > 0 ? shares * quote.c : null;
+    const market = shares > 0 ? quoteValueUsd(quote, shares, fxSeries) : null;
     const gain = market !== null ? market - cost : null;
     const gainPct = gain !== null && cost > 0 ? (gain / cost) * 100 : null;
     return { shares, cost, avg, market, gain, gainPct };
-  }, [pooled, quote]);
+  }, [pooled, quote, fxSeries]);
+
+  /** Live price per share, in USD like everything else on the page. */
+  const usdPrice = useMemo(
+    () => quoteValueUsd(quote, 1, fxSeries),
+    [quote, fxSeries],
+  );
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -348,7 +380,7 @@ export default function TickerPage({
   // price than the close (e.g. bought the open high, closed lower) looks
   // misleading: the dot snaps to close while the gain % is computed from
   // the real cost basis, so the two tell different stories.
-  const lotMarkers = lots.map((l) => {
+  const lotMarkers = usdLots.map((l) => {
     const isSell = l.side === "SELL";
     const hasClose = closeOnOrBefore(history, l.purchaseDate);
     if (hasClose !== null) {
@@ -449,8 +481,8 @@ export default function TickerPage({
                 <span className="text-[30px] font-bold text-fg tracking-tight leading-none tabular-nums">{symbol}</span>
               </div>
               <div className="mt-2 text-[12.5px] text-fg-fade font-medium flex items-center gap-2 flex-wrap">
-                {quote && quote.c > 0 && (
-                  <span className="text-base text-fg font-semibold tabular-nums">{fmtMoney(quote.c)}</span>
+                {usdPrice !== null && usdPrice > 0 && (
+                  <span className="text-base text-fg font-semibold tabular-nums">{fmtMoney(usdPrice)}</span>
                 )}
                 {quote && quote.dp != null && (
                   <span className={`inline-flex items-center gap-1 font-semibold ${quote.dp >= 0 ? "text-pos" : "text-neg"}`}>
@@ -670,10 +702,11 @@ export default function TickerPage({
                 <span className="text-right">Gain %</span>
               </div>
             )}
-            {lots.map((l, i) => {
+            {usdLots.map((l, i) => {
               const isSell = l.side === "SELL";
               const cost = l.shares * l.purchasePrice;
-              const market = !isSell && quote ? l.shares * quote.c : null;
+              const market =
+                !isSell ? quoteValueUsd(quote, l.shares, fxSeries) : null;
               const gain = market !== null ? market - cost : null;
               const gainPct =
                 gain !== null && cost > 0 ? (gain / cost) * 100 : null;

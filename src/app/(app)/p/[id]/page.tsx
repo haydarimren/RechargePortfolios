@@ -21,7 +21,16 @@ import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
 import { getQuotes, StockQuote } from "@/lib/finnhub";
 import { HistoricalPoint } from "@/lib/yahoo";
-import { getCachedHistoricalCloses } from "@/lib/historical-cache";
+import {
+  getCachedHistoricalCloses,
+  getCachedHistoricalSeries,
+} from "@/lib/historical-cache";
+import {
+  convertHoldingsToUsd,
+  convertPointsToUsd,
+  quoteValueUsd,
+} from "@/lib/currency";
+import { useFxSeries } from "@/lib/use-fx";
 import {
   aggregateHoldings,
   buildComparisonSeries,
@@ -403,6 +412,25 @@ export default function PortfolioPage({
     encryption.state.kind,
   ]);
 
+  const fxSeries = useFxSeries(holdings);
+
+  /**
+   * Holdings with every lot's cost basis restated in USD at the rate on
+   * its own purchase date. This is the single conversion point: pooling,
+   * the trade log, allocation, and the benchmark chart all read from
+   * here, so they can't drift into disagreeing about currency.
+   */
+  const usdHoldings = useMemo(
+    () => convertHoldingsToUsd(holdings, fxSeries),
+    [holdings, fxSeries],
+  );
+
+  /** A position's market value in USD, or null when it has no quote. */
+  const marketValueUsd = useMemo(() => {
+    return (symbol: string, shares: number): number | null =>
+      quoteValueUsd(quotes[symbol], shares, fxSeries);
+  }, [quotes, fxSeries]);
+
   useEffect(() => {
     const symbols = Array.from(new Set(holdings.map((h) => h.symbol)));
     if (symbols.length === 0) return;
@@ -436,11 +464,11 @@ export default function PortfolioPage({
   }, [holdings]);
 
   useEffect(() => {
-    if (holdings.length === 0) {
+    if (usdHoldings.length === 0) {
       setSeries([]);
       return;
     }
-    const pooled = poolPositions(holdings);
+    const pooled = poolPositions(usdHoldings);
     if (pooled.length === 0) {
       // Everything was sold — nothing to chart. Realized history is out of scope.
       setSeries([]);
@@ -461,13 +489,13 @@ export default function PortfolioPage({
     const fromMs = new Date(firstDate).getTime() - 14 * 24 * 60 * 60 * 1000;
     const toMs = Date.now();
     const symbols = Array.from(new Set(pooled.map((p) => p.symbol)));
-    const chartHoldings = holdings.filter(
+    const chartHoldings = usdHoldings.filter(
       (h) => h.purchaseDate >= firstDate && symbols.includes(h.symbol)
     );
     // Resolve display symbol → Yahoo query symbol for history fetches.
     // buildComparisonSeries still expects priceMap keyed by display symbol.
     const yahooBySymbol = new Map<string, string>();
-    for (const h of holdings) {
+    for (const h of usdHoldings) {
       if (h.yahooSymbol && !yahooBySymbol.has(h.symbol)) {
         yahooBySymbol.set(h.symbol, h.yahooSymbol);
       }
@@ -475,8 +503,17 @@ export default function PortfolioPage({
 
     Promise.all([
       ...symbols.map((s) =>
-        getCachedHistoricalCloses(yahooBySymbol.get(s) ?? s, fromMs, toMs).then(
-          (pts) => [s, pts] as [string, HistoricalPoint[]]
+        // `getCachedHistoricalSeries` reports the currency Yahoo quoted
+        // the closes in, which is what lets us restate them in USD before
+        // they're summed. The benchmark is a USD instrument, so a chart
+        // that mixed a London and a Milan line into the portfolio curve
+        // was comparing against nothing meaningful.
+        getCachedHistoricalSeries(yahooBySymbol.get(s) ?? s, fromMs, toMs).then(
+          (ser) =>
+            [s, convertPointsToUsd(ser.points, ser.currency, fxSeries)] as [
+              string,
+              HistoricalPoint[],
+            ]
         )
       ),
       ...BENCHMARKS.map((b) =>
@@ -502,7 +539,7 @@ export default function PortfolioPage({
     return () => {
       cancelled = true;
     };
-  }, [holdings]);
+  }, [usdHoldings, fxSeries]);
 
   const isOwner = !!(user && portfolio && portfolio.ownerId === user.uid);
   // The portfolio's locked broker, if any. Once any holding has an
@@ -585,18 +622,17 @@ export default function PortfolioPage({
   );
   const ownerName = useDisplayName(portfolio?.ownerId ?? null);
   const followerNames = useDisplayNamesForUids(portfolio?.sharedWith ?? []);
+
   const positions = useMemo(() => {
-    const rows = aggregateHoldings(holdings);
+    const rows = aggregateHoldings(usdHoldings);
     return rows.slice().sort((a, b) => {
-      const qa = quotes[a.symbol];
-      const qb = quotes[b.symbol];
-      const ma = qa ? a.shares * qa.c : -1;
-      const mb = qb ? b.shares * qb.c : -1;
+      const ma = marketValueUsd(a.symbol, a.shares) ?? -1;
+      const mb = marketValueUsd(b.symbol, b.shares) ?? -1;
       return mb - ma;
     });
-  }, [holdings, quotes]);
+  }, [usdHoldings, marketValueUsd]);
 
-  const tradeLog = useMemo(() => buildTradeLog(holdings), [holdings]);
+  const tradeLog = useMemo(() => buildTradeLog(usdHoldings), [usdHoldings]);
   const positionsCount = positions.length;
   const logbookCount = tradeLog.length;
   // Bump `lastPortfolioViewAt` once per page load for shared viewers. This
@@ -614,18 +650,39 @@ export default function PortfolioPage({
     }
   };
 
-  // Total current market value across positions with resolved quotes. Used to
-  // compute per-row allocation % in the owner positions table. Positions
-  // without a quote are excluded from the denominator so allocation adds to
-  // 100% of the "covered" portion.
+  // Total current market value (USD) across positions with resolved
+  // quotes — the denominator for per-row allocation %. Positions without
+  // a quote can't be valued, so they're excluded and the remaining rows
+  // add to 100% of the *priced* portion. That's only honest if the UI
+  // says so, hence `unpricedSymbols` below.
   const positionsTotalMarket = useMemo(() => {
     let total = 0;
     for (const p of positions) {
-      const q = quotes[p.symbol];
-      if (q) total += p.shares * q.c;
+      total += marketValueUsd(p.symbol, p.shares) ?? 0;
     }
     return total;
-  }, [positions, quotes]);
+  }, [positions, marketValueUsd]);
+
+  /**
+   * Positions we couldn't get a price for. Previously this failed
+   * silently: the row showed "…" and, far worse, the position vanished
+   * from the allocation denominator so a two-position portfolio with one
+   * dead quote rendered the survivor at a confident 100.0%.
+   */
+  const unpricedSymbols = useMemo(
+    () => positions.filter((p) => !quotes[p.symbol]).map((p) => p.symbol),
+    [positions, quotes],
+  );
+
+  /**
+   * Non-USD currencies actually converted for display. Surfaced so the
+   * numbers here being different from the broker's own screen is
+   * explained rather than mysterious.
+   */
+  const convertedCurrencies = useMemo(
+    () => Object.keys(fxSeries).sort(),
+    [fxSeries],
+  );
 
   const seriesTickFormatter = useMemo(() => {
     const spanMs =
@@ -657,15 +714,15 @@ export default function PortfolioPage({
     let market = 0;
     let firstDate: string | null = null;
     for (const p of positions) {
+      // `p.cost` is already USD — `positions` pools `usdHoldings`.
       cost += p.cost;
-      const q = quotes[p.symbol];
-      if (q) market += p.shares * q.c;
+      market += marketValueUsd(p.symbol, p.shares) ?? 0;
       if (!firstDate || p.firstDate < firstDate) firstDate = p.firstDate;
     }
     const gain = market - cost;
     const gainPct = cost > 0 ? (gain / cost) * 100 : 0;
     return { cost, market, gain, gainPct, firstDate };
-  }, [positions, quotes]);
+  }, [positions, marketValueUsd]);
 
   const benchGain = useMemo(() => {
     const last = series[series.length - 1];
@@ -685,15 +742,20 @@ export default function PortfolioPage({
 
   // Non-owner per-position stats: allocation % + gain %.
   const nonOwnerRows = useMemo(() => {
-    const totalMarket = positions.reduce((sum, p) => {
-      const q = quotes[p.symbol];
-      return q ? sum + p.shares * q.c : sum;
-    }, 0);
+    const totalMarket = positions.reduce(
+      (sum, p) => sum + (marketValueUsd(p.symbol, p.shares) ?? 0),
+      0,
+    );
     const rows = positions.map((p) => {
-      const q = quotes[p.symbol];
-      const market = q ? p.shares * q.c : null;
+      const market = marketValueUsd(p.symbol, p.shares);
+      // Both sides in USD: `avgPrice` comes from the converted pool, and
+      // the market value is converted at today's rate. Comparing a GBP
+      // quote against a USD cost basis is what made a flat position look
+      // like a 35% gain.
       const gainPct =
-        q && p.avgPrice > 0 ? ((q.c - p.avgPrice) / p.avgPrice) * 100 : null;
+        market !== null && p.cost > 0
+          ? ((market - p.cost) / p.cost) * 100
+          : null;
       return { symbol: p.symbol, market, gainPct };
     });
     return rows
@@ -706,7 +768,7 @@ export default function PortfolioPage({
         gainPct: r.gainPct,
       }))
       .sort((a, b) => (b.allocationPct ?? -1) - (a.allocationPct ?? -1));
-  }, [positions, quotes]);
+  }, [positions, marketValueUsd]);
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1285,12 +1347,17 @@ export default function PortfolioPage({
           />
 
           {tab === "insights" ? (
-            <InsightsTab portfolioId={id} positions={positions} quotes={quotes} />
+            <InsightsTab
+              portfolioId={id}
+              positions={positions}
+              quotes={quotes}
+              marketValue={marketValueUsd}
+            />
           ) : tab === "allocation" ? (
             <div className="bg-bg-2 border border-line rounded-card p-4 md:p-5">
               <AllocationTreemap
                 positions={positions}
-                quotes={quotes}
+                marketValue={marketValueUsd}
                 totalMarket={positionsTotalMarket}
                 isOwner={isOwner}
                 portfolioId={id}
@@ -1410,6 +1477,33 @@ export default function PortfolioPage({
             </div>
           ) : (
             <>
+              {(unpricedSymbols.length > 0 || convertedCurrencies.length > 0) && (
+                <div className="mb-3 flex flex-col gap-1.5 text-[11.5px] text-fg-fade leading-relaxed">
+                  {unpricedSymbols.length > 0 && (
+                    <p>
+                      No live price for{" "}
+                      <span className="text-fg-dim font-medium">
+                        {unpricedSymbols.join(", ")}
+                      </span>
+                      {" — "}
+                      {unpricedSymbols.length === 1 ? "it is" : "they are"} left
+                      out of the totals and allocation below, so the
+                      percentages cover only the priced positions.
+                    </p>
+                  )}
+                  {convertedCurrencies.length > 0 && (
+                    <p>
+                      Converted to USD from{" "}
+                      <span className="text-fg-dim font-medium">
+                        {convertedCurrencies.join(", ")}
+                      </span>
+                      {" — "}cost basis at each lot&rsquo;s purchase-date rate,
+                      market value at today&rsquo;s. Your broker shows these in
+                      their native currency.
+                    </p>
+                  )}
+                </div>
+              )}
               {!isOwner ? (
                 <div className="card overflow-hidden">
                   <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_auto] gap-4 px-3 py-2 border-b border-line">
@@ -1466,8 +1560,11 @@ export default function PortfolioPage({
                     <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Lots</span>
                   </div>
                   {positions.map((p) => {
-                    const q = quotes[p.symbol];
-                    const market = q ? p.shares * q.c : null;
+                    const market = marketValueUsd(p.symbol, p.shares);
+                    // Per-share "current" in USD too, so it lines up with
+                    // the USD avg cost in the cell beside it.
+                    const currentPrice =
+                      market !== null && p.shares > 0 ? market / p.shares : null;
                     const gain = market !== null ? market - p.cost : null;
                     const gainPct =
                       gain !== null && p.cost > 0 ? (gain / p.cost) * 100 : null;
@@ -1517,7 +1614,7 @@ export default function PortfolioPage({
                           {fmtMoney(p.avgPrice)}
                         </span>
                         <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
-                          {q ? fmtMoney(q.c) : "…"}
+                          {currentPrice !== null ? fmtMoney(currentPrice) : "…"}
                         </span>
                         <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
                           {fmtMoney(p.cost)}

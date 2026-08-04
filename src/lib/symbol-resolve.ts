@@ -246,6 +246,10 @@ export async function resolveYahooSymbols(
 export async function repairYahooSymbol(
   symbol: string,
 ): Promise<ResolvedSymbol | null> {
+  // Yahoo's synthetic instruments (`GBPUSD=X`, `ES=F`) have no venue
+  // suffix and no search presence worth probing — a failure there is a
+  // real outage, not a venue mismatch.
+  if (symbol.includes("=")) return null;
   const { bare } = splitYahooSymbol(symbol);
   const currency = inferCurrencyFromSymbol(symbol);
   const resolved = await resolveYahooSymbol(bare, currency, symbol);

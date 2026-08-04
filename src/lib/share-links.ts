@@ -32,7 +32,16 @@ import {
 } from "./crypto-client";
 import { buildSnapshotV1, type SnapshotV1 } from "./share-links-math";
 import { buildComparisonSeries, normalizeSeries, poolPositions } from "./portfolio";
-import { getCachedHistoricalCloses } from "./historical-cache";
+import {
+  getCachedHistoricalCloses,
+  getCachedHistoricalSeries,
+} from "./historical-cache";
+import {
+  convertHoldingsToUsd,
+  convertPointsToUsd,
+  currenciesInHoldings,
+  fxSymbol,
+} from "./currency";
 import type { HistoricalPoint } from "./yahoo";
 import type { Holding } from "./types";
 
@@ -130,12 +139,47 @@ export async function unwrapTokenForOwner(
  * holdings + the normalized benchmark curve (same pipeline the detail
  * page chart uses: buildComparisonSeries → normalizeSeries).
  */
+/**
+ * Daily {currency}→USD closes for every non-USD currency these holdings
+ * touch. Mirrors the `useFxSeries` hook the pages use — same cached
+ * fetch path, just callable outside React.
+ */
+async function loadFxSeries(
+  holdings: Holding[],
+): Promise<Record<string, HistoricalPoint[]>> {
+  const currencies = currenciesInHoldings(holdings);
+  if (currencies.length === 0) return {};
+  let firstDate: string | null = null;
+  for (const h of holdings) {
+    if (!firstDate || h.purchaseDate < firstDate) firstDate = h.purchaseDate;
+  }
+  if (!firstDate) return {};
+  const fromMs = new Date(firstDate).getTime() - 14 * 24 * 60 * 60 * 1000;
+  const toMs = Date.now();
+  const entries = await Promise.all(
+    currencies.map((ccy) =>
+      getCachedHistoricalCloses(fxSymbol(ccy), fromMs, toMs).then(
+        (pts) => [ccy, pts] as const,
+      ),
+    ),
+  );
+  return Object.fromEntries(entries.filter(([, pts]) => pts.length > 0));
+}
+
 export async function buildSnapshotForPortfolio(input: {
   holdings: Holding[];
   name: string;
   ownerName: string;
 }): Promise<SnapshotV1> {
-  const pooled = poolPositions(input.holdings);
+  // Restate everything in USD first. The snapshot is percent-only, but
+  // percentages of a sum that mixed GBP and EUR are just as wrong as the
+  // sum was — and the benchmark it's normalized against is a USD
+  // instrument. Fetched here rather than passed in so every caller of
+  // this builder inherits it.
+  const fxByCurrency = await loadFxSeries(input.holdings);
+  const holdings = convertHoldingsToUsd(input.holdings, fxByCurrency);
+
+  const pooled = poolPositions(holdings);
   let normalizedSeries: SnapshotV1["series"] = [];
   if (pooled.length > 0) {
     const firstDate = pooled
@@ -145,15 +189,19 @@ export async function buildSnapshotForPortfolio(input: {
     const toMs = Date.now();
     const symbols = Array.from(new Set(pooled.map((p) => p.symbol)));
     const yahooBySymbol = new Map<string, string>();
-    for (const h of input.holdings) {
+    for (const h of holdings) {
       if (h.yahooSymbol && !yahooBySymbol.has(h.symbol)) {
         yahooBySymbol.set(h.symbol, h.yahooSymbol);
       }
     }
     const results = await Promise.all([
       ...symbols.map((s) =>
-        getCachedHistoricalCloses(yahooBySymbol.get(s) ?? s, fromMs, toMs).then(
-          (pts) => [s, pts] as const,
+        getCachedHistoricalSeries(yahooBySymbol.get(s) ?? s, fromMs, toMs).then(
+          (ser) =>
+            [
+              s,
+              convertPointsToUsd(ser.points, ser.currency, fxByCurrency),
+            ] as const,
         ),
       ),
       ...BENCHMARKS.map((b) =>
@@ -169,13 +217,14 @@ export async function buildSnapshotForPortfolio(input: {
       else priceMap[key] = pts;
     }
     normalizedSeries = normalizeSeries(
-      buildComparisonSeries(input.holdings, priceMap, benchMap),
+      buildComparisonSeries(holdings, priceMap, benchMap),
     );
   }
   return buildSnapshotV1({
     name: input.name,
     ownerName: input.ownerName,
-    holdings: input.holdings,
+    holdings,
+    nativeHoldings: input.holdings,
     normalizedSeries,
     asOf: Date.now(),
   });
