@@ -6,11 +6,17 @@ import { ResponsiveContainer, Tooltip, Treemap } from "recharts";
 
 import { useChartColors } from "@/lib/theme";
 import type { TickerPosition } from "@/lib/portfolio";
-import type { StockQuote } from "@/lib/finnhub";
 
 interface AllocationTreemapProps {
   positions: TickerPosition[];
-  quotes: Record<string, StockQuote | null | undefined>;
+  /**
+   * Market value of a position in the display currency, or null when it
+   * has no quote. Passed in rather than derived from raw quotes here:
+   * a portfolio can hold a London line quoted in GBP next to a Milan
+   * line quoted in EUR, and `shares * quote.c` would size the tiles by
+   * two different currencies at once.
+   */
+  marketValue: (symbol: string, shares: number) => number | null;
   totalMarket: number;
   isOwner: boolean;
   portfolioId: string;
@@ -67,7 +73,7 @@ function fmtPct(n: number): string {
 
 export function AllocationTreemap({
   positions,
-  quotes,
+  marketValue,
   totalMarket,
   isOwner,
   portfolioId,
@@ -78,10 +84,8 @@ export function AllocationTreemap({
   const tiles = useMemo<Tile[]>(() => {
     const out: Tile[] = [];
     for (const p of positions) {
-      const q = quotes[p.symbol];
-      if (!q) continue;
-      const market = p.shares * q.c;
-      if (market <= 0) continue;
+      const market = marketValue(p.symbol, p.shares);
+      if (market === null || market <= 0) continue;
       const gain = market - p.cost;
       const gainPct = p.cost > 0 ? (gain / p.cost) * 100 : null;
       const allocationPct =
@@ -98,7 +102,7 @@ export function AllocationTreemap({
       });
     }
     return out.sort((a, b) => b.market - a.market);
-  }, [positions, quotes, totalMarket]);
+  }, [positions, marketValue, totalMarket]);
 
   function colorFor(gainPct: number | null): string {
     if (gainPct === null) return colors.tileNeutral;

@@ -20,9 +20,11 @@ export interface SnapshotPosition {
   yahooSymbol?: string;
   /** Cost-basis weight, % of total cost. */
   weightPct: number;
-  /** Section-104 pool average cost per share — the live-% baseline.
-   *  Equivalent information to a published gain % (price/(1+gain%)),
-   *  reveals price paid per share, never position size. */
+  /** Section-104 pool average cost per share, in the listing's own
+   *  trading currency — the live-% baseline, always divided into a
+   *  quote from the same listing. Equivalent information to a published
+   *  gain % (price/(1+gain%)), reveals price paid per share, never
+   *  position size. */
   avgCost: number;
 }
 
@@ -39,12 +41,31 @@ export interface SnapshotV1 {
 export function buildSnapshotV1(input: {
   name: string;
   ownerName: string;
+  /**
+   * Holdings in the display currency (USD). Drives `weightPct`, which
+   * compares positions against each other and so has to be in one
+   * currency.
+   */
   holdings: Holding[];
+  /**
+   * The same holdings in their *native* trading currencies, when they
+   * differ. `avgCost` is published from these on purpose: the viewer
+   * side only ever uses it as a denominator against a live quote or a
+   * public close, both of which arrive in the listing's own currency.
+   * A USD baseline over a GBP quote would read the exchange rate as a
+   * 25% loss. The ratio is currency-neutral either way — what matters
+   * is that both sides of it agree.
+   */
+  nativeHoldings?: Holding[];
   normalizedSeries: SeriesPoint[];
   asOf: number;
 }): SnapshotV1 {
   const pooled = poolPositions(input.holdings);
   const totalCost = pooled.reduce((a, p) => a + p.shares * p.avgPrice, 0);
+  const nativeAvgCost = new Map<string, number>();
+  for (const p of poolPositions(input.nativeHoldings ?? input.holdings)) {
+    nativeAvgCost.set(p.symbol, p.avgPrice);
+  }
   const yahooBySymbol = new Map<string, string>();
   for (const h of input.holdings) {
     if (h.yahooSymbol && !yahooBySymbol.has(h.symbol)) {
@@ -57,7 +78,7 @@ export function buildSnapshotV1(input: {
       symbol: p.symbol,
       ...(ys && ys !== p.symbol ? { yahooSymbol: ys } : {}),
       weightPct: totalCost > 0 ? ((p.shares * p.avgPrice) / totalCost) * 100 : 0,
-      avgCost: p.avgPrice,
+      avgCost: nativeAvgCost.get(p.symbol) ?? p.avgPrice,
     };
   });
   return {

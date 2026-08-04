@@ -8,6 +8,8 @@ import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
 import { aggregateHoldings, buildTradeLog } from "@/lib/portfolio";
 import { getQuotes, StockQuote } from "@/lib/finnhub";
+import { convertHoldingsToUsd, quoteValueUsd } from "@/lib/currency";
+import { useFxSeries } from "@/lib/use-fx";
 import { useEncryption } from "@/lib/use-encryption";
 import { getAllCachedPortfolioKeys, getUnlocked } from "@/lib/key-store";
 import {
@@ -159,6 +161,13 @@ export default function FriendsPage() {
   // 5. Quotes
   const [quotes, setQuotes] = useState<Record<string, StockQuote | null>>({});
 
+  // One FX series per currency covers every friend's card on this grid.
+  const allHoldings = useMemo(
+    () => Object.values(holdingsByPortfolio).flat(),
+    [holdingsByPortfolio],
+  );
+  const fxSeries = useFxSeries(allHoldings);
+
   // Display symbol → Yahoo query symbol (for tickers with yahooSymbol override)
   const yahooBySymbol = useMemo(() => {
     const m = new Map<string, string>();
@@ -264,13 +273,16 @@ export default function FriendsPage() {
     const out: Record<string, FriendPortfolioCardSummary> = {};
     for (const p of shared ?? []) {
       const holdings = holdingsByPortfolio[p.id] ?? [];
-      const positions = aggregateHoldings(holdings);
+      // Same USD normalization as the owner's own view, so a friend's
+      // card and the portfolio page behind it report one number.
+      const positions = aggregateHoldings(
+        convertHoldingsToUsd(holdings, fxSeries),
+      );
       let totalCost = 0;
       let totalValue = 0;
       for (const pos of positions) {
         totalCost += pos.cost;
-        const q = quotes[pos.symbol];
-        if (q) totalValue += pos.shares * q.c;
+        totalValue += quoteValueUsd(quotes[pos.symbol], pos.shares, fxSeries) ?? 0;
       }
       const lifetimeGainPct = totalCost > 0 ? ((totalValue - totalCost) / totalCost) * 100 : 0;
       out[p.id] = {
@@ -282,7 +294,7 @@ export default function FriendsPage() {
       };
     }
     return out;
-  }, [shared, holdingsByPortfolio, quotes]);
+  }, [shared, holdingsByPortfolio, quotes, fxSeries]);
 
   // 9. Subtab state — driven by ?view=activity in the URL so deep-links and
   // back-button navigation preserve the user's place. Defaults to "portfolios".

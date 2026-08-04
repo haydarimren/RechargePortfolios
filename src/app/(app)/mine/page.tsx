@@ -17,6 +17,9 @@ import { auth, db } from "@/lib/firebase";
 import { Holding, Portfolio } from "@/lib/types";
 import { aggregateHoldings } from "@/lib/portfolio";
 import { getQuotes, StockQuote } from "@/lib/finnhub";
+import { HistoricalPoint } from "@/lib/yahoo";
+import { convertHoldingsToUsd, quoteValueUsd } from "@/lib/currency";
+import { useFxSeries } from "@/lib/use-fx";
 import { useEncryption } from "@/lib/use-encryption";
 import {
   getAllCachedPortfolioKeys,
@@ -240,6 +243,14 @@ export default function MinePage() {
   // 6. Quotes
   const [quotes, setQuotes] = useState<Record<string, StockQuote | null>>({});
 
+  // One FX series per currency covers every card on the grid, so a
+  // portfolio's value here matches the portfolio page it links to.
+  const allHoldings = useMemo(
+    () => Object.values(holdingsByPortfolio).flat(),
+    [holdingsByPortfolio],
+  );
+  const fxSeries = useFxSeries(allHoldings);
+
   // Display symbol → Yahoo query symbol (for tickers with yahooSymbol override).
   const yahooBySymbol = useMemo(() => {
     const m = new Map<string, string>();
@@ -429,9 +440,9 @@ export default function MinePage() {
   const summaries: PortfolioCardSummary[] = useMemo(() => {
     if (!mine) return [];
     return mine.map((p) =>
-      buildSummary(p, holdingsByPortfolio[p.id] ?? [], quotes),
+      buildSummary(p, holdingsByPortfolio[p.id] ?? [], quotes, fxSeries),
     );
-  }, [mine, holdingsByPortfolio, quotes]);
+  }, [mine, holdingsByPortfolio, quotes, fxSeries]);
 
   // 10. Resolve follower display names
   const followerUids = useMemo(
@@ -613,15 +624,19 @@ function buildSummary(
   p: Portfolio,
   holdings: Holding[],
   quotes: Record<string, StockQuote | null>,
+  fxSeries: Record<string, HistoricalPoint[]>,
 ): PortfolioCardSummary {
-  const positions = aggregateHoldings(holdings);
+  // Restate every lot in USD before pooling, and value each position at
+  // its own quote currency's rate. A card that added a GBP market value
+  // to a EUR one showed a total in no currency at all — and disagreed
+  // with the portfolio page it links to.
+  const positions = aggregateHoldings(convertHoldingsToUsd(holdings, fxSeries));
   let totalCost = 0;
   let totalValue = 0;
   for (const pos of positions) {
     // `cost` on TickerPosition is the aggregated cost basis.
     totalCost += pos.cost;
-    const q = quotes[pos.symbol];
-    if (q) totalValue += pos.shares * q.c;
+    totalValue += quoteValueUsd(quotes[pos.symbol], pos.shares, fxSeries) ?? 0;
   }
   const pl = totalValue - totalCost;
   const plPct = totalCost > 0 ? (pl / totalCost) * 100 : 0;

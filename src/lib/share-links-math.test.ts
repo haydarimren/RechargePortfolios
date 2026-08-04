@@ -28,8 +28,8 @@ const HOLDINGS: Holding[] = [
 ];
 
 const QUOTES = {
-  AAPL: { c: 180, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0 },
-  MSFT: { c: 500, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0 },
+  AAPL: { c: 180, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0, currency: "USD" },
+  MSFT: { c: 500, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0, currency: "USD" },
   // VUAA deliberately has no quote — must render as null like the friend view.
 };
 
@@ -166,5 +166,77 @@ describe("extendSeries", () => {
   it("returns [] when the snapshot series is empty", () => {
     const s = { ...snap(), series: [] };
     expect(extendSeries(s, PRICES, { SPY, QQQ })).toEqual([]);
+  });
+});
+
+describe("multi-currency snapshots", () => {
+  const USD_HOLDINGS = [
+    { id: "a", symbol: "VUAA", shares: 10, purchasePrice: 130, purchaseDate: "2026-06-01", yahooSymbol: "VUAG.L", currency: "GBX" },
+    { id: "b", symbol: "VNGA80", shares: 100, purchasePrice: 44, purchaseDate: "2026-06-01", yahooSymbol: "VNGA80.MI", currency: "EUR" },
+  ] as Holding[];
+  // Same lots before conversion: £100/share and €40/share.
+  const NATIVE_HOLDINGS = [
+    { ...USD_HOLDINGS[0], purchasePrice: 100 },
+    { ...USD_HOLDINGS[1], purchasePrice: 40 },
+  ] as Holding[];
+
+  it("weights positions in the display currency", () => {
+    const snap = buildSnapshotV1({
+      name: "n",
+      ownerName: "o",
+      holdings: USD_HOLDINGS,
+      nativeHoldings: NATIVE_HOLDINGS,
+      normalizedSeries: [],
+      asOf: 0,
+    });
+    const byS = Object.fromEntries(snap.positions.map((p) => [p.symbol, p]));
+    // USD costs are 1300 and 4400 -> 22.8% / 77.2%. Weighting on the raw
+    // native numbers (1000 vs 4000) would give 20% / 80%.
+    expect(byS.VUAA.weightPct).toBeCloseTo((1300 / 5700) * 100, 6);
+    expect(byS.VNGA80.weightPct).toBeCloseTo((4400 / 5700) * 100, 6);
+  });
+
+  it("publishes avgCost in the listing's own currency", () => {
+    const snap = buildSnapshotV1({
+      name: "n",
+      ownerName: "o",
+      holdings: USD_HOLDINGS,
+      nativeHoldings: NATIVE_HOLDINGS,
+      normalizedSeries: [],
+      asOf: 0,
+    });
+    const byS = Object.fromEntries(snap.positions.map((p) => [p.symbol, p]));
+    expect(byS.VUAA.avgCost).toBe(100);
+    expect(byS.VNGA80.avgCost).toBe(40);
+  });
+
+  it("keeps the viewer's live gain % currency-consistent", () => {
+    // The regression this guards: a USD baseline divided into a GBP quote
+    // reads the exchange rate as a loss. Quote is flat vs cost, so the
+    // viewer must see ~0%, not -23%.
+    const snap = buildSnapshotV1({
+      name: "n",
+      ownerName: "o",
+      holdings: USD_HOLDINGS,
+      nativeHoldings: NATIVE_HOLDINGS,
+      normalizedSeries: [],
+      asOf: 0,
+    });
+    const rows = liveRowsFromSnapshot(snap, {
+      VUAA: { c: 100, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0, currency: "GBP" },
+      VNGA80: { c: 40, d: 0, dp: 0, h: 0, l: 0, o: 0, pc: 0, currency: "EUR" },
+    });
+    for (const r of rows) expect(r.gainPct).toBeCloseTo(0, 9);
+  });
+
+  it("falls back to the display-currency avgCost when no native lots are given", () => {
+    const snap = buildSnapshotV1({
+      name: "n",
+      ownerName: "o",
+      holdings: USD_HOLDINGS,
+      normalizedSeries: [],
+      asOf: 0,
+    });
+    expect(snap.positions.find((p) => p.symbol === "VUAA")?.avgCost).toBe(130);
   });
 });

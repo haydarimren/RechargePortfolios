@@ -15,6 +15,9 @@
  * fallback.
  */
 
+import { normalizeQuoteCurrency } from "./symbol-candidates";
+import { repairYahooSymbol } from "./symbol-resolve";
+
 /** Max concurrent Yahoo requests. Empirically 6+ starts hitting 429s. */
 const CONCURRENCY = 5;
 
@@ -48,6 +51,16 @@ export interface StockQuote {
   l: number; // Low price of the day
   o: number; // Open price of the day
   pc: number; // Previous close
+  /**
+   * Major-unit currency the prices above are quoted in (`GBP`, `EUR`,
+   * `USD`, …). Empty when Yahoo didn't say. Callers MUST convert before
+   * summing across positions — a portfolio holding one LSE and one Milan
+   * listing was previously adding pounds to euros.
+   *
+   * Prices are already normalized out of Yahoo's minor units, so a `GBp`
+   * (pence) quote arrives here as GBP with `c` divided by 100.
+   */
+  currency: string;
 }
 
 async function fetchV8Single(symbol: string): Promise<StockQuote | null> {
@@ -70,16 +83,23 @@ async function fetchV8Single(symbol: string): Promise<StockQuote | null> {
       return null;
     }
     const meta = result.meta ?? {};
-    const c: number = meta.regularMarketPrice ?? 0;
-    const pc: number = meta.chartPreviousClose ?? meta.previousClose ?? c;
+    // Yahoo quotes some venues in minor units (LSE pence come back as
+    // `GBp`). Divide those out here so every consumer sees major units
+    // and can compare against a broker-reported cost basis.
+    const { currency, divisor } = normalizeQuoteCurrency(meta.currency);
+    const c: number = (meta.regularMarketPrice ?? 0) / divisor;
+    const pc: number =
+      (meta.chartPreviousClose ?? meta.previousClose ?? meta.regularMarketPrice ?? 0) /
+        divisor || c;
     return {
       c,
       d: c - pc,
       dp: pc > 0 ? ((c - pc) / pc) * 100 : 0,
-      h: meta.regularMarketDayHigh ?? c,
-      l: meta.regularMarketDayLow ?? c,
+      h: (meta.regularMarketDayHigh ?? 0) / divisor || c,
+      l: (meta.regularMarketDayLow ?? 0) / divisor || c,
       o: c,
       pc,
+      currency,
     };
   } catch (err) {
     console.warn(`Yahoo quote ${symbol}: ${(err as Error).message}`);
@@ -94,9 +114,25 @@ export async function getQuotes(
   const uniq = Array.from(new Set(symbols));
   const results = await mapWithConcurrency(uniq, CONCURRENCY, fetchV8Single);
   const out: Record<string, StockQuote | null> = {};
+  const dead: string[] = [];
   uniq.forEach((s, i) => {
     out[s] = results[i];
+    if (!results[i]) dead.push(s);
   });
+
+  // Second pass: a symbol that returns nothing is usually not a delisting
+  // but a venue mismatch — the broker's ticker heuristic picked a venue
+  // Yahoo files under a different symbol (`VNGA80.DE` doesn't exist;
+  // `VNGA80.MI` does). Resolve and refetch so the position gets a price
+  // without waiting for a re-sync to correct the stored symbol.
+  if (dead.length > 0) {
+    await mapWithConcurrency(dead, CONCURRENCY, async (s) => {
+      const repaired = await repairYahooSymbol(s);
+      if (!repaired) return;
+      const q = await fetchV8Single(repaired.symbol);
+      if (q) out[s] = q;
+    });
+  }
   return out;
 }
 

@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildIsinSymbolMap,
   isImportableT212Order,
+  lookupIsinSymbol,
   pageFullyImported,
+  type T212Instrument,
   type T212OrderItem,
 } from "./sync";
 
@@ -63,5 +66,60 @@ describe("pageFullyImported", () => {
   it("does NOT stop on an all-cancelled page (can't conclude)", () => {
     const page = [t212({ id: 1, status: "CANCELLED", filledAt: null })];
     expect(pageFullyImported(page, null, knownAll)).toBe(false);
+  });
+});
+
+describe("ISIN → display symbol", () => {
+  // The real shape of the collision: one fund, one ISIN, two LSE lines.
+  const VANGUARD: T212Instrument[] = [
+    { ticker: "VUAGl_EQ", isin: "IE00BFMXXD54", shortName: "VUAG", currencyCode: "GBX" },
+    { ticker: "VUAAl_EQ", isin: "IE00BFMXXD54", shortName: "VUAA", currencyCode: "USD" },
+  ];
+
+  it("labels a GBP order with the GBP line, not the USD one", () => {
+    const map = buildIsinSymbolMap(VANGUARD);
+    expect(lookupIsinSymbol(map, "IE00BFMXXD54", "GBX")).toBe("VUAG");
+  });
+
+  it("labels a USD order of the same ISIN with the USD line", () => {
+    const map = buildIsinSymbolMap(VANGUARD);
+    expect(lookupIsinSymbol(map, "IE00BFMXXD54", "USD")).toBe("VUAA");
+  });
+
+  it("treats GBX and GBP as the same listing", () => {
+    const map = buildIsinSymbolMap(VANGUARD);
+    expect(lookupIsinSymbol(map, "IE00BFMXXD54", "GBP")).toBe("VUAG");
+  });
+
+  it("is order-independent — a USD listing no longer overwrites the others", () => {
+    const reversed = buildIsinSymbolMap([...VANGUARD].reverse());
+    expect(lookupIsinSymbol(reversed, "IE00BFMXXD54", "GBX")).toBe("VUAG");
+  });
+
+  it("still heals a stale pre-merger ticker (ASTS ← NPA)", () => {
+    // T212 keeps reporting orders under the old ticker; the metadata
+    // carries the current one against the same ISIN, both in USD.
+    const map = buildIsinSymbolMap([
+      { ticker: "ASTS_US_EQ", isin: "US00214Q1040", shortName: "ASTS", currencyCode: "USD" },
+    ]);
+    expect(lookupIsinSymbol(map, "US00214Q1040", "USD")).toBe("ASTS");
+  });
+
+  it("falls back to the ISIN-only entry when the currency is unknown", () => {
+    const map = buildIsinSymbolMap(VANGUARD);
+    expect(lookupIsinSymbol(map, "IE00BFMXXD54", undefined)).toBe("VUAA");
+  });
+
+  it("returns undefined without an ISIN, leaving the caller on its own ticker", () => {
+    const map = buildIsinSymbolMap(VANGUARD);
+    expect(lookupIsinSymbol(map, undefined, "GBX")).toBeUndefined();
+    expect(lookupIsinSymbol(map, "NOT_LISTED", "GBX")).toBeUndefined();
+  });
+
+  it("skips instruments with no ISIN", () => {
+    const map = buildIsinSymbolMap([
+      { ticker: "X_EQ", isin: "", shortName: "X", currencyCode: "USD" },
+    ]);
+    expect(map.size).toBe(0);
   });
 });

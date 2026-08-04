@@ -26,11 +26,18 @@ function signed(n: number): string {
 }
 
 export function InsightsTab({
-  portfolioId, positions, quotes,
+  portfolioId, positions, quotes, marketValue,
 }: {
   portfolioId: string;
   positions: TickerPosition[];
   quotes: Record<string, StockQuote | null>;
+  /**
+   * Position market value in the display currency, or null when
+   * unpriced. Portfolio weights have to be computed from a single
+   * currency; `shares * quote.c` mixes whatever venues the holdings
+   * happen to sit on.
+   */
+  marketValue: (symbol: string, shares: number) => number | null;
 }) {
   const router = useRouter();
 
@@ -77,26 +84,34 @@ export function InsightsTab({
   const { priceBySymbol, weightBySymbol, moverRows } = useMemo(() => {
     let totalMarket = 0;
     for (const p of positions) {
-      const q = quotes[p.symbol];
-      if (q) totalMarket += p.shares * q.c;
+      totalMarket += marketValue(p.symbol, p.shares) ?? 0;
     }
     const price: Record<string, number | undefined> = {};
     const weight: Record<string, number> = {};
     const rows: Array<{ symbol: string; dailyPct: number; returnPct: number }> = [];
     for (const p of positions) {
       const q = quotes[p.symbol];
+      // Deliberately the NATIVE quote price: it's only compared against
+      // Yahoo's analyst target, which is quoted in the same listing
+      // currency. Converting one side and not the other would be worse
+      // than leaving both alone.
       price[p.symbol] = q?.c;
-      weight[p.symbol] = q && totalMarket > 0 ? (p.shares * q.c) / totalMarket : 0;
-      if (q && p.avgPrice > 0) {
+      const market = marketValue(p.symbol, p.shares);
+      weight[p.symbol] =
+        market !== null && totalMarket > 0 ? market / totalMarket : 0;
+      if (q && market !== null && p.cost > 0) {
         rows.push({
           symbol: p.symbol,
           dailyPct: q.dp,
-          returnPct: ((q.c - p.avgPrice) / p.avgPrice) * 100,
+          // Both sides in the display currency — `p.cost` comes from the
+          // converted pool, so comparing it to a native quote would read
+          // the FX difference as return.
+          returnPct: ((market - p.cost) / p.cost) * 100,
         });
       }
     }
     return { priceBySymbol: price, weightBySymbol: weight, moverRows: rows };
-  }, [positions, quotes]);
+  }, [positions, quotes, marketValue]);
 
   const upcoming = useMemo(
     () => (insights ? buildUpcomingDates(insights, todayISO).slice(0, 8) : []),
