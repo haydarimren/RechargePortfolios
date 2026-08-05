@@ -6,6 +6,7 @@ import { ResponsiveContainer, Tooltip, Treemap } from "recharts";
 
 import { useChartColors } from "@/lib/theme";
 import type { TickerPosition } from "@/lib/portfolio";
+import { fmtMoney, fmtPct } from "@/lib/format";
 
 interface AllocationTreemapProps {
   positions: TickerPosition[];
@@ -58,17 +59,6 @@ function lerpHex(a: string, b: string, t: number): string {
   const [ar, ag, ab] = hexToRgb(a);
   const [br, bg, bb] = hexToRgb(b);
   return rgbToHex(ar + (br - ar) * t, ag + (bg - ag) * t, ab + (bb - ab) * t);
-}
-
-function fmtMoney(n: number): string {
-  return `$${n.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
-
-function fmtPct(n: number): string {
-  return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 }
 
 export function AllocationTreemap({
