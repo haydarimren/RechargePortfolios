@@ -1196,8 +1196,13 @@ export default function PortfolioPage({
                 if (tid === "logbook") markLogbookSeen();
               }}
             />
-            <div className="lg:grid lg:grid-cols-[1.45fr_1fr] lg:items-start lg:gap-[18px]">
-              <div className={mobileTab === "holdings" ? "" : "hidden lg:block"}>
+            {/* One fixed-height row on desktop so both columns end on the
+                same line no matter how much chrome each card carries; the
+                cards flex into it and scroll their own rows. */}
+            <div className="lg:grid lg:h-[calc(100dvh-330px)] lg:min-h-[460px] lg:grid-cols-[1.45fr_1fr] lg:gap-[18px]">
+              <div
+                className={`${mobileTab === "holdings" ? "" : "hidden lg:block"} lg:flex lg:min-h-0 lg:flex-col`}
+              >
                 <HoldingsCard
                   positions={positions}
                   marketValue={marketValueUsd}
@@ -1210,10 +1215,11 @@ export default function PortfolioPage({
                   datesDegraded={datesDegraded}
                   ratingsDegraded={ratingsDegraded}
                   onPickSymbol={goSymbol}
+                  className="lg:min-h-0 lg:flex-1"
                 />
               </div>
               <div
-                className={`${mobileTab === "logbook" ? "" : "hidden lg:block"} mt-4 lg:mt-0`}
+                className={`${mobileTab === "logbook" ? "" : "hidden lg:block"} mt-4 lg:mt-0 lg:flex lg:min-h-0 lg:flex-col`}
               >
                 <LogbookCard
                   trades={recentTrades}
@@ -1224,6 +1230,7 @@ export default function PortfolioPage({
                     markLogbookSeen();
                   }}
                   onPickSymbol={goSymbol}
+                  className="lg:min-h-0 lg:flex-1"
                 />
                 <SyncHistory
                   portfolioId={id}

@@ -61,6 +61,42 @@ function lerpHex(a: string, b: string, t: number): string {
   return rgbToHex(ar + (br - ar) * t, ag + (bg - ag) * t, ab + (bb - ab) * t);
 }
 
+/**
+ * WCAG relative luminance, used to pick ink that actually reads on a tile.
+ * Tiles lerp from a *light* neutral toward a saturated endpoint, so anything
+ * near break-even lands pale — a single white text color could not read on
+ * both ends, which is what made the map hard to scan. Ink is chosen per tile.
+ */
+function luminance(hex: string): number {
+  const lin = hexToRgb(hex).map((c) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+
+/** WCAG contrast ratio between two luminances. */
+function contrast(a: number, b: number): number {
+  const [hi, lo] = a > b ? [a, b] : [b, a];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * One ink per tile — whichever of black/white actually contrasts better with
+ * this fill, rather than a hand-picked lightness threshold. Self-correcting
+ * across both themes and any future palette change; the mid-tone sage and
+ * clay tiles sit exactly where a guessed cutoff gets it wrong.
+ *
+ * The gain figure deliberately does NOT get its own green/red: the tile's
+ * fill already encodes direction and magnitude, and a saturated hue on a
+ * mid-tone fill cannot clear 4.5:1 no matter which one is chosen. Hierarchy
+ * comes from size and weight instead.
+ */
+function inkFor(fill: string): string {
+  const l = luminance(fill);
+  return contrast(l, 1) >= contrast(l, 0) ? "#ffffff" : "#000000";
+}
+
 export function AllocationTreemap({
   positions,
   marketValue,
@@ -138,8 +174,20 @@ export function AllocationTreemap({
     if (depth !== 1 || !symbol) return null;
 
     const fill = colorFor(gainPct ?? null);
-    const showLabel = width >= 64 && height >= 36;
-    const showSub = width >= 96 && height >= 58;
+    const ink = inkFor(fill);
+
+    // Type scales with the tile so small slices still get a ticker instead of
+    // rendering as anonymous colored blocks. The label only appears once it
+    // actually fits: a symbol needs roughly 0.62em per character.
+    const symbolSize = width >= 110 && height >= 56 ? 13 : width >= 70 ? 11 : 9.5;
+    const pad = symbolSize >= 13 ? 12 : symbolSize >= 11 ? 8 : 5;
+    const showLabel =
+      width >= symbol.length * symbolSize * 0.62 + pad * 2 &&
+      height >= symbolSize + pad * 2;
+    // The sub-line needs a second row plus room for "100.0% +999.99%".
+    const subSize = symbolSize >= 13 ? 11 : 9.5;
+    const showSub =
+      showLabel && width >= 88 && height >= symbolSize + subSize + pad * 2 + 8;
 
     return (
       <g
@@ -157,11 +205,11 @@ export function AllocationTreemap({
         />
         {showLabel && (
           <text
-            x={x + 12}
-            y={y + 22}
-            fill={colors.tileText}
+            x={x + pad}
+            y={y + pad + symbolSize * 0.85}
+            fill={ink}
             stroke="none"
-            fontSize={13}
+            fontSize={symbolSize}
             fontWeight={600}
             letterSpacing="0.02em"
             style={{ fontFamily: "var(--font-sans)" }}
@@ -171,26 +219,21 @@ export function AllocationTreemap({
         )}
         {showSub && (
           <text
-            x={x + 12}
-            y={y + 40}
+            x={x + pad}
+            y={y + pad + symbolSize * 0.85 + subSize + 5}
             stroke="none"
-            fontSize={11}
+            fontSize={subSize}
             style={{
               fontFamily: "var(--font-mono)",
               fontVariantNumeric: "tabular-nums",
               letterSpacing: "0.01em",
             }}
           >
-            <tspan fill={colors.tileTextDim}>
+            <tspan fill={ink} fillOpacity={0.88}>
               {`${(allocationPct ?? 0).toFixed(1)}%`}
             </tspan>
             {gainPct !== null && gainPct !== undefined && (
-              <tspan
-                dx="8"
-                fill={
-                  gainPct >= 0 ? colors.tileGainText : colors.tileLossText
-                }
-              >
+              <tspan dx="6" fill={ink} fillOpacity={0.88}>
                 {fmtPct(gainPct)}
               </tspan>
             )}

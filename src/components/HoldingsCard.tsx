@@ -15,11 +15,12 @@ const HEAD = "text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade"
 /**
  * Row area scrolls inside the card from `lg` up, so a long portfolio doesn't
  * push the page down — the column header stays put and only the rows move.
+ * It flexes into whatever height the page's grid row gives the card, which is
+ * what keeps this column and the logbook column ending on the same line.
  * Kept off touch widths on purpose: a scroll region inside a scrolling page
- * fights the finger. `LogbookCard` uses the same cap so the two columns end
- * level.
+ * fights the finger.
  */
-const SCROLL_BODY = "lg:max-h-[calc(100dvh-360px)] lg:min-h-[300px] lg:overflow-y-auto";
+const SCROLL_BODY = "lg:min-h-0 lg:flex-1 lg:overflow-y-auto";
 
 function DayPct({ dp }: { dp: number | undefined }) {
   if (dp === undefined || !isFinite(dp)) return null;
@@ -54,6 +55,7 @@ export function HoldingsCard({
   datesDegraded,
   ratingsDegraded,
   onPickSymbol,
+  className = "",
 }: {
   positions: TickerPosition[];
   marketValue: (symbol: string, shares: number) => number | null;
@@ -67,11 +69,12 @@ export function HoldingsCard({
   datesDegraded: boolean;
   ratingsDegraded: boolean;
   onPickSymbol: (symbol: string) => void;
+  className?: string;
 }) {
   const [view, setView] = useState<"list" | "map">("list");
 
   return (
-    <div className="card overflow-hidden">
+    <div className={`card overflow-hidden lg:flex lg:flex-col ${className}`}>
       <div className="flex items-center gap-2.5 border-b border-line px-4 py-3">
         <span className="text-[13.5px] font-semibold">Holdings</span>
         <span className="num text-xs text-fg-fade">{positions.length}</span>
@@ -122,7 +125,7 @@ export function HoldingsCard({
           No holdings yet.
         </div>
       ) : view === "map" ? (
-        <div className="p-4">
+        <div className="p-4 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
           <AllocationTreemap
             positions={positions}
             marketValue={marketValue}

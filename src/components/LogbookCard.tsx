@@ -20,6 +20,7 @@ export function LogbookCard({
   isOwner,
   onViewAll,
   onPickSymbol,
+  className = "",
 }: {
   /** Newest-first (pickRecentTrades output). The card scrolls internally on
    *  desktop, so the caller passes the whole log rather than a fixed slice —
@@ -29,9 +30,10 @@ export function LogbookCard({
   isOwner: boolean;
   onViewAll: () => void;
   onPickSymbol: (symbol: string) => void;
+  className?: string;
 }) {
   return (
-    <div className="card overflow-hidden">
+    <div className={`card overflow-hidden lg:flex lg:flex-col ${className}`}>
       <div className="flex items-center gap-2.5 border-b border-line px-4 py-3">
         <span className="text-[13.5px] font-semibold">Logbook</span>
         <span className="num text-xs text-fg-fade">
@@ -44,7 +46,7 @@ export function LogbookCard({
             onClick={onViewAll}
             className="text-xs font-medium text-accent hover:underline"
           >
-            View all →
+            Detailed view →
           </button>
         )}
       </div>
@@ -53,9 +55,9 @@ export function LogbookCard({
           No trades yet.
         </div>
       ) : (
-        /* Same cap as HoldingsCard's row area so the two columns end level
-           and neither one stretches the page. */
-        <div className="lg:max-h-[calc(100dvh-360px)] lg:min-h-[300px] lg:overflow-y-auto">
+        /* Flexes into the card's share of the page grid row, same as
+           HoldingsCard's row area, so the two columns end level. */
+        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
         {trades.map((t) => (
           <div
             key={t.id}
