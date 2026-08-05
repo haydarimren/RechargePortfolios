@@ -35,25 +35,33 @@ import {
   aggregateHoldings,
   buildComparisonSeries,
   buildTradeLog,
-  fmtShares,
   normalizeSeries,
+  pickRecentTrades,
   poolPositions,
   SeriesPoint,
 } from "@/lib/portfolio";
-import { fmtMoney, fmtPct, formatBig } from "@/lib/format";
 import { useDisplayName, useDisplayNamesForUids } from "@/lib/users";
 import { usePublishPortfolioOwnership } from "@/lib/portfolio-route";
 import { BenchmarkChart } from "@/components/BenchmarkChart";
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
-import { AllocationTreemap } from "@/components/AllocationTreemap";
 import { FriendStack } from "@/components/FriendStack";
-import { PerformancePill } from "@/components/PerformancePill";
-import { TwoLinePLCell } from "@/components/TwoLinePLCell";
 import { LogbookTable } from "@/components/LogbookTable";
 import { TabBar } from "@/components/TabBar";
-import { InsightsTab } from "@/components/InsightsTab";
 import { SyncHistory } from "@/components/SyncHistory";
+import { PortfolioHero, type BenchVerdict } from "@/components/PortfolioHero";
+import { SparklineButton } from "@/components/Sparkline";
+import { InsightsBand } from "@/components/InsightsBand";
+import { HoldingsCard } from "@/components/HoldingsCard";
+import { LogbookCard } from "@/components/LogbookCard";
+import { computeTodayChange } from "@/lib/today-change";
+import { useInsightsData } from "@/lib/use-insights-data";
+import {
+  buildAnalystRatings,
+  buildUpcomingDates,
+  topMovers,
+  type AnalystRating,
+} from "@/lib/insights";
 import { parseSnaptradeAccountIds } from "@/lib/brokers/snaptrade/sync";
 import { BROKERS, SUPPORTED_BROKERS } from "@/lib/brokers/registry";
 import { runBrokerSync, type SyncReason } from "@/lib/brokers/run-sync";
@@ -624,8 +632,6 @@ export default function PortfolioPage({
   }, [usdHoldings, marketValueUsd]);
 
   const tradeLog = useMemo(() => buildTradeLog(usdHoldings), [usdHoldings]);
-  const positionsCount = positions.length;
-  const logbookCount = tradeLog.length;
   // Bump `lastPortfolioViewAt` once per page load for shared viewers. This
   // is what clears the home-page "N new" badge. Gated so owners never write.
   useEffect(() => {
@@ -633,13 +639,17 @@ export default function PortfolioPage({
     touchPortfolioView(user.uid, id);
   }, [user, isOwner, portfolio, id]);
 
-  const [tab, setTabState] = useState<"positions" | "logbook" | "allocation" | "insights">("positions");
-  const setTab = (next: "positions" | "logbook" | "allocation" | "insights") => {
-    setTabState(next);
-    if (next === "logbook" && user && !isOwner) {
-      touchLogbookView(user.uid, id);
-    }
+  // "overview" = hero + band + two columns; "logbook" = full trade table.
+  const [view, setView] = useState<"overview" | "logbook">("overview");
+  // Mobile (< lg) shows one column at a time via a 2-item tab bar.
+  const [mobileTab, setMobileTab] = useState<"holdings" | "logbook">("holdings");
+  // Mobile benchmark chart disclosure (sparkline toggle).
+  const [chartOpen, setChartOpen] = useState(false);
+
+  const markLogbookSeen = () => {
+    if (user && !isOwner) touchLogbookView(user.uid, id);
   };
+  const goSymbol = (symbol: string) => router.push(`/p/${id}/${symbol}`);
 
   // Total current market value (USD) across positions with resolved
   // quotes — the denominator for per-row allocation %. Positions without
@@ -706,35 +716,73 @@ export default function PortfolioPage({
   // the public page inherits identical chart math.
   const normalizedSeries = useMemo(() => normalizeSeries(series), [series]);
 
-  // Non-owner per-position stats: allocation % + gain %.
-  const nonOwnerRows = useMemo(() => {
-    const totalMarket = positions.reduce(
-      (sum, p) => sum + (marketValueUsd(p.symbol, p.shares) ?? 0),
-      0,
-    );
-    const rows = positions.map((p) => {
+  // "What moved today" — from the same quotes/market values the rows show.
+  const todayChange = useMemo(
+    () =>
+      computeTodayChange(
+        positions.map((p) => ({
+          market: marketValueUsd(p.symbol, p.shares),
+          dp: quotes[p.symbol]?.dp ?? null,
+        })),
+      ),
+    [positions, marketValueUsd, quotes],
+  );
+
+  // Insights (Yahoo dates/consensus + Finnhub spreads) — shared by the band
+  // and the holdings-row pills. One fetch per symbol set (daily server cache).
+  const { insights, spreads } = useInsightsData(positions);
+  const todayISO = new Date().toISOString().split("T")[0];
+
+  const upcoming = useMemo(
+    () => (insights ? buildUpcomingDates(insights, todayISO).slice(0, 8) : []),
+    [insights, todayISO],
+  );
+
+  const { ratingsBySymbol, movers } = useMemo(() => {
+    const price: Record<string, number | undefined> = {};
+    const weight: Record<string, number> = {};
+    const moverRows: Array<{ symbol: string; dailyPct: number; returnPct: number }> = [];
+    for (const p of positions) {
+      const q = quotes[p.symbol];
+      price[p.symbol] = q?.c; // native quote price — only compared to same-listing targets
       const market = marketValueUsd(p.symbol, p.shares);
-      // Both sides in USD: `avgPrice` comes from the converted pool, and
-      // the market value is converted at today's rate. Comparing a GBP
-      // quote against a USD cost basis is what made a flat position look
-      // like a 35% gain.
-      const gainPct =
-        market !== null && p.cost > 0
-          ? ((market - p.cost) / p.cost) * 100
-          : null;
-      return { symbol: p.symbol, market, gainPct };
+      weight[p.symbol] =
+        market !== null && positionsTotalMarket > 0
+          ? market / positionsTotalMarket
+          : 0;
+      if (q && market !== null && p.cost > 0) {
+        moverRows.push({
+          symbol: p.symbol,
+          dailyPct: q.dp,
+          returnPct: ((market - p.cost) / p.cost) * 100,
+        });
+      }
+    }
+    const bySymbolMap: Record<string, AnalystRating> = {};
+    for (const r of buildAnalystRatings(insights ?? {}, price, weight, spreads)) {
+      bySymbolMap[r.symbol] = r;
+    }
+    return { ratingsBySymbol: bySymbolMap, movers: topMovers(moverRows).today };
+  }, [positions, quotes, marketValueUsd, positionsTotalMarket, insights, spreads]);
+
+  // Hero verdict chips: portfolio vs each hypothetical benchmark.
+  const verdicts = useMemo<BenchVerdict[]>(() => {
+    if (!benchGain) return [];
+    return BENCHMARKS.flatMap((b) => {
+      const v = benchGain.values[b];
+      if (typeof v !== "number" || v <= 0) return [];
+      return [{ bench: b, diffPct: ((benchGain.portfolio - v) / v) * 100 }];
     });
-    return rows
-      .map((r) => ({
-        symbol: r.symbol,
-        allocationPct:
-          r.market !== null && totalMarket > 0
-            ? (r.market / totalMarket) * 100
-            : null,
-        gainPct: r.gainPct,
-      }))
-      .sort((a, b) => (b.allocationPct ?? -1) - (a.allocationPct ?? -1));
-  }, [positions, marketValueUsd]);
+  }, [benchGain]);
+
+  // Viewer hero "vs SPY" pill from the normalized series' last point.
+  const viewerVsSpyPct = useMemo(() => {
+    const last = normalizedSeries[normalizedSeries.length - 1];
+    if (!last || typeof last.SPY !== "number") return null;
+    return last.portfolio - last.SPY;
+  }, [normalizedSeries]);
+
+  const recentTrades = useMemo(() => pickRecentTrades(tradeLog, 8), [tradeLog]);
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1004,7 +1052,7 @@ export default function PortfolioPage({
           {migrationError}
         </div>
       )}
-      <main className="max-w-6xl mx-auto px-6 lg:px-10 py-10 space-y-10">
+      <main className="max-w-6xl mx-auto px-6 lg:px-10 py-10 space-y-6">
         <section className="animate-fade-up">
           {/* Breadcrumb */}
           <div className="text-[11.5px] text-fg-fade font-medium mb-3.5 flex items-center gap-1.5">
@@ -1072,363 +1120,123 @@ export default function PortfolioPage({
           </div>
         </section>
 
-        {/* Hero strip */}
-        <div
-          className="flex items-baseline gap-[18px] flex-wrap py-5 border-b border-line mb-[18px] animate-fade-up"
-          style={{ animationDelay: "60ms" }}
-        >
-          {isOwner ? (
-            <>
-              <span className="text-[40px] font-semibold leading-none tracking-tight tabular-nums text-fg">
-                {totals.market > 0 ? `$${formatBig(totals.market)}` : "—"}
-              </span>
-              <PerformancePill pct={totals.gainPct} benchmark="vs cost" />
-              <div className="ml-auto flex gap-[14px] text-[13px] text-fg-mid tabular-nums flex-wrap">
-                <span>
-                  <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">P/L</span>
-                  {totals.market > 0 ? (
-                    <span className={totals.gain >= 0 ? "text-pos font-semibold" : "text-neg font-semibold"}>
-                      {totals.gain >= 0 ? "+" : "−"}${formatBig(Math.abs(totals.gain))} ({totals.gainPct.toFixed(1)}%)
-                    </span>
-                  ) : (
-                    <span className="text-fg-fade">—</span>
-                  )}
-                </span>
-                <span>
-                  <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">Positions</span>
-                  {positions.length}
-                </span>
-              </div>
-            </>
-          ) : (
-            <>
-              {/* Viewer hero: % gain vs cost as the headline; no $ amounts */}
-              <PerformancePill
-                pct={totals.gainPct}
-                benchmark="vs cost"
-                className="text-base px-3.5 py-1.5"
-              />
-              {/* vs SPY derived from normalizedSeries last point — all % relative, no $ */}
-              {normalizedSeries.length > 0 && (() => {
-                const last = normalizedSeries[normalizedSeries.length - 1];
-                const portPct = last.portfolio;
-                const spyPct = typeof last.SPY === "number" ? last.SPY : null;
-                if (spyPct !== null) {
-                  return (
-                    <PerformancePill
-                      pct={portPct - spyPct}
-                      benchmark="vs SPY"
-                    />
-                  );
-                }
-                return null;
-              })()}
-              <div className="ml-auto flex gap-[14px] text-[13px] text-fg-mid tabular-nums flex-wrap">
-                <span>
-                  <span className="text-fg-fade text-xs uppercase tracking-[0.06em] font-medium mr-1">Positions</span>
-                  {positions.length}
-                </span>
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* Benchmark */}
-        {holdings.length > 0 && (
-          <section
-            className="animate-fade-up"
-            style={{ animationDelay: "120ms" }}
-          >
-            <div className="flex items-end justify-between flex-wrap gap-3 mb-4">
-              <div>
-                <h2 className="text-xl font-semibold tracking-tight">
-                  Portfolio Benchmark
-                </h2>
-                <p className="text-sm text-fg-dim mt-1">
-                  {isOwner
-                    ? "If the same amounts had been invested in SPY or QQQ on the same dates."
-                    : "% return since first investment, vs hypothetical SPY / QQQ."}
-                </p>
-              </div>
-            </div>
-
-            {benchGain && isOwner && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
-                <SmallStat
-                  label="Portfolio"
-                  value={fmtMoney(benchGain.portfolio)}
+        <PortfolioHero
+          isOwner={isOwner}
+          totals={totals}
+          positionsCount={positions.length}
+          sinceDate={totals.firstDate}
+          today={todayChange}
+          verdicts={isOwner ? verdicts : []}
+          viewerVsSpyPct={isOwner ? null : viewerVsSpyPct}
+          chart={
+            holdings.length > 0 ? (
+              chartLoading && series.length === 0 ? (
+                <div className="flex h-[236px] items-center justify-center text-sm text-fg-dim">
+                  Loading history…
+                </div>
+              ) : series.length === 0 ? (
+                <div className="flex h-[236px] items-center justify-center text-sm text-fg-dim">
+                  Not enough data.
+                </div>
+              ) : (
+                <BenchmarkChart
+                  data={isOwner ? series : normalizedSeries}
+                  isOwner={isOwner}
+                  height={236}
                 />
-                {BENCHMARKS.map((b) => {
-                  const v = benchGain.values[b] ?? 0;
-                  const diff = benchGain.portfolio - v;
-                  const diffPct = v > 0 ? (diff / v) * 100 : 0;
-                  // `diff > 0` means the real portfolio is worth more than
-                  // this hypothetical-benchmark value — i.e. the PORTFOLIO
-                  // is ahead. The subject is the portfolio, not the
-                  // benchmark, so phrase it that way ("Portfolio ahead X%")
-                  // — the old "vs portfolio +X%" read backwards (as if the
-                  // benchmark were the one outperforming).
-                  return (
-                    <SmallStat
-                      key={b}
-                      label={`Hypothetical ${b}`}
-                      value={fmtMoney(v)}
-                      sub={`Portfolio ${diff >= 0 ? "ahead" : "behind"} ${Math.abs(diffPct).toFixed(2)}%`}
-                      tone={diff >= 0 ? "pos" : "neg"}
-                    />
-                  );
-                })}
-              </div>
-            )}
+              )
+            ) : null
+          }
+          spark={
+            series.length > 0 ? (
+              <SparklineButton
+                data={isOwner ? series : normalizedSeries}
+                expanded={chartOpen}
+                onToggle={() => setChartOpen((v) => !v)}
+              />
+            ) : null
+          }
+        />
 
-            <div className="card p-4 sm:p-5">
-              <div className="h-[340px]">
-                {chartLoading && series.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-sm text-fg-dim">
-                    Loading history…
-                  </div>
-                ) : series.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-sm text-fg-dim">
-                    Not enough data.
-                  </div>
-                ) : (
-                  <BenchmarkChart
-                    data={isOwner ? series : normalizedSeries}
-                    isOwner={isOwner}
-                    height={340}
-                  />
-                )}
+        {chartOpen && series.length > 0 && (
+          <div className="card mb-4 p-3 lg:hidden">
+            <BenchmarkChart
+              data={isOwner ? series : normalizedSeries}
+              isOwner={isOwner}
+              height={200}
+            />
+          </div>
+        )}
+
+        <InsightsBand
+          movers={movers}
+          upcoming={upcoming}
+          onPickSymbol={goSymbol}
+          className="mb-4"
+        />
+
+        {view === "logbook" ? (
+          <section className="animate-fade-up">
+            <button
+              type="button"
+              onClick={() => setView("overview")}
+              className="mb-3 inline-flex items-center gap-1.5 text-sm text-accent hover:underline"
+            >
+              <ArrowLeft className="h-4 w-4" aria-hidden /> Back to overview
+            </button>
+            <LogbookTable tradeLog={tradeLog} isOwner={isOwner} portfolioId={id} />
+          </section>
+        ) : (
+          <section className="animate-fade-up">
+            <TabBar
+              className="mb-3 lg:hidden"
+              items={[
+                { id: "holdings", label: "Holdings", count: positions.length },
+                { id: "logbook", label: "Logbook", count: tradeLog.length },
+              ]}
+              active={mobileTab}
+              onSelect={(tid) => {
+                setMobileTab(tid as "holdings" | "logbook");
+                if (tid === "logbook") markLogbookSeen();
+              }}
+            />
+            <div className="lg:grid lg:grid-cols-[1.45fr_1fr] lg:items-start lg:gap-[18px]">
+              <div className={mobileTab === "holdings" ? "" : "hidden lg:block"}>
+                <HoldingsCard
+                  positions={positions}
+                  marketValue={marketValueUsd}
+                  totalMarket={positionsTotalMarket}
+                  quotes={quotes}
+                  ratings={insights === null ? null : ratingsBySymbol}
+                  isOwner={isOwner}
+                  portfolioId={id}
+                  unpricedSymbols={unpricedSymbols}
+                  convertedCurrencies={convertedCurrencies}
+                  onPickSymbol={goSymbol}
+                />
+              </div>
+              <div
+                className={`${mobileTab === "logbook" ? "" : "hidden lg:block"} mt-4 lg:mt-0`}
+              >
+                <LogbookCard
+                  trades={recentTrades}
+                  totalCount={tradeLog.length}
+                  isOwner={isOwner}
+                  onViewAll={() => {
+                    setView("logbook");
+                    markLogbookSeen();
+                  }}
+                  onPickSymbol={goSymbol}
+                />
+                <SyncHistory
+                  portfolioId={id}
+                  portfolioKey={portfolioKey}
+                  isOwner={isOwner}
+                />
               </div>
             </div>
           </section>
         )}
-
-        {/* Positions / Logbook */}
-        <section className="animate-fade-up" style={{ animationDelay: "200ms" }}>
-          <TabBar
-            items={[
-              { id: "positions", label: "Positions", count: positionsCount },
-              { id: "logbook", label: "Logbook", count: logbookCount },
-              { id: "allocation", label: "Allocation" },
-              { id: "insights", label: "Insights" },
-            ]}
-            active={tab}
-            onSelect={(id) => setTab(id as "positions" | "logbook" | "allocation" | "insights")}
-            className="mb-4"
-          />
-
-          {tab === "insights" ? (
-            <InsightsTab
-              portfolioId={id}
-              positions={positions}
-              quotes={quotes}
-              marketValue={marketValueUsd}
-            />
-          ) : tab === "allocation" ? (
-            <div className="bg-bg-2 border border-line rounded-card p-4 md:p-5">
-              <AllocationTreemap
-                positions={positions}
-                marketValue={marketValueUsd}
-                totalMarket={positionsTotalMarket}
-                isOwner={isOwner}
-                portfolioId={id}
-              />
-            </div>
-          ) : tab === "logbook" ? (
-            <LogbookTable tradeLog={tradeLog} isOwner={isOwner} portfolioId={id} />
-          ) : positions.length === 0 ? (
-            <div className="card p-10 text-center text-fg-dim text-sm">
-              No holdings yet.
-            </div>
-          ) : (
-            <>
-              {(unpricedSymbols.length > 0 || convertedCurrencies.length > 0) && (
-                <div className="mb-3 flex flex-col gap-1.5 text-[11.5px] text-fg-fade leading-relaxed">
-                  {unpricedSymbols.length > 0 && (
-                    <p>
-                      No live price for{" "}
-                      <span className="text-fg-dim font-medium">
-                        {unpricedSymbols.join(", ")}
-                      </span>
-                      {" — "}
-                      {unpricedSymbols.length === 1 ? "it is" : "they are"} left
-                      out of the totals and allocation below, so the
-                      percentages cover only the priced positions.
-                    </p>
-                  )}
-                  {convertedCurrencies.length > 0 && (
-                    <p>
-                      Converted to USD from{" "}
-                      <span className="text-fg-dim font-medium">
-                        {convertedCurrencies.join(", ")}
-                      </span>
-                      {" — "}cost basis at each lot&rsquo;s purchase-date rate,
-                      market value at today&rsquo;s. Your broker shows these in
-                      their native currency.
-                    </p>
-                  )}
-                </div>
-              )}
-              {!isOwner ? (
-                <div className="card overflow-hidden">
-                  <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_auto] gap-4 px-3 py-2 border-b border-line">
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Symbol</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Allocation</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Gain</span>
-                    <span />
-                  </div>
-                  {nonOwnerRows.map((row) => {
-                    const tone =
-                      row.gainPct === null
-                        ? ""
-                        : row.gainPct >= 0
-                        ? "text-pos"
-                        : "text-neg";
-                    return (
-                      <button
-                        key={row.symbol}
-                        onClick={() =>
-                          router.push(`/p/${id}/${row.symbol}`)
-                        }
-                        className={`w-full text-left grid grid-cols-[1fr_auto_auto] md:grid-cols-[1fr_1fr_1fr_auto] gap-4 px-5 py-4 hover:bg-[rgba(91,141,239,0.04)] transition group border-b border-[#20242c] last:border-b-0`}
-                      >
-                        <span className="text-fg font-semibold tracking-tight">
-                          {row.symbol}
-                        </span>
-                        <span className="num text-sm text-right text-fg-dim tabular-nums">
-                          {row.allocationPct !== null
-                            ? `${row.allocationPct.toFixed(1)}%`
-                            : "…"}
-                        </span>
-                        <span className={`num text-sm text-right tabular-nums ${tone}`}>
-                          {row.gainPct === null ? "…" : fmtPct(row.gainPct)}
-                        </span>
-                        <span className="flex items-center justify-end text-fg-fade group-hover:text-accent transition">
-                          <ChevronRight className="w-3.5 h-3.5" />
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="card overflow-hidden">
-                  {/* Desktop table */}
-                  <div className="hidden md:grid grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.9fr_1.3fr_0.5fr] gap-4 px-5 py-2 border-b border-line">
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Symbol</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Shares</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Avg cost</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Current</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Cost</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Market</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Allocation</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Gain</span>
-                    <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Lots</span>
-                  </div>
-                  {positions.map((p) => {
-                    const market = marketValueUsd(p.symbol, p.shares);
-                    // Per-share "current" in USD too, so it lines up with
-                    // the USD avg cost in the cell beside it.
-                    const currentPrice =
-                      market !== null && p.shares > 0 ? market / p.shares : null;
-                    const gain = market !== null ? market - p.cost : null;
-                    const gainPct =
-                      gain !== null && p.cost > 0 ? (gain / p.cost) * 100 : null;
-                    const allocationPct =
-                      market !== null && positionsTotalMarket > 0
-                        ? (market / positionsTotalMarket) * 100
-                        : null;
-                    return (
-                      <button
-                        key={p.symbol}
-                        onClick={() =>
-                          router.push(`/p/${id}/${p.symbol}`)
-                        }
-                        className="w-full text-left px-5 py-3.5 hover:bg-[rgba(91,141,239,0.04)] transition group md:grid md:grid-cols-[1fr_0.7fr_0.8fr_0.8fr_0.9fr_1fr_0.9fr_1.3fr_0.5fr] md:gap-4 border-b border-[#20242c] last:border-b-0"
-                      >
-                        {/* Mobile row */}
-                        <div className="md:hidden flex items-center justify-between gap-4">
-                          <div className="flex flex-col leading-tight min-w-0">
-                            <span className="text-fg font-semibold tracking-tight truncate">
-                              {p.symbol}
-                            </span>
-                            <span className="num text-[10px] text-fg-fade mt-0.5">
-                              {fmtShares(p.shares)} · {fmtMoney(p.avgPrice)}
-                            </span>
-                          </div>
-                          <div className="flex flex-col items-end leading-tight shrink-0">
-                            <span className="num text-fg font-semibold tabular-nums">
-                              {market !== null ? fmtMoney(market) : "…"}
-                            </span>
-                            {gain !== null && gainPct !== null ? (
-                              <TwoLinePLCell amount={gain} pct={gainPct} currency="USD" className="mt-0.5" />
-                            ) : (
-                              <span className="num text-[10px] text-fg-fade tabular-nums">…</span>
-                            )}
-                          </div>
-                        </div>
-                        {/* Desktop cells */}
-                        <div className="hidden md:flex items-center">
-                          <span className="text-fg font-semibold tracking-tight">
-                            {p.symbol}
-                          </span>
-                        </div>
-                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block truncate">
-                          {fmtShares(p.shares)}
-                        </span>
-                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
-                          {fmtMoney(p.avgPrice)}
-                        </span>
-                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
-                          {currentPrice !== null ? fmtMoney(currentPrice) : "…"}
-                        </span>
-                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
-                          {fmtMoney(p.cost)}
-                        </span>
-                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
-                          {market !== null ? fmtMoney(market) : "…"}
-                        </span>
-                        <span className="num text-sm text-right text-fg-dim tabular-nums hidden md:block">
-                          {allocationPct !== null ? (
-                            <>
-                              <span className="inline-block w-[80px] h-1 bg-[#242932] rounded overflow-hidden align-middle mr-1.5">
-                                <span
-                                  style={{ width: `${allocationPct}%` }}
-                                  className="block h-full bg-accent"
-                                />
-                              </span>
-                              {allocationPct.toFixed(1)}%
-                            </>
-                          ) : "…"}
-                        </span>
-                        <div className="hidden md:flex items-center justify-end">
-                          {gain !== null && gainPct !== null ? (
-                            <TwoLinePLCell amount={gain} pct={gainPct} currency="USD" />
-                          ) : (
-                            <span className="num text-sm text-fg-dim">…</span>
-                          )}
-                        </div>
-                        <span className="hidden md:flex items-center justify-end gap-1 text-fg-fade group-hover:text-accent transition">
-                          <span className="num text-xs">{p.lots.length}</span>
-                          <ChevronRight className="w-3.5 h-3.5" />
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Encrypted sync diagnostics — readable in-app by the owner
-              and by shared viewers (Firestore rule relaxed to
-              owner-or-sharedWith). Lets a collaborator debug a sync
-              without any download or server logs. */}
-          <SyncHistory
-            portfolioId={id}
-            portfolioKey={portfolioKey}
-            isOwner={isOwner}
-          />
-        </section>
       </main>
 
       {showImport && isOwner && portfolio && (
@@ -1880,28 +1688,6 @@ export default function PortfolioPage({
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function SmallStat({
-  label,
-  value,
-  sub,
-  tone,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  tone?: "pos" | "neg";
-}) {
-  const color =
-    tone === "pos" ? "text-pos" : tone === "neg" ? "text-neg" : "text-fg";
-  return (
-    <div className="card p-4">
-      <div className="label mb-2">{label}</div>
-      <div className={`num text-lg font-medium ${color}`}>{value}</div>
-      {sub && <div className={`num text-xs mt-0.5 ${color}`}>{sub}</div>}
     </div>
   );
 }

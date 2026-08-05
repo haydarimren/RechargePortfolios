@@ -101,7 +101,7 @@ export function BenchmarkChart({
               : String(v)
           }
         />
-        <Legend wrapperStyle={{ fontSize: 12, color: chartColors.axis }} />
+        <Legend verticalAlign="top" height={28} wrapperStyle={{ fontSize: 12, color: chartColors.axis }} />
         <Area
           name="Portfolio"
           type="monotone"
