@@ -493,3 +493,14 @@ export function fmtShares(n: number): string {
     maximumFractionDigits: 6,
   });
 }
+
+/** Newest-first slice for the logbook preview card. `buildTradeLog` already
+ *  returns newest-first, but this sorts unconditionally so the preview never
+ *  depends on the caller's ordering contract. Stable sort keeps same-day
+ *  entries in their existing relative order. */
+export function pickRecentTrades(
+  log: TradeLogEntry[],
+  n: number,
+): TradeLogEntry[] {
+  return log.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, n);
+}
