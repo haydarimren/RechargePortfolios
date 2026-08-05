@@ -1,14 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { TickerPosition } from "@/lib/portfolio";
 import type { StockQuote } from "@/lib/finnhub";
-import { getStockInsights } from "@/lib/yahoo-insights";
-import { getAnalystSpreads } from "@/lib/finnhub-recs";
+import { useInsightsData } from "@/lib/use-insights-data";
 import {
   buildUpcomingDates, buildAnalystRatings, topMovers,
-  type StockInsight, type AnalystSpread, type Movers,
+  type Movers,
 } from "@/lib/insights";
 import {
   RatingPill, AnalystSpreadBar, SkeletonRows, Empty, Unavailable,
@@ -36,75 +35,8 @@ export function InsightsTab({
 }) {
   const router = useRouter();
 
-  // Stable scalar dep: only re-fetch when the SET of symbols changes, not on
-  // every quote tick (positions memo gets a new identity each Firestore/quote
-  // round-trip — the documented effect-loop trap). See p/[id]/page.tsx.
-  const symbolKey = useMemo(
-    () => positions.map((p) => p.symbol).sort().join(","),
-    [positions],
-  );
-
-  // One result object tagged with the symbol set it was fetched for. Loading
-  // and the two degraded flags are then derived rather than stored, which
-  // keeps setState out of the effect body (cascading-render lint rule) and
-  // means a symbol-set change can't briefly show the previous set's data.
-  const [data, setData] = useState<{
-    key: string;
-    insights: Record<string, StockInsight | null>;
-    spreads: Record<string, AnalystSpread | null>;
-  } | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const syms = symbolKey ? symbolKey.split(",") : [];
-    if (syms.length === 0) return; // nothing to fetch; handled by `loaded` below
-    // Map each cleaned symbol to its Yahoo-compatible symbol via the lots.
-    const yahooFor = (sym: string) => {
-      const pos = positions.find((p) => p.symbol === sym);
-      return pos?.lots.find((l) => l.yahooSymbol)?.yahooSymbol ?? sym;
-    };
-    const apiSymbols = syms.map(yahooFor);
-    Promise.all([
-      getStockInsights(apiSymbols).catch(() => ({} as Record<string, StockInsight | null>)),
-      getAnalystSpreads(apiSymbols).catch(() => ({} as Record<string, AnalystSpread | null>)),
-    ])
-      .then(([insMap, sprMap]) => {
-        if (cancelled) return;
-        const rekeyedIns: Record<string, StockInsight | null> = {};
-        const rekeyedSpr: Record<string, AnalystSpread | null> = {};
-        syms.forEach((s, i) => {
-          rekeyedIns[s] = insMap[apiSymbols[i]] ?? null;
-          rekeyedSpr[s] = sprMap[apiSymbols[i]] ?? null;
-        });
-        setData({ key: symbolKey, insights: rekeyedIns, spreads: rekeyedSpr });
-      });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- scalar dep on purpose
-  }, [symbolKey]);
-
-  // Memoized so the empty-portfolio branch doesn't mint a new object identity
-  // on every render and retrigger every downstream memo.
-  const loaded = useMemo(
-    () => (symbolKey === ""
-      ? { key: "", insights: {}, spreads: {} }
-      : data?.key === symbolKey ? data : null),
-    [symbolKey, data],
-  );
-  const loading = loaded === null;
-  const insights = loaded?.insights ?? null;
-  const spreads = useMemo(() => loaded?.spreads ?? {}, [loaded]);
-
-  // Two flags, not one: dates only ever come from Yahoo, but the analyst card
-  // survives a dead crumb handshake as long as Finnhub answered.
-  const { datesDegraded, ratingsDegraded } = useMemo(() => {
-    const syms = symbolKey ? symbolKey.split(",") : [];
-    if (!loaded || syms.length === 0) return { datesDegraded: false, ratingsDegraded: false };
-    const noYahoo = syms.every((s) => loaded.insights[s] == null); // crumb path failed
-    return {
-      datesDegraded: noYahoo,
-      ratingsDegraded: noYahoo && syms.every((s) => loaded.spreads[s] == null),
-    };
-  }, [loaded, symbolKey]);
+  const { loading, insights, spreads, datesDegraded, ratingsDegraded } =
+    useInsightsData(positions);
 
   const todayISO = new Date().toISOString().split("T")[0];
 
