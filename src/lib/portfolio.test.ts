@@ -8,8 +8,9 @@ import {
   normalizeSeries,
   poolPositions,
   reconcileToPositionUnits,
+  pickRecentTrades,
 } from "./portfolio";
-import type { Holding } from "./types";
+import type { Holding, TradeLogEntry } from "./types";
 import type { HistoricalPoint } from "./yahoo";
 
 function h(
@@ -581,5 +582,57 @@ describe("reconcileToPositionUnits", () => {
       poolPositions([...stored, adj!]).find((p) => p.symbol === "PANW")
         ?.shares ?? 0;
     expect(net).toBeCloseTo(70, 6);
+  });
+});
+
+describe("pickRecentTrades", () => {
+  function entry(
+    id: string,
+    date: string
+  ): TradeLogEntry {
+    return {
+      id,
+      date,
+      symbol: "AAPL",
+      side: "BUY",
+      shares: 1,
+      price: 10,
+      value: 10,
+      symbolWeightAfter: 1,
+    };
+  }
+
+  it("returns the newest n, newest first", () => {
+    const log = [
+      entry("a", "2026-01-01"),
+      entry("b", "2026-03-05"),
+      entry("c", "2026-02-10"),
+    ];
+    const r = pickRecentTrades(log, 2);
+    expect(r.map((t) => t.id)).toEqual(["b", "c"]);
+  });
+
+  it("does not mutate the input order", () => {
+    const log = [entry("a", "2026-01-01"), entry("b", "2026-03-05")];
+    pickRecentTrades(log, 1);
+    expect(log.map((t) => t.id)).toEqual(["a", "b"]);
+  });
+
+  it("handles n larger than the log", () => {
+    expect(pickRecentTrades([entry("a", "2026-01-01")], 8)).toHaveLength(1);
+    expect(pickRecentTrades([], 8)).toEqual([]);
+  });
+
+  it("keeps same-day entries in their existing relative order", () => {
+    const log = [
+      entry("buy", "2026-04-02"),
+      entry("sell", "2026-04-02"),
+      entry("old", "2026-01-01"),
+    ];
+    expect(pickRecentTrades(log, 3).map((t) => t.id)).toEqual([
+      "buy",
+      "sell",
+      "old",
+    ]);
   });
 });
