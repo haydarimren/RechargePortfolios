@@ -45,7 +45,7 @@ Same cards, stacked full width: hero (chart below stats), band, Holdings card, L
 ### Mobile (< 768px)
 
 1. Header (compact breadcrumb "‹ Mine"; owner action buttons wrap under the title as today).
-2. **Hero row**: left — value + pills (vs cost, today); right — **sparkline button** (~110×40, portfolio curve only, "⌄ chart" hint). Tap expands a ~200px chart card in place beneath the row; tap again collapses.
+2. **Hero row**: left — value + pills (vs cost, today); right — **sparkline button** (~110×40, portfolio curve only, "⌄ chart" hint). Tap expands a ~200px chart card in place beneath the row — **with the same Portfolio/SPY/QQQ legend as desktop** (the sparkline itself is unlabeled, so the expanded view must name the lines); tap again collapses.
 3. **Band** — compact variant, right-edge fade mask, dots; swipe/manual switching.
 4. **Two-tab bar: Holdings | Logbook** (existing `TabBar`, reduced from four tabs). Holdings rows: symbol + rating pill, sub-line "{shares} sh · avg ${avg} · {day %}", right side market value + gain (two-line). Logbook tab = existing mobile logbook rows.
 5. Bottom app nav unchanged.
