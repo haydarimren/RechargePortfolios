@@ -40,10 +40,10 @@ import {
   poolPositions,
   SeriesPoint,
 } from "@/lib/portfolio";
-import { useChartColors } from "@/lib/theme";
 import { fmtMoney, fmtPct, formatBig } from "@/lib/format";
 import { useDisplayName, useDisplayNamesForUids } from "@/lib/users";
 import { usePublishPortfolioOwnership } from "@/lib/portfolio-route";
+import { BenchmarkChart } from "@/components/BenchmarkChart";
 import { SharePanel } from "@/components/SharePanel";
 import { UnlockModal } from "@/components/UnlockModal";
 import { AllocationTreemap } from "@/components/AllocationTreemap";
@@ -89,16 +89,6 @@ import {
 import type { SnapshotV1 } from "@/lib/share-links-math";
 import { SnapshotPortfolioView } from "@/components/SnapshotPortfolioView";
 import { ArrowLeft, ArrowUpRight, ChevronRight, Plus, RefreshCw, Trash2, X } from "lucide-react";
-import {
-  AreaChart,
-  Area,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-  Legend,
-} from "recharts";
 
 const BENCHMARKS = ["SPY", "QQQ"] as const;
 
@@ -125,7 +115,6 @@ export default function PortfolioPage({
 }) {
   const { id } = use(params);
   const router = useRouter();
-  const chartColors = useChartColors();
 
   const [user, setUser] = useState<User | null>(null);
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
@@ -686,31 +675,6 @@ export default function PortfolioPage({
     [fxSeries],
   );
 
-  const seriesTickFormatter = useMemo(() => {
-    const spanMs =
-      series.length > 1
-        ? new Date(series[series.length - 1].date).getTime() -
-          new Date(series[0].date).getTime()
-        : 0;
-    const spanDays = spanMs / 86_400_000;
-    return (d: string) => {
-      const date = new Date(d);
-      if (spanDays <= 180) {
-        return date.toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-        });
-      }
-      if (spanDays <= 365 * 2) {
-        return date.toLocaleDateString("en-US", {
-          month: "short",
-          year: "numeric",
-        });
-      }
-      return date.toLocaleDateString("en-US", { year: "numeric" });
-    };
-  }, [series]);
-
   const totals = useMemo(() => {
     let cost = 0;
     let market = 0;
@@ -1228,106 +1192,11 @@ export default function PortfolioPage({
                     Not enough data.
                   </div>
                 ) : (
-                  <ResponsiveContainer width="100%" height={340}>
-                    <AreaChart
-                      data={isOwner ? series : normalizedSeries}
-                      margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
-                    >
-                      <defs>
-                        <linearGradient id="port" x1="0" y1="0" x2="0" y2="1">
-                          <stop
-                            offset="0%"
-                            stopColor={chartColors.portfolio}
-                            stopOpacity={0.25}
-                          />
-                          <stop
-                            offset="100%"
-                            stopColor={chartColors.portfolio}
-                            stopOpacity={0}
-                          />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid
-                        strokeDasharray="3 3"
-                        stroke={chartColors.grid}
-                        vertical={false}
-                      />
-                      <XAxis
-                        dataKey="date"
-                        stroke={chartColors.axis}
-                        fontSize={11}
-                        tickLine={false}
-                        axisLine={{ stroke: chartColors.grid }}
-                        minTickGap={50}
-                        tickFormatter={seriesTickFormatter}
-                      />
-                      <YAxis
-                        stroke={chartColors.axis}
-                        fontSize={11}
-                        tickLine={false}
-                        axisLine={false}
-                        tickFormatter={(v) =>
-                          isOwner
-                            ? v >= 1000
-                              ? `$${(v / 1000).toFixed(0)}k`
-                              : `$${v.toFixed(0)}`
-                            : `${v >= 0 ? "+" : ""}${v.toFixed(0)}%`
-                        }
-                      />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: chartColors.tooltipBg,
-                          borderColor: chartColors.tooltipBorder,
-                          borderRadius: 8,
-                          fontSize: 12,
-                        }}
-                        labelStyle={{
-                          color: chartColors.tooltipLabel,
-                          fontSize: 11,
-                        }}
-                        itemStyle={{ color: chartColors.tooltipText }}
-                        formatter={(v) =>
-                          typeof v === "number"
-                            ? isOwner
-                              ? fmtMoney(v)
-                              : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`
-                            : String(v)
-                        }
-                      />
-                      <Legend
-                        wrapperStyle={{
-                          fontSize: 12,
-                          color: chartColors.axis,
-                        }}
-                      />
-                      <Area
-                        name="Portfolio"
-                        type="monotone"
-                        dataKey="portfolio"
-                        stroke={chartColors.portfolio}
-                        strokeWidth={2}
-                        fill="url(#port)"
-                      />
-                      <Area
-                        name="Hypothetical SPY"
-                        type="monotone"
-                        dataKey="SPY"
-                        stroke={chartColors.benchmark}
-                        strokeWidth={1.5}
-                        strokeDasharray="4 3"
-                        fill="transparent"
-                      />
-                      <Area
-                        name="Hypothetical QQQ"
-                        type="monotone"
-                        dataKey="QQQ"
-                        stroke={chartColors.benchmark2}
-                        strokeWidth={1.5}
-                        strokeDasharray="4 3"
-                        fill="transparent"
-                      />
-                    </AreaChart>
-                  </ResponsiveContainer>
+                  <BenchmarkChart
+                    data={isOwner ? series : normalizedSeries}
+                    isOwner={isOwner}
+                    height={340}
+                  />
                 )}
               </div>
             </div>
