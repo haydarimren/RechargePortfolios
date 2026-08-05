@@ -96,7 +96,7 @@ export function InsightsBand({
               {view === "movers" ? "Today's movers" : "Upcoming"}
             </span>
             <div
-              className="flex flex-1 items-center gap-2.5 overflow-x-auto md:overflow-hidden [-webkit-overflow-scrolling:touch]"
+              className="flex flex-1 items-center gap-2.5 overflow-x-auto md:overflow-hidden [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
               style={FADE_MASK}
             >
               {view === "movers"
