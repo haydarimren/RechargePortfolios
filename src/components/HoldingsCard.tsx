@@ -12,6 +12,15 @@ import { fmtMoney, fmtPct } from "@/lib/format";
 
 const HEAD = "text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade";
 
+/**
+ * Row area scrolls inside the card from `lg` up, so a long portfolio doesn't
+ * push the page down — the column header stays put and only the rows move.
+ * Kept off touch widths on purpose: a scroll region inside a scrolling page
+ * fights the finger. `LogbookCard` uses the same cap so the two columns end
+ * level.
+ */
+const SCROLL_BODY = "lg:max-h-[calc(100dvh-360px)] lg:min-h-[300px] lg:overflow-y-auto";
+
 function DayPct({ dp }: { dp: number | undefined }) {
   if (dp === undefined || !isFinite(dp)) return null;
   const flat = Math.abs(dp) < 0.05;
@@ -42,7 +51,6 @@ export function HoldingsCard({
   isOwner,
   portfolioId,
   unpricedSymbols,
-  convertedCurrencies,
   datesDegraded,
   ratingsDegraded,
   onPickSymbol,
@@ -56,7 +64,6 @@ export function HoldingsCard({
   isOwner: boolean;
   portfolioId: string;
   unpricedSymbols: string[];
-  convertedCurrencies: string[];
   datesDegraded: boolean;
   ratingsDegraded: boolean;
   onPickSymbol: (symbol: string) => void;
@@ -86,7 +93,7 @@ export function HoldingsCard({
         </div>
       </div>
 
-      {(unpricedSymbols.length > 0 || convertedCurrencies.length > 0 || datesDegraded) && (
+      {(unpricedSymbols.length > 0 || datesDegraded) && (
         <div className="flex flex-col gap-1.5 border-b border-line px-4 py-2.5 text-[11.5px] leading-relaxed text-fg-fade">
           {unpricedSymbols.length > 0 && (
             <p>
@@ -98,17 +105,6 @@ export function HoldingsCard({
               {unpricedSymbols.length === 1 ? "it is" : "they are"} left out of
               the totals and allocation, so the percentages cover only the
               priced positions.
-            </p>
-          )}
-          {convertedCurrencies.length > 0 && (
-            <p>
-              Converted to USD from{" "}
-              <span className="font-medium text-fg-dim">
-                {convertedCurrencies.join(", ")}
-              </span>
-              {" — "}cost basis at each lot&rsquo;s purchase-date rate, market
-              value at today&rsquo;s. Your broker shows these in their native
-              currency.
             </p>
           )}
           {datesDegraded && (
@@ -143,6 +139,7 @@ export function HoldingsCard({
             <span className={`${HEAD} text-right`}>Market · Alloc</span>
             <span className={`${HEAD} text-right`}>Gain</span>
           </div>
+          <div className={SCROLL_BODY}>
           {positions.map((p) => {
             const market = marketValue(p.symbol, p.shares);
             const currentPrice =
@@ -215,6 +212,7 @@ export function HoldingsCard({
               </button>
             );
           })}
+          </div>
         </>
       ) : (
         <>
@@ -223,6 +221,7 @@ export function HoldingsCard({
             <span className={`${HEAD} text-right`}>Allocation</span>
             <span className={`${HEAD} text-right`}>Gain</span>
           </div>
+          <div className={SCROLL_BODY}>
           {positions.map((p) => {
             const market = marketValue(p.symbol, p.shares);
             const gainPct =
@@ -257,6 +256,7 @@ export function HoldingsCard({
               </button>
             );
           })}
+          </div>
         </>
       )}
     </div>

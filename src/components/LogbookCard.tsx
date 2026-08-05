@@ -21,7 +21,9 @@ export function LogbookCard({
   onViewAll,
   onPickSymbol,
 }: {
-  /** Already sliced newest-first (pickRecentTrades output). */
+  /** Newest-first (pickRecentTrades output). The card scrolls internally on
+   *  desktop, so the caller passes the whole log rather than a fixed slice —
+   *  "View all" exists for the extra columns, not for more rows. */
   trades: TradeLogEntry[];
   totalCount: number;
   isOwner: boolean;
@@ -51,7 +53,10 @@ export function LogbookCard({
           No trades yet.
         </div>
       ) : (
-        trades.map((t) => (
+        /* Same cap as HoldingsCard's row area so the two columns end level
+           and neither one stretches the page. */
+        <div className="lg:max-h-[calc(100dvh-360px)] lg:min-h-[300px] lg:overflow-y-auto">
+        {trades.map((t) => (
           <div
             key={t.id}
             className="flex items-center gap-2.5 border-b border-line px-4 py-2.5 text-xs last:border-b-0"
@@ -89,7 +94,8 @@ export function LogbookCard({
               </span>
             )}
           </div>
-        ))
+        ))}
+        </div>
       )}
     </div>
   );

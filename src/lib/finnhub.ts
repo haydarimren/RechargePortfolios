@@ -17,6 +17,7 @@
 
 import { normalizeQuoteCurrency } from "./symbol-candidates";
 import { repairYahooSymbol } from "./symbol-resolve";
+import { derivePreviousClose, type DailyBar } from "./previous-close";
 
 /** Max concurrent Yahoo requests. Empirically 6+ starts hitting 429s. */
 const CONCURRENCY = 5;
@@ -88,9 +89,30 @@ async function fetchV8Single(symbol: string): Promise<StockQuote | null> {
     // and can compare against a broker-reported cost basis.
     const { currency, divisor } = normalizeQuoteCurrency(meta.currency);
     const c: number = (meta.regularMarketPrice ?? 0) / divisor;
+    // Previous close comes from the daily bars, NOT `chartPreviousClose` —
+    // that field is the close before the whole 5d range, which turned every
+    // "today's move" in the UI into a week's move. See previous-close.ts.
+    const stamps: unknown = result.timestamp;
+    const closes: unknown = result.indicators?.quote?.[0]?.close;
+    const bars: DailyBar[] = [];
+    if (Array.isArray(stamps) && Array.isArray(closes)) {
+      for (let i = 0; i < stamps.length; i++) {
+        const ts = stamps[i];
+        const close = closes[i];
+        if (typeof ts === "number" && typeof close === "number" && isFinite(close)) {
+          bars.push({ ts, close: close / divisor });
+        }
+      }
+    }
+    const pcFromBars = derivePreviousClose(
+      bars,
+      typeof meta.regularMarketTime === "number" ? meta.regularMarketTime : 0,
+      typeof meta.gmtoffset === "number" ? meta.gmtoffset : 0,
+    );
     const pc: number =
-      (meta.chartPreviousClose ?? meta.previousClose ?? meta.regularMarketPrice ?? 0) /
-        divisor || c;
+      pcFromBars ??
+      ((meta.chartPreviousClose ?? meta.previousClose ?? meta.regularMarketPrice ?? 0) /
+        divisor || c);
     return {
       c,
       d: c - pc,

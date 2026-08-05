@@ -675,16 +675,6 @@ export default function PortfolioPage({
     [positions, quotes],
   );
 
-  /**
-   * Non-USD currencies actually converted for display. Surfaced so the
-   * numbers here being different from the broker's own screen is
-   * explained rather than mysterious.
-   */
-  const convertedCurrencies = useMemo(
-    () => Object.keys(fxSeries).sort(),
-    [fxSeries],
-  );
-
   const totals = useMemo(() => {
     let cost = 0;
     let market = 0;
@@ -782,7 +772,12 @@ export default function PortfolioPage({
     return last.portfolio - last.SPY;
   }, [normalizedSeries]);
 
-  const recentTrades = useMemo(() => pickRecentTrades(tradeLog, 8), [tradeLog]);
+  // The whole log, newest-first — the logbook column scrolls internally on
+  // desktop rather than showing an arbitrary head of the list.
+  const recentTrades = useMemo(
+    () => pickRecentTrades(tradeLog, tradeLog.length),
+    [tradeLog],
+  );
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1212,7 +1207,6 @@ export default function PortfolioPage({
                   isOwner={isOwner}
                   portfolioId={id}
                   unpricedSymbols={unpricedSymbols}
-                  convertedCurrencies={convertedCurrencies}
                   datesDegraded={datesDegraded}
                   ratingsDegraded={ratingsDegraded}
                   onPickSymbol={goSymbol}
