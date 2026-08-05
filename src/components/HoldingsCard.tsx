@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { TickerPosition } from "@/lib/portfolio";
 import { fmtShares } from "@/lib/portfolio";
 import type { StockQuote } from "@/lib/finnhub";
@@ -72,6 +72,11 @@ export function HoldingsCard({
   className?: string;
 }) {
   const [view, setView] = useState<"list" | "map">("list");
+  const dailyPctBySymbol = useMemo(() => {
+    const out: Record<string, number | undefined> = {};
+    for (const p of positions) out[p.symbol] = quotes[p.symbol]?.dp;
+    return out;
+  }, [positions, quotes]);
 
   return (
     <div className={`card overflow-hidden lg:flex lg:flex-col ${className}`}>
@@ -130,6 +135,7 @@ export function HoldingsCard({
             positions={positions}
             marketValue={marketValue}
             totalMarket={totalMarket}
+            dailyPctBySymbol={dailyPctBySymbol}
             isOwner={isOwner}
             portfolioId={portfolioId}
           />

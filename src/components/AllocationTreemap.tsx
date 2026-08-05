@@ -19,6 +19,8 @@ interface AllocationTreemapProps {
    */
   marketValue: (symbol: string, shares: number) => number | null;
   totalMarket: number;
+  /** Today's move per symbol (quote `dp`), the figure printed on each tile. */
+  dailyPctBySymbol: Record<string, number | undefined>;
   isOwner: boolean;
   portfolioId: string;
 }
@@ -31,9 +33,47 @@ interface Tile {
   shares: number;
   gain: number;
   gainPct: number | null;
+  dailyPct: number | null;
   allocationPct: number;
   // Recharts' TreemapDataType requires an index signature.
   [key: string]: unknown;
+}
+
+/**
+ * Label size tiers, largest first. A tile takes the biggest tier whose ticker
+ * AND daily-change line both fit; only when even the smallest tier can't fit
+ * two lines does it fall back to the ticker alone. Shrinking the type rather
+ * than dropping the label is what keeps small slices readable instead of
+ * rendering as anonymous colored blocks.
+ */
+const LABEL_TIERS = [
+  { sym: 14, sub: 11.5, pad: 10, gap: 5 },
+  { sym: 12, sub: 10, pad: 8, gap: 4 },
+  { sym: 10.5, sub: 9, pad: 6, gap: 3 },
+  { sym: 9, sub: 8, pad: 5, gap: 3 },
+  { sym: 8, sub: 7.5, pad: 4, gap: 2 },
+  { sym: 7, sub: 7, pad: 3, gap: 2 },
+];
+
+/** Rough advance width; both faces here sit near 0.62em per character. */
+const textWidth = (s: string, size: number) => s.length * size * 0.62;
+
+function fitLabel(w: number, h: number, symbol: string, sub: string | null) {
+  if (sub) {
+    for (const t of LABEL_TIERS) {
+      const need =
+        Math.max(textWidth(symbol, t.sym), textWidth(sub, t.sub)) + t.pad * 2;
+      if (w >= need && h >= t.sym + t.gap + t.sub + t.pad * 2) {
+        return { ...t, showSub: true };
+      }
+    }
+  }
+  for (const t of LABEL_TIERS) {
+    if (w >= textWidth(symbol, t.sym) + t.pad * 2 && h >= t.sym + t.pad * 2) {
+      return { ...t, showSub: false };
+    }
+  }
+  return null;
 }
 
 // % return at which color saturation maxes out. Anything beyond clamps so a
@@ -101,6 +141,7 @@ export function AllocationTreemap({
   positions,
   marketValue,
   totalMarket,
+  dailyPctBySymbol,
   isOwner,
   portfolioId,
 }: AllocationTreemapProps) {
@@ -116,6 +157,7 @@ export function AllocationTreemap({
       const gainPct = p.cost > 0 ? (gain / p.cost) * 100 : null;
       const allocationPct =
         totalMarket > 0 ? (market / totalMarket) * 100 : 0;
+      const daily = dailyPctBySymbol[p.symbol];
       out.push({
         symbol: p.symbol,
         value: market,
@@ -124,11 +166,12 @@ export function AllocationTreemap({
         shares: p.shares,
         gain,
         gainPct,
+        dailyPct: typeof daily === "number" && isFinite(daily) ? daily : null,
         allocationPct,
       });
     }
     return out.sort((a, b) => b.market - a.market);
-  }, [positions, marketValue, totalMarket]);
+  }, [positions, marketValue, totalMarket, dailyPctBySymbol]);
 
   function colorFor(gainPct: number | null): string {
     if (gainPct === null) return colors.tileNeutral;
@@ -159,7 +202,7 @@ export function AllocationTreemap({
       depth,
       symbol,
       gainPct,
-      allocationPct,
+      dailyPct,
     }: {
       x: number;
       y: number;
@@ -168,7 +211,7 @@ export function AllocationTreemap({
       depth: number;
       symbol?: string;
       gainPct?: number | null;
-      allocationPct?: number;
+      dailyPct?: number | null;
     } = props;
 
     if (depth !== 1 || !symbol) return null;
@@ -176,18 +219,11 @@ export function AllocationTreemap({
     const fill = colorFor(gainPct ?? null);
     const ink = inkFor(fill);
 
-    // Type scales with the tile so small slices still get a ticker instead of
-    // rendering as anonymous colored blocks. The label only appears once it
-    // actually fits: a symbol needs roughly 0.62em per character.
-    const symbolSize = width >= 110 && height >= 56 ? 13 : width >= 70 ? 11 : 9.5;
-    const pad = symbolSize >= 13 ? 12 : symbolSize >= 11 ? 8 : 5;
-    const showLabel =
-      width >= symbol.length * symbolSize * 0.62 + pad * 2 &&
-      height >= symbolSize + pad * 2;
-    // The sub-line needs a second row plus room for "100.0% +999.99%".
-    const subSize = symbolSize >= 13 ? 11 : 9.5;
-    const showSub =
-      showLabel && width >= 88 && height >= symbolSize + subSize + pad * 2 + 8;
+    // Ticker over today's move, the pairing a holdings map is scanned for.
+    // Lifetime return stays in the fill, and the tooltip carries the detail.
+    const sub =
+      dailyPct !== null && dailyPct !== undefined ? fmtPct(dailyPct) : null;
+    const fit = fitLabel(width, height, symbol, sub);
 
     return (
       <g
@@ -203,13 +239,13 @@ export function AllocationTreemap({
           stroke={colors.tileBorder}
           strokeWidth={2}
         />
-        {showLabel && (
+        {fit && (
           <text
-            x={x + pad}
-            y={y + pad + symbolSize * 0.85}
+            x={x + fit.pad}
+            y={y + fit.pad + fit.sym * 0.85}
             fill={ink}
             stroke="none"
-            fontSize={symbolSize}
+            fontSize={fit.sym}
             fontWeight={600}
             letterSpacing="0.02em"
             style={{ fontFamily: "var(--font-sans)" }}
@@ -217,26 +253,21 @@ export function AllocationTreemap({
             {symbol}
           </text>
         )}
-        {showSub && (
+        {fit?.showSub && sub && (
           <text
-            x={x + pad}
-            y={y + pad + symbolSize * 0.85 + subSize + 5}
+            x={x + fit.pad}
+            y={y + fit.pad + fit.sym * 0.85 + fit.gap + fit.sub}
+            fill={ink}
+            fillOpacity={0.88}
             stroke="none"
-            fontSize={subSize}
+            fontSize={fit.sub}
             style={{
               fontFamily: "var(--font-mono)",
               fontVariantNumeric: "tabular-nums",
               letterSpacing: "0.01em",
             }}
           >
-            <tspan fill={ink} fillOpacity={0.88}>
-              {`${(allocationPct ?? 0).toFixed(1)}%`}
-            </tspan>
-            {gainPct !== null && gainPct !== undefined && (
-              <tspan dx="6" fill={ink} fillOpacity={0.88}>
-                {fmtPct(gainPct)}
-              </tspan>
-            )}
+            {sub}
           </text>
         )}
       </g>
@@ -290,6 +321,20 @@ export function AllocationTreemap({
           className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 num text-[11px]"
           style={{ color: colors.tooltipLabel }}
         >
+          <span>Today</span>
+          <span
+            className="text-right"
+            style={{
+              color:
+                t.dailyPct == null
+                  ? colors.tooltipLabel
+                  : t.dailyPct >= 0
+                  ? colors.pos
+                  : colors.neg,
+            }}
+          >
+            {t.dailyPct == null ? "—" : fmtPct(t.dailyPct)}
+          </span>
           <span>Allocation</span>
           <span
             className="text-right"
