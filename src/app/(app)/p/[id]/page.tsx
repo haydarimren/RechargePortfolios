@@ -730,7 +730,7 @@ export default function PortfolioPage({
 
   // Insights (Yahoo dates/consensus + Finnhub spreads) — shared by the band
   // and the holdings-row pills. One fetch per symbol set (daily server cache).
-  const { insights, spreads } = useInsightsData(positions);
+  const { insights, spreads, datesDegraded, ratingsDegraded } = useInsightsData(positions);
   const todayISO = new Date().toISOString().split("T")[0];
 
   const upcoming = useMemo(
@@ -1185,6 +1185,7 @@ export default function PortfolioPage({
               <ArrowLeft className="h-4 w-4" aria-hidden /> Back to overview
             </button>
             <LogbookTable tradeLog={tradeLog} isOwner={isOwner} portfolioId={id} />
+            <SyncHistory portfolioId={id} portfolioKey={portfolioKey} isOwner={isOwner} />
           </section>
         ) : (
           <section className="animate-fade-up">
@@ -1212,6 +1213,8 @@ export default function PortfolioPage({
                   portfolioId={id}
                   unpricedSymbols={unpricedSymbols}
                   convertedCurrencies={convertedCurrencies}
+                  datesDegraded={datesDegraded}
+                  ratingsDegraded={ratingsDegraded}
                   onPickSymbol={goSymbol}
                 />
               </div>

@@ -85,6 +85,7 @@ export function InsightsBand({
           <div
             key={view}
             aria-hidden={!on}
+            inert={!on}
             className={`absolute inset-0 flex items-center gap-3.5 px-4 pr-9 transition-all duration-300 ${
               on
                 ? "opacity-100 translate-y-0"
@@ -95,7 +96,7 @@ export function InsightsBand({
               {view === "movers" ? "Today's movers" : "Upcoming"}
             </span>
             <div
-              className="flex flex-1 items-center gap-2.5 overflow-hidden"
+              className="flex flex-1 items-center gap-2.5 overflow-x-auto md:overflow-hidden [-webkit-overflow-scrolling:touch]"
               style={FADE_MASK}
             >
               {view === "movers"

@@ -43,6 +43,8 @@ export function HoldingsCard({
   portfolioId,
   unpricedSymbols,
   convertedCurrencies,
+  datesDegraded,
+  ratingsDegraded,
   onPickSymbol,
 }: {
   positions: TickerPosition[];
@@ -55,6 +57,8 @@ export function HoldingsCard({
   portfolioId: string;
   unpricedSymbols: string[];
   convertedCurrencies: string[];
+  datesDegraded: boolean;
+  ratingsDegraded: boolean;
   onPickSymbol: (symbol: string) => void;
 }) {
   const [view, setView] = useState<"list" | "map">("list");
@@ -82,7 +86,7 @@ export function HoldingsCard({
         </div>
       </div>
 
-      {(unpricedSymbols.length > 0 || convertedCurrencies.length > 0) && (
+      {(unpricedSymbols.length > 0 || convertedCurrencies.length > 0 || datesDegraded) && (
         <div className="flex flex-col gap-1.5 border-b border-line px-4 py-2.5 text-[11.5px] leading-relaxed text-fg-fade">
           {unpricedSymbols.length > 0 && (
             <p>
@@ -105,6 +109,13 @@ export function HoldingsCard({
               {" — "}cost basis at each lot&rsquo;s purchase-date rate, market
               value at today&rsquo;s. Your broker shows these in their native
               currency.
+            </p>
+          )}
+          {datesDegraded && (
+            <p>
+              {ratingsDegraded
+                ? "Analyst ratings and upcoming dates are unavailable right now — they return automatically when the data source recovers."
+                : "Upcoming event dates are unavailable right now — analyst ratings are unaffected."}
             </p>
           )}
         </div>
