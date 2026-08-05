@@ -76,9 +76,14 @@ function fitLabel(w: number, h: number, symbol: string, sub: string | null) {
   return null;
 }
 
-// % return at which color saturation maxes out. Anything beyond clamps so a
-// single 800%-gain outlier doesn't squash the rest of the palette.
-const SAT_RANGE = 25;
+/**
+ * Daily move at which tile color saturates, in percent. Fill and the printed
+ * number answer the same question — today — so this is scaled to a *day*, not
+ * to a lifetime return: ±3% is a strong session for a single name, and a
+ * clamp keeps one limit-up outlier from flattening everything else to
+ * neutral. Anything beyond is drawn at full strength.
+ */
+const SAT_RANGE = 3;
 
 function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace("#", "");
@@ -173,9 +178,10 @@ export function AllocationTreemap({
     return out.sort((a, b) => b.market - a.market);
   }, [positions, marketValue, totalMarket, dailyPctBySymbol]);
 
-  function colorFor(gainPct: number | null): string {
-    if (gainPct === null) return colors.tileNeutral;
-    const clamped = Math.max(-SAT_RANGE, Math.min(SAT_RANGE, gainPct));
+  /** Fill follows today's move, matching the figure printed on the tile. */
+  function colorFor(dailyPct: number | null): string {
+    if (dailyPct === null) return colors.tileNeutral;
+    const clamped = Math.max(-SAT_RANGE, Math.min(SAT_RANGE, dailyPct));
     const t = Math.abs(clamped) / SAT_RANGE;
     const endpoint = clamped >= 0 ? colors.tilePos : colors.tileNeg;
     return lerpHex(colors.tileNeutral, endpoint, t);
@@ -201,7 +207,6 @@ export function AllocationTreemap({
       height,
       depth,
       symbol,
-      gainPct,
       dailyPct,
     }: {
       x: number;
@@ -210,17 +215,17 @@ export function AllocationTreemap({
       height: number;
       depth: number;
       symbol?: string;
-      gainPct?: number | null;
       dailyPct?: number | null;
     } = props;
 
     if (depth !== 1 || !symbol) return null;
 
-    const fill = colorFor(gainPct ?? null);
+    const fill = colorFor(dailyPct ?? null);
     const ink = inkFor(fill);
 
     // Ticker over today's move, the pairing a holdings map is scanned for.
-    // Lifetime return stays in the fill, and the tooltip carries the detail.
+    // Size carries weight, fill carries the same daily move as the number,
+    // and lifetime return stays in the tooltip.
     const sub =
       dailyPct !== null && dailyPct !== undefined ? fmtPct(dailyPct) : null;
     const fit = fitLabel(width, height, symbol, sub);
