@@ -41,6 +41,7 @@ import {
   SeriesPoint,
 } from "@/lib/portfolio";
 import { useChartColors } from "@/lib/theme";
+import { fmtMoney, fmtPct, formatBig } from "@/lib/format";
 import { useDisplayName, useDisplayNamesForUids } from "@/lib/users";
 import { usePublishPortfolioOwnership } from "@/lib/portfolio-route";
 import { SharePanel } from "@/components/SharePanel";
@@ -2148,20 +2149,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </div>
   );
-}
-
-function formatBig(n: number): string {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(n);
-}
-
-function fmtMoney(n: number): string {
-  return `$${n.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-}
-function fmtPct(n: number): string {
-  return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 }
 
 function SidePill({ side }: { side: "BUY" | "SELL" }) {
