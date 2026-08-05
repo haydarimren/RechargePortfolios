@@ -52,4 +52,15 @@ describe("computeTodayChange", () => {
     expect(r!.pricedCount).toBe(1);
     expect(r!.usd).toBeCloseTo(2, 6);
   });
+
+  it("skips NaN/Infinity rows", () => {
+    const r = computeTodayChange([
+      { market: 102, dp: 2 },
+      { market: NaN, dp: 5 },
+      { market: Infinity, dp: 5 },
+      { market: 100, dp: NaN },
+    ]);
+    expect(r!.pricedCount).toBe(1);
+    expect(r!.usd).toBeCloseTo(2, 6);
+  });
 });
