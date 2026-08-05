@@ -50,6 +50,7 @@ import { AllocationTreemap } from "@/components/AllocationTreemap";
 import { FriendStack } from "@/components/FriendStack";
 import { PerformancePill } from "@/components/PerformancePill";
 import { TwoLinePLCell } from "@/components/TwoLinePLCell";
+import { LogbookTable } from "@/components/LogbookTable";
 import { TabBar } from "@/components/TabBar";
 import { InsightsTab } from "@/components/InsightsTab";
 import { SyncHistory } from "@/components/SyncHistory";
@@ -1365,113 +1366,7 @@ export default function PortfolioPage({
               />
             </div>
           ) : tab === "logbook" ? (
-            tradeLog.length === 0 ? (
-              <div className="card p-10 text-center text-fg-dim text-sm">
-                No trades yet.
-              </div>
-            ) : isOwner ? (
-              <div className="card overflow-hidden">
-                <div className="hidden md:grid grid-cols-[0.9fr_0.6fr_0.9fr_0.7fr_0.8fr_1fr_1.2fr] gap-4 px-5 py-2 border-b border-line">
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Date</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Side</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Symbol</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Shares</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Price</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Value</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Realized</span>
-                </div>
-                {tradeLog.map((t) => {
-                  const isSell = t.side === "SELL";
-                  return (
-                    <div
-                      key={t.id}
-                      className="grid grid-cols-[1fr_auto] md:grid-cols-[0.9fr_0.6fr_0.9fr_0.7fr_0.8fr_1fr_1.2fr] gap-4 px-5 py-3 border-b border-[#20242c] last:border-b-0"
-                    >
-                      <div className="flex items-center gap-2 md:contents">
-                        <span className="num text-xs text-fg-dim tabular-nums md:text-sm">
-                          {t.date}
-                        </span>
-                        <SidePill side={t.side} />
-                        <button
-                          onClick={() =>
-                            router.push(`/p/${id}/${t.symbol}`)
-                          }
-                          className="text-fg font-semibold text-sm tracking-tight hover:text-accent transition text-left"
-                        >
-                          {t.symbol}
-                        </button>
-                      </div>
-                      <span className="num text-xs text-right text-fg-dim tabular-nums hidden md:block">
-                        {fmtShares(t.shares)}
-                      </span>
-                      <span className="num text-xs text-right text-fg-dim tabular-nums hidden md:block">
-                        {fmtMoney(t.price)}
-                      </span>
-                      <span className="num text-xs text-right text-fg-dim tabular-nums hidden md:block">
-                        {fmtMoney(t.value)}
-                        {isSell && (
-                          <span className="text-fg-fade ml-1">proceeds</span>
-                        )}
-                      </span>
-                      <div className="flex items-center justify-end">
-                        {t.realizedGain === undefined ? (
-                          <span className="num text-xs text-fg-fade tabular-nums">—</span>
-                        ) : (
-                          <TwoLinePLCell
-                            amount={t.realizedGain}
-                            pct={(t.realizedPct ?? 0) * 100}
-                            currency="USD"
-                          />
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="card overflow-hidden">
-                <div className="hidden md:grid grid-cols-[0.9fr_0.6fr_1fr_0.9fr_0.9fr] gap-4 px-5 py-2 border-b border-line">
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Date</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Side</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade">Symbol</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Weight</span>
-                  <span className="text-[10.5px] tracking-[0.1em] uppercase font-medium text-fg-fade text-right">Realized</span>
-                </div>
-                {tradeLog.map((t) => (
-                  <div
-                    key={t.id}
-                    className="grid grid-cols-[1fr_auto] md:grid-cols-[0.9fr_0.6fr_1fr_0.9fr_0.9fr] gap-4 px-5 py-3 items-center border-b border-[#20242c] last:border-b-0"
-                  >
-                    <div className="flex items-center gap-2 md:contents">
-                      <span className="num text-xs text-fg-dim tabular-nums md:text-sm">
-                        {t.date}
-                      </span>
-                      <SidePill side={t.side} />
-                      <button
-                        onClick={() =>
-                          router.push(`/p/${id}/${t.symbol}`)
-                        }
-                        className="text-fg font-semibold text-sm tracking-tight hover:text-accent transition text-left"
-                      >
-                        {t.symbol}
-                      </button>
-                    </div>
-                    <span className="num text-xs text-right text-fg-dim tabular-nums hidden md:block">
-                      {(t.symbolWeightAfter * 100).toFixed(1)}%
-                    </span>
-                    <div className="flex items-center justify-end">
-                      {t.realizedPct === undefined ? (
-                        <span className="num text-xs text-fg-fade tabular-nums">—</span>
-                      ) : (
-                        <span className={`num text-xs tabular-nums font-semibold ${t.realizedPct >= 0 ? "text-pos" : "text-neg"}`}>
-                          {t.realizedPct >= 0 ? "+" : ""}{(t.realizedPct * 100).toFixed(1)}%
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )
+            <LogbookTable tradeLog={tradeLog} isOwner={isOwner} portfolioId={id} />
           ) : positions.length === 0 ? (
             <div className="card p-10 text-center text-fg-dim text-sm">
               No holdings yet.
@@ -2148,18 +2043,5 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <label className="label block mb-1.5">{label}</label>
       {children}
     </div>
-  );
-}
-
-function SidePill({ side }: { side: "BUY" | "SELL" }) {
-  const isSell = side === "SELL";
-  return isSell ? (
-    <span className="inline-flex items-center gap-0.5 text-[11px] font-semibold px-2 py-0.5 rounded-tag bg-neg-soft text-neg">
-      SELL
-    </span>
-  ) : (
-    <span className="inline-flex items-center gap-0.5 text-[11px] font-semibold px-2 py-0.5 rounded-tag bg-pos-soft text-pos">
-      BUY
-    </span>
   );
 }
