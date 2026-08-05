@@ -167,7 +167,17 @@ export function buildAnalystRatings(
     const spread = spreadBySymbol[symbol] ?? undefined;
     // Yahoo's own word wins; Finnhub's spread only fills the gap so a symbol
     // Yahoo doesn't cover still gets a pill instead of a grey "None".
-    const ratingKey = ins?.recommendationKey ?? (spread ? deriveRatingKey(spread) : "none");
+    //
+    // "No rating" reaches us two different ways: Yahoo omits the field, or
+    // Yahoo answers with the literal string "none". The second is the common
+    // one and it is a *defined* value, so `??` alone kept it and skipped the
+    // Finnhub fallback entirely — the reason well-covered symbols like SNEX
+    // and CRDO rendered no pill. Treat both as "Yahoo has nothing".
+    const yahooKey =
+      ins?.recommendationKey && ins.recommendationKey !== "none"
+        ? ins.recommendationKey
+        : undefined;
+    const ratingKey = yahooKey ?? (spread ? deriveRatingKey(spread) : "none");
     // The count must agree with the bar it sits next to, so it comes from the
     // spread whenever there is one.
     const analystCount = spread ? spreadTotal(spread) : ins?.analystCount;

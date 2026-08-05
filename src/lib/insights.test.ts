@@ -198,6 +198,30 @@ describe("buildAnalystRatings with Finnhub spreads", () => {
     const out = buildAnalystRatings(by, price, weight, spreads);
     expect(out.find((r) => r.symbol === "NVDA")!.ratingKey).toBe("strong_buy");
   });
+  // Yahoo answers for plenty of symbols it has no consensus on, and says so
+  // with the literal string "none" rather than by omitting the field. That
+  // is a *defined* value, so `??` kept it and Finnhub never got a look —
+  // real-world symptom: SNEX and CRDO showed no pill despite Finnhub
+  // covering both.
+  it("derives from the spread when Yahoo answers the literal \"none\"", () => {
+    const out = buildAnalystRatings(
+      { SNEX: { recommendationKey: "none", analystCount: 0 } },
+      { SNEX: 76 },
+      { SNEX: 1 },
+      { SNEX: spread({ strongBuy: 3, buy: 3, hold: 2 }) },
+    );
+    expect(out[0].ratingKey).toBe("buy");
+    expect(out[0].analystCount).toBe(8);
+  });
+  it("still reports \"none\" when neither source has a rating", () => {
+    const out = buildAnalystRatings(
+      { XYZ: { recommendationKey: "none" } },
+      { XYZ: 10 },
+      { XYZ: 1 },
+      { XYZ: null },
+    );
+    expect(out[0].ratingKey).toBe("none");
+  });
   it("counts analysts from the spread it draws, not from Yahoo", () => {
     const out = buildAnalystRatings(by, price, weight, spreads);
     // Yahoo says 42, but the bar shows 40 — the number must match the bar.
