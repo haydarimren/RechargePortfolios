@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
   signInWithPopup,
   linkWithPopup,
   linkWithCredential,
@@ -12,16 +13,33 @@ import {
 } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { ensureUserProfile } from "@/lib/users";
+import { resetLinkOutcome } from "@/lib/auth-errors";
 import { useRouter } from "next/navigation";
 import { ThemeToggle } from "@/lib/theme";
+
+/** The card is one component in three modes rather than three routes. */
+type Mode = "signin" | "register" | "reset";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [isRegister, setIsRegister] = useState(false);
+  const [mode, setMode] = useState<Mode>("signin");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+
+  const isRegister = mode === "register";
+  const isReset = mode === "reset";
+
+  // Stale messages from the previous mode are confusing at best and
+  // misleading at worst ("we sent a reset link" sitting above a sign-in
+  // form), so every mode switch clears them.
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setError("");
+    setNotice("");
+  };
 
   // After auth resolves, just push home — the EnrollmentGate handles
   // routing to onboarding for unenrolled users, and useEncryption
@@ -76,6 +94,30 @@ export default function LoginPage() {
     }
   };
 
+  // Password reset. The account password and the encryption key hierarchy
+  // are independent — resetting one does nothing to the other — so there's
+  // no key material to touch here, just the Firebase call.
+  //
+  // Outcome mapping (incl. the deliberate no-account-oracle) lives in
+  // auth-errors.ts.
+  const handleResetRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    setNotice("");
+    try {
+      await sendPasswordResetEmail(auth, email);
+      const out = resetLinkOutcome();
+      setNotice(out.text);
+    } catch (err: unknown) {
+      const out = resetLinkOutcome((err as { code?: string }).code);
+      if (out.kind === "notice") setNotice(out.text);
+      else setError(out.text);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleGoogleSignIn = async () => {
     setLoading(true);
     setError("");
@@ -123,11 +165,17 @@ export default function LoginPage() {
         <div className="w-full max-w-sm animate-fade-up">
           <div className="text-center mb-8">
             <h1 className="text-3xl font-semibold tracking-tight mb-2">
-              {isRegister ? "Create account" : "Welcome back"}
+              {isRegister
+                ? "Create account"
+                : isReset
+                ? "Reset password"
+                : "Welcome back"}
             </h1>
             <p className="text-sm text-fg-dim">
               {isRegister
                 ? "Start tracking your portfolio."
+                : isReset
+                ? "We'll email you a link to set a new one."
                 : "Sign in to continue."}
             </p>
           </div>
@@ -139,7 +187,23 @@ export default function LoginPage() {
               </div>
             )}
 
-            <form onSubmit={handleEmailAuth} className="space-y-3">
+            {notice && (
+              <div className="mb-4 border border-accent/40 bg-accent/10 text-fg text-sm rounded-md p-3 space-y-2">
+                <p>{notice}</p>
+                {/* Someone mid-reset will reasonably fear they're about to
+                    lose their portfolio. They aren't — say so here. */}
+                <p className="text-xs text-fg-dim">
+                  Resetting your password doesn&apos;t affect your encrypted
+                  data. You&apos;ll stay unlocked on this browser; on a new one
+                  you&apos;ll need your 12-word recovery phrase.
+                </p>
+              </div>
+            )}
+
+            <form
+              onSubmit={isReset ? handleResetRequest : handleEmailAuth}
+              className="space-y-3"
+            >
               <div>
                 <label className="label block mb-1.5">Email</label>
                 <input
@@ -151,17 +215,30 @@ export default function LoginPage() {
                   required
                 />
               </div>
-              <div>
-                <label className="label block mb-1.5">Password</label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="field"
-                  required
-                />
-              </div>
+              {!isReset && (
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="label">Password</label>
+                    {mode === "signin" && (
+                      <button
+                        type="button"
+                        onClick={() => switchMode("reset")}
+                        className="text-xs text-fg-dim hover:text-accent underline underline-offset-4 decoration-line transition"
+                      >
+                        Forgot password?
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="field"
+                    required
+                  />
+                </div>
+              )}
               <button
                 type="submit"
                 disabled={loading}
@@ -171,10 +248,16 @@ export default function LoginPage() {
                   ? "…"
                   : isRegister
                   ? "Create account"
+                  : isReset
+                  ? "Send reset link"
                   : "Sign in"}
               </button>
             </form>
 
+            {/* Google is an alternative way to *sign in*; it has no meaning
+                on a form whose only job is to email a link. */}
+            {!isReset && (
+              <>
             <div className="my-5 flex items-center gap-3">
               <div className="flex-1 h-px bg-line" />
               <span className="text-xs text-fg-fade">or</span>
@@ -206,15 +289,23 @@ export default function LoginPage() {
               </svg>
               Continue with Google
             </button>
+              </>
+            )}
           </div>
 
           <p className="mt-5 text-center text-sm text-fg-dim">
-            {isRegister ? "Already have an account? " : "Don't have an account? "}
+            {isReset
+              ? "Remembered it? "
+              : isRegister
+              ? "Already have an account? "
+              : "Don't have an account? "}
             <button
-              onClick={() => setIsRegister(!isRegister)}
+              onClick={() =>
+                switchMode(isRegister || isReset ? "signin" : "register")
+              }
               className="text-fg hover:text-accent underline underline-offset-4 decoration-line transition"
             >
-              {isRegister ? "Sign in" : "Create one"}
+              {isRegister || isReset ? "Sign in" : "Create one"}
             </button>
           </p>
         </div>
