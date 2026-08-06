@@ -29,11 +29,18 @@ import {
 import type { SnapshotV1 } from "@/lib/share-links-math";
 import { SnapshotPortfolioView } from "@/components/SnapshotPortfolioView";
 import { ThemeToggle } from "@/lib/theme";
+import { withTimeout, TimeoutError } from "@/lib/concurrency";
 
 type PageState =
   | { kind: "loading" }
+  | { kind: "stalled" }
   | { kind: "invalid" }
   | { kind: "ready"; snapshot: SnapshotV1; token: string };
+
+/** How long the spinner may run before we offer a retry instead. */
+const STALL_DEADLINE_MS = 8_000;
+/** Deadline on the follow writes — they'd otherwise queue forever mid-stall. */
+const FOLLOW_TIMEOUT_MS = 10_000;
 
 export default function ShareLinkPage({
   params,
@@ -46,18 +53,32 @@ export default function ShareLinkPage({
   const [user, setUser] = useState<User | null>(null);
   const [followBusy, setFollowBusy] = useState(false);
   const [followError, setFollowError] = useState("");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => onAuthStateChanged(auth, setUser), []);
 
   // Load sequence: token → (anonymous) auth → snapshot read → decrypt.
+  //
+  // Resilience contract (the "share link stuck on Loading…" bug): the
+  // membership probe never blocks the snapshot render, and the spinner
+  // never outlives STALL_DEADLINE_MS without offering a retry. With
+  // multi-tab persistence a throttled background tab can hold Firestore's
+  // primary lease and stall this tab's reads indefinitely; the reads
+  // can't be cancelled, so a late success is allowed to upgrade a
+  // stalled state to ready.
   useEffect(() => {
     let cancelled = false;
+    let settled = false;
+    const token = parseShareTokenFromHash(window.location.hash);
+    if (!token) {
+      setState({ kind: "invalid" });
+      return;
+    }
+    const finish = (s: PageState) => {
+      settled = true;
+      if (!cancelled) setState(s);
+    };
     (async () => {
-      const token = parseShareTokenFromHash(window.location.hash);
-      if (!token) {
-        setState({ kind: "invalid" });
-        return;
-      }
       try {
         // Wait for Firebase to restore any persisted session before
         // deciding whether to create an anonymous one. On a cold page
@@ -70,30 +91,35 @@ export default function ShareLinkPage({
         if (!auth.currentUser) await signInAnonymously(auth);
         // Membership probe for real accounts: owner/followers can read
         // the portfolio doc; anyone else gets permission-denied. Members
-        // belong on the real page.
+        // belong on the real page. Fire-and-forget — the probe is an
+        // optimization and must not gate the snapshot, so a member may
+        // glimpse the snapshot before the redirect lands.
         if (auth.currentUser && !auth.currentUser.isAnonymous) {
-          try {
-            const probe = await getDoc(doc(db, "portfolios", id));
-            if (probe.exists()) {
-              router.replace(`/p/${id}`);
-              return;
+          void (async () => {
+            try {
+              const probe = await getDoc(doc(db, "portfolios", id));
+              if (!cancelled && probe.exists()) router.replace(`/p/${id}`);
+            } catch {
+              // permission denied — not a member; the snapshot stands.
             }
-          } catch {
-            // permission denied — not a member; carry on to the snapshot.
-          }
+          })();
         }
         const snapshot = await readSnapshotByToken(id, token);
-        if (!cancelled) setState({ kind: "ready", snapshot, token });
+        finish({ kind: "ready", snapshot, token });
       } catch {
         // Missing doc, revoked link, or tampered ciphertext — one
         // generic state, deliberately indistinguishable (no oracle).
-        if (!cancelled) setState({ kind: "invalid" });
+        finish({ kind: "invalid" });
       }
     })();
+    const stallTimer = setTimeout(() => {
+      if (!settled && !cancelled) setState({ kind: "stalled" });
+    }, STALL_DEADLINE_MS);
     return () => {
       cancelled = true;
+      clearTimeout(stallTimer);
     };
-  }, [id, router]);
+  }, [id, router, attempt]);
 
   const handleFollow = async () => {
     if (state.kind !== "ready") return;
@@ -107,12 +133,22 @@ export default function ShareLinkPage({
     }
     setFollowBusy(true);
     try {
-      await redeemFollow(id, state.token, user.uid);
+      // Deadline because these are server-acked writes that can queue
+      // forever behind a stalled primary tab. A timed-out redeem may
+      // still land later — retrying is safe (setDoc overwrite +
+      // arrayUnion are both idempotent, and the rules accept a
+      // sharedWith "append" that changes nothing).
+      await withTimeout(
+        redeemFollow(id, state.token, user.uid),
+        FOLLOW_TIMEOUT_MS,
+      );
       setPendingLinkToken(id, state.token);
       router.push(`/p/${id}`);
-    } catch {
+    } catch (err) {
       setFollowError(
-        "Couldn't follow — the link may have been revoked. Try reloading.",
+        err instanceof TimeoutError
+          ? "Couldn't reach the server — check your connection and try again."
+          : "Couldn't follow — the link may have been revoked. Try reloading.",
       );
       setFollowBusy(false);
     }
@@ -130,6 +166,24 @@ export default function ShareLinkPage({
         {state.kind === "loading" && (
           <div className="min-h-[40vh] flex items-center justify-center text-sm text-fg-dim">
             Loading…
+          </div>
+        )}
+        {state.kind === "stalled" && (
+          <div className="min-h-[40vh] flex flex-col items-center justify-center gap-3 text-center">
+            <p className="text-lg text-fg">Still loading…</p>
+            <p className="text-sm text-fg-dim max-w-sm">
+              The connection is slow to respond. This usually clears on a
+              retry.
+            </p>
+            <button
+              onClick={() => {
+                setState({ kind: "loading" });
+                setAttempt((a) => a + 1);
+              }}
+              className="btn-primary mt-2"
+            >
+              Try again
+            </button>
           </div>
         )}
         {state.kind === "invalid" && (
