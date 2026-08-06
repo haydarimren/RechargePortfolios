@@ -1,17 +1,23 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
   signInWithPopup,
   linkWithPopup,
+  signInWithRedirect,
+  linkWithRedirect,
+  getRedirectResult,
+  signInWithCredential,
   linkWithCredential,
   EmailAuthProvider,
   GoogleAuthProvider,
 } from "firebase/auth";
+import type { FirebaseError } from "firebase/app";
 import { auth } from "@/lib/firebase";
+import { isEmbeddedWebView } from "@/lib/browser-env";
 import { ensureUserProfile } from "@/lib/users";
 import { resetLinkOutcome } from "@/lib/auth-errors";
 import { useRouter } from "next/navigation";
@@ -40,6 +46,65 @@ export default function LoginPage() {
     setError("");
     setNotice("");
   };
+
+  // Google refuses OAuth inside embedded webviews (Instagram/Facebook
+  // in-app browsers etc.) with a raw 403 — pre-empt it with a hint.
+  // Set in an effect so the server render matches the first client one.
+  const [inWebView, setInWebView] = useState(false);
+  useEffect(() => {
+    setInWebView(isEmbeddedWebView(navigator.userAgent));
+  }, []);
+
+  // Complete a Google sign-in that fell back to the full-page redirect
+  // flow (popup blocked). getRedirectResult resolves null when no
+  // redirect is pending, so this is a no-op on ordinary loads.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await getRedirectResult(auth);
+        if (!result) return;
+        if (!cancelled) setLoading(true);
+        await ensureUserProfile(result.user);
+        router.push("/");
+      } catch (err: unknown) {
+        // A linkWithRedirect return where the Google account already has
+        // its own Recharge account: the error carries the credential —
+        // sign in with it directly instead of a second round-trip. (The
+        // anonymous session is discarded; it owned nothing.)
+        const code = (err as { code?: string }).code;
+        if (
+          code === "auth/credential-already-in-use" ||
+          code === "auth/email-already-in-use"
+        ) {
+          try {
+            const cred = GoogleAuthProvider.credentialFromError(
+              err as FirebaseError,
+            );
+            if (cred) {
+              const user = (await signInWithCredential(auth, cred)).user;
+              await ensureUserProfile(user);
+              router.push("/");
+              return;
+            }
+          } catch {
+            // fall through to the generic message below
+          }
+        }
+        if (!cancelled) {
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Failed to sign in with Google",
+          );
+          setLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   // After auth resolves, just push home — the EnrollmentGate handles
   // routing to onboarding for unenrolled users, and useEncryption
@@ -144,6 +209,31 @@ export default function LoginPage() {
       await ensureUserProfile(user);
       router.push("/");
     } catch (err: unknown) {
+      const code = (err as { code?: string }).code;
+      // Popup unusable (blocker, or an environment that can't host
+      // one): fall back to the full-page redirect flow, completed on
+      // return by the getRedirectResult effect above. Redirect is safe
+      // here because authDomain is same-origin on proxied hosts (see
+      // firebase.ts) — cross-origin redirect is the flow WebKit's
+      // partitioning breaks.
+      if (
+        code === "auth/popup-blocked" ||
+        code === "auth/operation-not-supported-in-this-environment"
+      ) {
+        const anon = auth.currentUser?.isAnonymous ? auth.currentUser : null;
+        try {
+          if (anon) await linkWithRedirect(anon, new GoogleAuthProvider());
+          else await signInWithRedirect(auth, new GoogleAuthProvider());
+          return; // navigating away
+        } catch (redirectErr: unknown) {
+          setError(
+            redirectErr instanceof Error
+              ? redirectErr.message
+              : "Failed to sign in with Google",
+          );
+          return;
+        }
+      }
       setError(
         err instanceof Error ? err.message : "Failed to sign in with Google"
       );
@@ -289,6 +379,13 @@ export default function LoginPage() {
               </svg>
               Continue with Google
             </button>
+
+            {inWebView && (
+              <p className="mt-3 text-xs text-fg-dim text-center">
+                Google sign-in doesn&apos;t work inside in-app browsers.
+                Open this page in Safari or Chrome, or use email above.
+              </p>
+            )}
               </>
             )}
           </div>
