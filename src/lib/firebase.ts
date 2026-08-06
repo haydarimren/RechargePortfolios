@@ -8,9 +8,35 @@ import {
 } from "firebase/firestore";
 import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
 
+// Hosts where /__/auth/* is reverse-proxied to the Firebase auth handler
+// (see rewrites in next.config.ts). On these origins the whole OAuth
+// popup/redirect dance is same-origin with the app, which is what stops
+// WebKit's storage partitioning from severing the round-trip — the
+// "Google sign-in broken on every iPhone" bug.
+//
+// A host may ONLY be added here after BOTH console steps are done:
+//   1. Google Cloud console → APIs & Services → Credentials → the
+//      auto-created OAuth "Web client" → Authorized redirect URIs →
+//      add https://<host>/__/auth/handler
+//   2. Firebase console → Authentication → Settings → Authorized
+//      domains → <host> is listed
+// Listing a host without step 1 breaks Google sign-in there for
+// EVERYONE (redirect_uri_mismatch), desktop included.
+//
+// Unlisted hosts (Vercel previews, localhost — whose redirect URIs
+// can't/needn't be registered; the SDK also forces https on authDomain,
+// which rules localhost out anyway) fall back to the cross-origin
+// default: sign-in there works on desktop browsers but not on iOS.
+const AUTH_PROXY_HOSTS = new Set(["recharge-portfolios.vercel.app"]);
+
+const authDomain =
+  typeof window !== "undefined" && AUTH_PROXY_HOSTS.has(window.location.host)
+    ? window.location.host
+    : "shared-portfolio-manager.firebaseapp.com";
+
 const firebaseConfig = {
   apiKey: "AIzaSyAQgpOsdm8XjVeWYvahfhH7OdSeRptci7o",
-  authDomain: "shared-portfolio-manager.firebaseapp.com",
+  authDomain,
   projectId: "shared-portfolio-manager",
   storageBucket: "shared-portfolio-manager.firebasestorage.app",
   messagingSenderId: "61362598574",
